@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/relief-core",
+    "crates/relief-render",
 ]
 
 [workspace.package]

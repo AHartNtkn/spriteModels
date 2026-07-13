@@ -1,6 +1,6 @@
 use num_rational::Ratio;
 
-use crate::{Chart, ComponentMap, DecodedTexel, rational::abs_ratio};
+use crate::{Chart, ComponentId, ComponentMap, DecodedTexel, SourcePoint, rational::abs_ratio};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReliefField {
@@ -59,6 +59,23 @@ impl ReliefField {
         }
 
         let component = self.components.at(cell_x as u32, cell_y as u32)?;
+        self.sample_component(SourcePoint::new(x, y), component)
+    }
+
+    pub fn foreground_cell(&self, x: u32, y: u32) -> Option<ForegroundCell<'_>> {
+        let component = self.components.at(x, y)?;
+        Some(ForegroundCell {
+            field: self,
+            x,
+            y,
+            component,
+        })
+    }
+
+    fn sample_component(&self, point: SourcePoint, component: ComponentId) -> Option<Ratio<i64>> {
+        let SourcePoint { x, y } = point;
+        let cell_x = x.to_integer();
+        let cell_y = y.to_integer();
         let mut weighted = Ratio::from_integer(0);
         let mut total = Ratio::from_integer(0);
 
@@ -84,5 +101,28 @@ impl ReliefField {
         }
 
         (total != Ratio::from_integer(0)).then(|| weighted / total)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ForegroundCell<'a> {
+    field: &'a ReliefField,
+    x: u32,
+    y: u32,
+    component: ComponentId,
+}
+
+impl ForegroundCell<'_> {
+    pub fn sample_closure(&self, point: SourcePoint) -> Option<Ratio<i64>> {
+        let left = Ratio::from_integer(i64::from(self.x));
+        let right = Ratio::from_integer(i64::from(self.x) + 1);
+        let top = Ratio::from_integer(i64::from(self.y));
+        let bottom = Ratio::from_integer(i64::from(self.y) + 1);
+
+        if point.x < left || point.x > right || point.y < top || point.y > bottom {
+            return None;
+        }
+
+        self.field.sample_component(point, self.component)
     }
 }
