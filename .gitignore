@@ -1,2 +1,7 @@
 .worktrees/
 .superpowers/
+/target/
+*.depthsprite.tmp
+*.png.tmp
+.idea/
+.vscode/
