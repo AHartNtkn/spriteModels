@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/desktop-app",
     "crates/depthsprite-format",
     "crates/fixture-gen",
     "crates/relief-core",

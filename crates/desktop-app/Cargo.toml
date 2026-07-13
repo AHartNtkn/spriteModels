@@ -1,0 +1,27 @@
+[package]
+name = "desktop-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+crc32fast.workspace = true
+depthsprite-format = { path = "../depthsprite-format" }
+eframe.workspace = true
+num-rational.workspace = true
+png.workspace = true
+relief-core = { path = "../relief-core" }
+relief-render = { path = "../relief-render" }
+rfd.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "depthsprite"
+path = "src/main.rs"
