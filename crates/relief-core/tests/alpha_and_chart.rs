@@ -20,11 +20,34 @@ fn alpha_is_background_or_exact_eighth_pixel_relief() {
 }
 
 #[test]
+fn bounds_exposes_validated_dimensions_read_only() {
+    let bounds = Bounds::new(32, 16, 24).unwrap();
+
+    assert_eq!(bounds.width(), 32);
+    assert_eq!(bounds.height(), 16);
+    assert_eq!(bounds.depth(), 24);
+}
+
+#[test]
+fn bounds_rejects_zero_in_every_dimension() {
+    for dimensions in [(0, 1, 1), (1, 0, 1), (1, 1, 0)] {
+        assert_eq!(
+            Bounds::new(dimensions.0, dimensions.1, dimensions.2),
+            Err(ChartError::ZeroBounds)
+        );
+    }
+}
+
+#[test]
 fn canonical_dimensions_come_only_from_integer_bounds() {
     let bounds = Bounds::new(32, 16, 24).unwrap();
+
     assert_eq!(CanonicalView::Front.dimensions(bounds), (32, 16));
+    assert_eq!(CanonicalView::Back.dimensions(bounds), (32, 16));
     assert_eq!(CanonicalView::Left.dimensions(bounds), (24, 16));
+    assert_eq!(CanonicalView::Right.dimensions(bounds), (24, 16));
     assert_eq!(CanonicalView::Top.dimensions(bounds), (32, 24));
+    assert_eq!(CanonicalView::Bottom.dimensions(bounds), (32, 24));
 }
 
 #[test]
@@ -39,4 +62,21 @@ fn chart_rejects_dimensions_that_disagree_with_bounds() {
             actual: (2, 2)
         }
     );
+}
+
+#[test]
+fn chart_rejects_any_non_exact_texel_count() {
+    let bounds = Bounds::new(2, 1, 3).unwrap();
+
+    for texel_count in [5, 7] {
+        let error = Chart::from_rgba(
+            bounds,
+            CanonicalView::Top,
+            2,
+            3,
+            vec![[0, 0, 0, 0]; texel_count],
+        )
+        .unwrap_err();
+        assert_eq!(error, ChartError::PixelCount);
+    }
 }

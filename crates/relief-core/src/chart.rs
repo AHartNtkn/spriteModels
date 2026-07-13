@@ -2,11 +2,24 @@ use thiserror::Error;
 
 use crate::{DecodedTexel, decode_rgba};
 
+/// Validated, nonzero model dimensions.
+///
+/// Callers cannot bypass validation with a struct literal:
+///
+/// ```compile_fail
+/// use relief_core::Bounds;
+///
+/// let _ = Bounds {
+///     width: 0,
+///     height: 1,
+///     depth: 1,
+/// };
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Bounds {
-    pub width: u32,
-    pub height: u32,
-    pub depth: u32,
+    width: u32,
+    height: u32,
+    depth: u32,
 }
 
 impl Bounds {
@@ -19,6 +32,18 @@ impl Bounds {
             height,
             depth,
         })
+    }
+
+    pub fn width(self) -> u32 {
+        self.width
+    }
+
+    pub fn height(self) -> u32 {
+        self.height
+    }
+
+    pub fn depth(self) -> u32 {
+        self.depth
     }
 }
 
@@ -35,9 +60,9 @@ pub enum CanonicalView {
 impl CanonicalView {
     pub fn dimensions(self, bounds: Bounds) -> (u32, u32) {
         match self {
-            Self::Front | Self::Back => (bounds.width, bounds.height),
-            Self::Left | Self::Right => (bounds.depth, bounds.height),
-            Self::Top | Self::Bottom => (bounds.width, bounds.depth),
+            Self::Front | Self::Back => (bounds.width(), bounds.height()),
+            Self::Left | Self::Right => (bounds.depth(), bounds.height()),
+            Self::Top | Self::Bottom => (bounds.width(), bounds.depth()),
         }
     }
 
