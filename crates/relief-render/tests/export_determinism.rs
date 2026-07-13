@@ -3,7 +3,10 @@ use std::io::{Cursor, Read};
 use flate2::read::ZlibDecoder;
 use num_rational::Ratio;
 use relief_core::{Bounds, CanonicalView, Chart, SourcePoint};
-use relief_render::{DirectionCount, SheetError, SheetRequest, encode_png, render_sheet};
+use relief_render::{
+    DirectionCount, RenderDiagnostic, RenderRequest, SheetError, SheetRequest, encode_png,
+    render_model, render_sheet,
+};
 
 fn flat_chart(bounds: Bounds, view: CanonicalView, rgb: [u8; 3]) -> Chart {
     let (width, height) = view.dimensions(bounds);
@@ -116,6 +119,87 @@ fn eight_targets_are_exactly_every_second_sixteen_target() {
         assert_eq!(eight.target_view(index), sixteen.target_view(index * 2));
     }
     assert!(eight.target_view(8).is_none());
+}
+
+#[test]
+fn sheet_aggregates_diagnostics_and_maps_pixel_coordinates_without_changing_pixels() {
+    let bounds = Bounds::new(1, 1, 1).unwrap();
+    let charts = vec![
+        flat_chart(bounds, CanonicalView::Front, [220, 40, 40]),
+        flat_chart(bounds, CanonicalView::Front, [40, 220, 40]),
+    ];
+    let request = SheetRequest::new(DirectionCount::Eight, 2, 3, 1).unwrap();
+    let frame_side = 65;
+    let cell_side = frame_side * request.integer_scale() + 2 * request.padding();
+    let sheet = render_sheet(&charts, bounds, &request).unwrap();
+    let mut expected_diagnostics = Vec::new();
+
+    for direction in 0..request.direction_count().frame_count() {
+        let frame = render_model(
+            &charts,
+            &RenderRequest::new(
+                frame_side,
+                frame_side,
+                request.target_view(direction).unwrap(),
+            ),
+        )
+        .unwrap();
+        let cell_x = direction as u32 * cell_side + request.padding();
+
+        for diagnostic in frame.diagnostics() {
+            match diagnostic {
+                RenderDiagnostic::EqualDepthColorConflict {
+                    x,
+                    y,
+                    first,
+                    second,
+                } => {
+                    for scale_y in 0..request.integer_scale() {
+                        for scale_x in 0..request.integer_scale() {
+                            expected_diagnostics.push(RenderDiagnostic::EqualDepthColorConflict {
+                                x: cell_x + x * request.integer_scale() + scale_x,
+                                y: request.padding() + y * request.integer_scale() + scale_y,
+                                first: *first,
+                                second: *second,
+                            });
+                        }
+                    }
+                }
+                other => expected_diagnostics.push(other.clone()),
+            }
+        }
+
+        for source_y in 0..frame_side {
+            for source_x in 0..frame_side {
+                for scale_y in 0..request.integer_scale() {
+                    for scale_x in 0..request.integer_scale() {
+                        assert_eq!(
+                            sheet.rgba_at(
+                                cell_x + source_x * request.integer_scale() + scale_x,
+                                request.padding() + source_y * request.integer_scale() + scale_y,
+                            ),
+                            frame.rgba_at(source_x, source_y),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    expected_diagnostics.sort();
+    expected_diagnostics.dedup();
+    assert!(
+        expected_diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            RenderDiagnostic::EqualDepthColorConflict { .. }
+        ))
+    );
+    assert!(
+        expected_diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic, RenderDiagnostic::InsufficientCoverage { .. }))
+    );
+    assert_eq!(sheet.diagnostics(), expected_diagnostics);
 }
 
 #[test]

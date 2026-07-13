@@ -27,3 +27,8 @@ pub enum RenderDiagnostic {
         total_pixels: u32,
     },
 }
+
+pub(crate) fn normalize_diagnostics(diagnostics: &mut Vec<RenderDiagnostic>) {
+    diagnostics.sort();
+    diagnostics.dedup();
+}

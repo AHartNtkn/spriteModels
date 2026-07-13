@@ -5,7 +5,7 @@ use std::{
 
 use depthsprite_format::load_path;
 use relief_core::{Bounds, CanonicalView, DecodedTexel};
-use relief_render::{RenderRequest, TargetView, render_model};
+use relief_render::{RenderDiagnostic, RenderRequest, TargetView, render_model};
 
 const TOP_RGB: [u8; 3] = [216, 156, 85];
 const FRONT_RGB: [u8; 3] = [144, 76, 52];
@@ -15,6 +15,25 @@ fn asset(name: &str) -> PathBuf {
         .join("../..")
         .join("assets/examples")
         .join(name)
+}
+
+fn is_foreground(chart: &relief_core::Chart, x: i32, y: i32) -> bool {
+    let (width, height) = chart.view().dimensions(chart.bounds());
+    x >= 0
+        && y >= 0
+        && x < width as i32
+        && y < height as i32
+        && matches!(
+            chart.texel(x as u32, y as u32),
+            Some(DecodedTexel::Relief { .. })
+        )
+}
+
+fn is_eight_neighbor_boundary(chart: &relief_core::Chart, x: i32, y: i32) -> bool {
+    is_foreground(chart, x, y)
+        && (-1..=1).any(|dy| {
+            (-1..=1).any(|dx| (dx != 0 || dy != 0) && !is_foreground(chart, x + dx, y + dy))
+        })
 }
 
 #[test]
@@ -55,6 +74,7 @@ fn generated_bowl_has_exact_two_view_schema_radial_extrema_and_symmetry() {
         })
     );
     let mut radial_depths = BTreeMap::new();
+    let mut central_plateau = Vec::new();
     for y in 0..32 {
         for x in 0..32 {
             let dx = 2 * x as i32 + 1 - 32;
@@ -66,6 +86,12 @@ fn generated_bowl_has_exact_two_view_schema_radial_extrema_and_symmetry() {
                 "radius-14 mask mismatch at ({x}, {y})"
             );
             if let Some(DecodedTexel::Relief { eighths, .. }) = top.texel(x, y) {
+                if is_eight_neighbor_boundary(top, x as i32, y as i32) {
+                    assert_eq!(eighths, 0, "8-neighbor boundary must be zero at ({x}, {y})");
+                }
+                if eighths == 64 {
+                    central_plateau.push((x, y));
+                }
                 if let Some(existing) = radial_depths.get(&distance_squared) {
                     assert_eq!(*existing, eighths, "equal radii must have equal relief");
                 } else {
@@ -84,12 +110,17 @@ fn generated_bowl_has_exact_two_view_schema_radial_extrema_and_symmetry() {
             .zip(radial_depths.values().copied().skip(1))
             .all(|(inner, outer)| inner >= outer)
     );
+    assert_eq!(
+        central_plateau,
+        vec![(15, 15), (16, 15), (15, 16), (16, 16)]
+    );
 
     assert!(front.texels().iter().all(|texel| matches!(
         texel,
         DecodedTexel::Background | DecodedTexel::Relief { rgb: FRONT_RGB, .. }
     )));
     let mut column_heights = Vec::new();
+    let mut column_relief = Vec::new();
     for y in 0..16 {
         for x in 0..32 {
             assert_eq!(front.texel(x, y), front.texel(31 - x, y));
@@ -99,19 +130,53 @@ fn generated_bowl_has_exact_two_view_schema_radial_extrema_and_symmetry() {
         let occupied: Vec<_> = (0..16)
             .filter(|y| matches!(front.texel(x, *y), Some(DecodedTexel::Relief { .. })))
             .collect();
-        assert_eq!(occupied.first(), Some(&2));
-        assert!(occupied.windows(2).all(|pair| pair[1] == pair[0] + 1));
+        let doubled_offset = (2 * x as i32 + 1 - 32).unsigned_abs();
+        let expected_height =
+            ((31_u32.pow(2) - doubled_offset.pow(2)) * 10 / 31_u32.pow(2)).saturating_sub(1);
+        assert_eq!(occupied, (2..=4 + expected_height).collect::<Vec<_>>());
         column_heights.push(occupied.len());
+        let reliefs = occupied
+            .iter()
+            .map(|y| match front.texel(x, *y) {
+                Some(DecodedTexel::Relief { eighths, .. }) => eighths,
+                _ => unreachable!("occupied texel is foreground"),
+            })
+            .collect::<Vec<_>>();
+        assert!(reliefs.windows(2).all(|pair| pair[0] == pair[1]));
+        let rounded_root = (0_u32..=32)
+            .min_by_key(|candidate| {
+                (*candidate)
+                    .pow(2)
+                    .abs_diff(32_u32.pow(2) - doubled_offset.pow(2))
+            })
+            .unwrap();
+        assert_eq!(reliefs[0], ((32 - rounded_root) * 4) as u8);
+        column_relief.push(reliefs[0]);
     }
     assert_eq!(
         column_heights,
         column_heights.iter().rev().copied().collect::<Vec<_>>()
     );
     assert!(column_heights[15] > column_heights[0]);
-    assert!(front.texels().iter().any(|texel| matches!(
-        texel,
-        DecodedTexel::Relief { eighths, .. } if *eighths > 0
-    )));
+    assert!(
+        column_heights
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            >= 4
+    );
+    assert_eq!(
+        column_relief,
+        column_relief.iter().rev().copied().collect::<Vec<_>>()
+    );
+    assert!(
+        column_relief[..16]
+            .windows(2)
+            .all(|pair| pair[0] >= pair[1])
+    );
+    assert_eq!(column_relief.iter().copied().min(), Some(0));
+    assert_eq!(column_relief.iter().copied().max(), Some(96));
 }
 
 #[test]
@@ -148,10 +213,12 @@ fn two_chart_bowl_has_front_near_rim_and_top_recessed_visible_basin() {
     )
     .unwrap();
 
-    let rim = frame.owner_at(48, 38).expect("near rim");
+    let rim = frame.owner_at(48, 67).expect("near rim");
     let basin = frame.owner_at(48, 48).expect("recessed basin");
     assert_eq!(rim.view, CanonicalView::Front);
     assert_eq!(basin.view, CanonicalView::Top);
+    assert_eq!((rim.source_x, rim.source_y), (27, 2));
+    assert_eq!((basin.source_x, basin.source_y), (16, 16));
     let front = model
         .charts()
         .iter()
@@ -162,16 +229,22 @@ fn two_chart_bowl_has_front_near_rim_and_top_recessed_visible_basin() {
         .iter()
         .find(|chart| chart.view() == CanonicalView::Top)
         .unwrap();
-    assert!(matches!(
-        front.texel(rim.source_x, rim.source_y),
-        Some(DecodedTexel::Relief { rgb: FRONT_RGB, eighths }) if eighths > 0
-    ));
-    assert!(matches!(
-        top.texel(basin.source_x, basin.source_y),
-        Some(DecodedTexel::Relief { rgb: TOP_RGB, eighths }) if eighths > 0
-    ));
     assert_eq!(
-        frame.rgba_at(48, 38),
+        front.texel(rim.source_x, rim.source_y),
+        Some(DecodedTexel::Relief {
+            rgb: FRONT_RGB,
+            eighths: 40,
+        })
+    );
+    assert_eq!(
+        top.texel(basin.source_x, basin.source_y),
+        Some(DecodedTexel::Relief {
+            rgb: TOP_RGB,
+            eighths: 64,
+        })
+    );
+    assert_eq!(
+        frame.rgba_at(48, 67),
         [FRONT_RGB[0], FRONT_RGB[1], FRONT_RGB[2], 255]
     );
     assert_eq!(
@@ -179,4 +252,8 @@ fn two_chart_bowl_has_front_near_rim_and_top_recessed_visible_basin() {
         [TOP_RGB[0], TOP_RGB[1], TOP_RGB[2], 255]
     );
     assert_eq!(frame.rgba_at(0, 0), [0, 0, 0, 0]);
+    assert!(!frame.diagnostics().iter().any(|diagnostic| matches!(
+        diagnostic,
+        RenderDiagnostic::ReliefBeyondOpposingPlane { .. }
+    )));
 }

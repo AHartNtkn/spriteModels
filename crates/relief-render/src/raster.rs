@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use num_rational::Ratio;
 use relief_core::{CanonicalView, Chart, DecodedTexel, ReliefField, SourcePoint, WarpedSample};
+
+use crate::diagnostic::normalize_diagnostics;
 use thiserror::Error;
 
 use crate::{
@@ -261,8 +263,7 @@ fn record_relief_bound_diagnostics(charts: &[Chart], diagnostics: &mut Vec<Rende
 }
 
 fn finish_diagnostics(frame: &mut FrameBuffer) {
-    frame.diagnostics.sort();
-    frame.diagnostics.dedup();
+    normalize_diagnostics(&mut frame.diagnostics);
 }
 
 fn projected_extents(charts: &[Chart], target: &TargetView) -> Option<TargetExtents> {

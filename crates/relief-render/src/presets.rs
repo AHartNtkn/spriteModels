@@ -83,7 +83,15 @@ impl TargetView {
     }
 
     pub fn bowl_acceptance() -> Self {
-        Self::isometric_v1()
+        Self::from_camera(CameraBasis::new(
+            [Ratio::new(1, 2), ratio_zero(), Ratio::new(1, 2)],
+            [
+                Ratio::from_integer(1),
+                Ratio::new(1, 2),
+                Ratio::from_integer(-1),
+            ],
+            integer_vector(-1, 4, 1),
+        ))
     }
 
     pub fn preset_version(&self) -> u32 {

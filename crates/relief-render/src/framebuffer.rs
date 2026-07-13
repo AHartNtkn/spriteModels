@@ -66,23 +66,12 @@ impl FrameBuffer {
         }
         let key = self.keys[(y * self.width + x) as usize].as_ref()?;
         Some(FragmentOwner {
-            view: view_from_rank(key.chart_rank),
+            view: CanonicalView::from_rank(key.chart_rank)
+                .expect("fragment keys only use canonical chart ranks"),
             depth: key.depth,
             source_y: key.source_y,
             source_x: key.source_x,
         })
-    }
-}
-
-fn view_from_rank(rank: u8) -> CanonicalView {
-    match rank {
-        0 => CanonicalView::Front,
-        1 => CanonicalView::Right,
-        2 => CanonicalView::Back,
-        3 => CanonicalView::Left,
-        4 => CanonicalView::Top,
-        5 => CanonicalView::Bottom,
-        _ => unreachable!("fragment keys only use canonical chart ranks"),
     }
 }
 

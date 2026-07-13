@@ -2,7 +2,11 @@ use num_rational::Ratio;
 use relief_core::{Bounds, Chart};
 use thiserror::Error;
 
-use crate::{CameraBasis, FrameBuffer, RenderError, RenderRequest, TargetView, render_model};
+use crate::diagnostic::normalize_diagnostics;
+use crate::{
+    CameraBasis, FrameBuffer, RenderDiagnostic, RenderError, RenderRequest, TargetView,
+    render_model,
+};
 
 const MAX_RELIEF_EIGHTHS: u32 = 254;
 const RELIEF_MARGIN_PIXELS: u32 = MAX_RELIEF_EIGHTHS.div_ceil(8);
@@ -168,8 +172,47 @@ pub fn render_sheet(
             request.padding,
             request.integer_scale,
         );
+        append_diagnostics(
+            frame.diagnostics(),
+            &mut sheet.diagnostics,
+            index as u32 * cell_side + request.padding,
+            request.padding,
+            request.integer_scale,
+        );
     }
+    normalize_diagnostics(&mut sheet.diagnostics);
     Ok(sheet)
+}
+
+fn append_diagnostics(
+    source: &[RenderDiagnostic],
+    destination: &mut Vec<RenderDiagnostic>,
+    destination_x: u32,
+    destination_y: u32,
+    scale: u32,
+) {
+    for diagnostic in source {
+        if let RenderDiagnostic::EqualDepthColorConflict {
+            x,
+            y,
+            first,
+            second,
+        } = diagnostic
+        {
+            for scale_y in 0..scale {
+                for scale_x in 0..scale {
+                    destination.push(RenderDiagnostic::EqualDepthColorConflict {
+                        x: destination_x + x * scale + scale_x,
+                        y: destination_y + y * scale + scale_y,
+                        first: *first,
+                        second: *second,
+                    });
+                }
+            }
+        } else {
+            destination.push(diagnostic.clone());
+        }
+    }
 }
 
 fn target_v1((sin_numerator, cos_numerator): (i64, i64)) -> TargetView {

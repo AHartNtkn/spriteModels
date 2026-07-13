@@ -76,6 +76,57 @@ fn v1_isometric_basis_is_exact_and_exposes_front_right_top_only() {
 }
 
 #[test]
+fn bowl_acceptance_depth_is_the_cross_product_of_its_projection_rows() {
+    let bounds = Bounds::new(32, 16, 32).unwrap();
+    let target = TargetView::bowl_acceptance();
+    let warp = target
+        .warp_coefficients(CanonicalView::Front, bounds)
+        .unwrap();
+    let origin = warp.apply(
+        SourcePoint::new(Ratio::from_integer(0), Ratio::from_integer(0)),
+        Ratio::from_integer(0),
+    );
+    let world_x = warp.apply(
+        SourcePoint::new(Ratio::from_integer(1), Ratio::from_integer(0)),
+        Ratio::from_integer(0),
+    );
+    let world_y = warp.apply(
+        SourcePoint::new(Ratio::from_integer(0), Ratio::from_integer(1)),
+        Ratio::from_integer(0),
+    );
+    let world_z = warp.apply(
+        SourcePoint::new(Ratio::from_integer(0), Ratio::from_integer(0)),
+        Ratio::from_integer(8),
+    );
+    let screen_right = [
+        world_x.screen_x - origin.screen_x,
+        world_y.screen_x - origin.screen_x,
+        world_z.screen_x - origin.screen_x,
+    ];
+    let screen_down = [
+        world_x.screen_y - origin.screen_y,
+        world_y.screen_y - origin.screen_y,
+        world_z.screen_y - origin.screen_y,
+    ];
+    let depth = [
+        world_x.depth - origin.depth,
+        world_y.depth - origin.depth,
+        world_z.depth - origin.depth,
+    ];
+    let cross = [
+        screen_right[1] * screen_down[2] - screen_right[2] * screen_down[1],
+        screen_right[2] * screen_down[0] - screen_right[0] * screen_down[2],
+        screen_right[0] * screen_down[1] - screen_right[1] * screen_down[0],
+    ];
+
+    for index in 0..3 {
+        assert_eq!(depth[index], cross[index] * 4);
+    }
+    assert!(target.is_front_facing(CanonicalView::Front));
+    assert!(target.is_front_facing(CanonicalView::Top));
+}
+
+#[test]
 fn rational_camera_factory_derives_back_left_and_bottom_mirroring() {
     let bounds = Bounds::new(2, 3, 4).unwrap();
     let source = SourcePoint::new(Ratio::from_integer(1), Ratio::from_integer(2));

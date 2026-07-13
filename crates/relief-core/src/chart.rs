@@ -58,6 +58,18 @@ pub enum CanonicalView {
 }
 
 impl CanonicalView {
+    pub const fn from_rank(rank: u8) -> Option<Self> {
+        match rank {
+            0 => Some(Self::Front),
+            1 => Some(Self::Right),
+            2 => Some(Self::Back),
+            3 => Some(Self::Left),
+            4 => Some(Self::Top),
+            5 => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+
     pub fn dimensions(self, bounds: Bounds) -> (u32, u32) {
         match self {
             Self::Front | Self::Back => (bounds.width(), bounds.height()),
@@ -66,7 +78,7 @@ impl CanonicalView {
         }
     }
 
-    pub fn rank(self) -> u8 {
+    pub const fn rank(self) -> u8 {
         match self {
             Self::Front => 0,
             Self::Right => 1,

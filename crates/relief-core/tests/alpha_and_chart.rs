@@ -51,6 +51,23 @@ fn canonical_dimensions_come_only_from_integer_bounds() {
 }
 
 #[test]
+fn canonical_view_rank_round_trips_for_every_view() {
+    let views = [
+        CanonicalView::Front,
+        CanonicalView::Right,
+        CanonicalView::Back,
+        CanonicalView::Left,
+        CanonicalView::Top,
+        CanonicalView::Bottom,
+    ];
+
+    for view in views {
+        assert_eq!(CanonicalView::from_rank(view.rank()), Some(view));
+    }
+    assert_eq!(CanonicalView::from_rank(6), None);
+}
+
+#[test]
 fn chart_rejects_dimensions_that_disagree_with_bounds() {
     let bounds = Bounds::new(2, 1, 3).unwrap();
     let error =
