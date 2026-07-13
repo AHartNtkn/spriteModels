@@ -4,7 +4,7 @@ mod manifest;
 mod save;
 
 pub use error::PackageError;
-pub use load::{load_path, load_reader};
+pub use load::{MAX_ARCHIVE_SIZE, MAX_COMPRESSED_SIZE, load_path, load_reader};
 pub use manifest::{CanonicalViewName, ManifestV1};
 pub use save::{save_path_atomic, save_writer};
 

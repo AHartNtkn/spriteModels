@@ -1,4 +1,8 @@
-use std::io::{Cursor, Write};
+use std::{
+    cell::Cell,
+    io::{self, Cursor, Read, Seek, SeekFrom, Write},
+    rc::Rc,
+};
 
 use depthsprite_format::{PackageError, load_reader};
 use png::{BitDepth, ColorType, Encoder};
@@ -125,6 +129,80 @@ fn append_eocd_comment(bytes: &mut Vec<u8>, comment: &[u8]) {
     bytes.extend_from_slice(comment);
 }
 
+fn insert_associated_zip64_records(bytes: &mut Vec<u8>) -> usize {
+    let classic_eocd = eocd(bytes);
+    let entry_count = u16::from_le_bytes(
+        bytes[classic_eocd + 10..classic_eocd + 12]
+            .try_into()
+            .unwrap(),
+    ) as u64;
+    let central_size = u32::from_le_bytes(
+        bytes[classic_eocd + 12..classic_eocd + 16]
+            .try_into()
+            .unwrap(),
+    ) as u64;
+    let central_offset = u32::from_le_bytes(
+        bytes[classic_eocd + 16..classic_eocd + 20]
+            .try_into()
+            .unwrap(),
+    ) as u64;
+
+    let mut records = vec![0_u8; 56 + 20];
+    records[..4].copy_from_slice(&ZIP64_EOCD);
+    records[4..12].copy_from_slice(&44_u64.to_le_bytes());
+    records[12..14].copy_from_slice(&45_u16.to_le_bytes());
+    records[14..16].copy_from_slice(&45_u16.to_le_bytes());
+    records[24..32].copy_from_slice(&entry_count.to_le_bytes());
+    records[32..40].copy_from_slice(&entry_count.to_le_bytes());
+    records[40..48].copy_from_slice(&central_size.to_le_bytes());
+    records[48..56].copy_from_slice(&central_offset.to_le_bytes());
+    records[56..60].copy_from_slice(&ZIP64_LOCATOR);
+    records[64..72].copy_from_slice(&(classic_eocd as u64).to_le_bytes());
+    records[72..76].copy_from_slice(&1_u32.to_le_bytes());
+    bytes.splice(classic_eocd..classic_eocd, records);
+    classic_eocd + 76
+}
+
+struct SparseReader {
+    len: u64,
+    position: u64,
+    bytes_read: Rc<Cell<u64>>,
+}
+
+impl Read for SparseReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let available = self.len.saturating_sub(self.position);
+        let count = available.min(buffer.len() as u64) as usize;
+        buffer[..count].fill(0);
+        self.position += count as u64;
+        self.bytes_read.set(self.bytes_read.get() + count as u64);
+        Ok(count)
+    }
+}
+
+impl Seek for SparseReader {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        let next = match position {
+            SeekFrom::Start(value) => value as i128,
+            SeekFrom::End(value) => self.len as i128 + value as i128,
+            SeekFrom::Current(value) => self.position as i128 + value as i128,
+        };
+        if !(0..=u64::MAX as i128).contains(&next) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid seek"));
+        }
+        self.position = next as u64;
+        Ok(self.position)
+    }
+}
+
+fn assert_input_limit<R: Read + Seek>(reader: R) {
+    let error = load_reader(reader).expect_err("oversized archive input must be rejected");
+    assert!(
+        error.to_string().contains("archive input data is"),
+        "expected archive input limit error, got {error:?}"
+    );
+}
+
 fn truncate_first_central_record(bytes: &mut Vec<u8>, retained: usize) {
     let start = central_start(bytes);
     let end = eocd(bytes);
@@ -141,6 +219,16 @@ fn assert_archive_contains(bytes: Vec<u8>, needle: &str) {
             "expected archive error containing {needle:?}, got {message:?}"
         ),
         other => panic!("expected malformed archive error containing {needle:?}, got {other:?}"),
+    }
+}
+
+fn assert_explicit_zip64_rejection(bytes: Vec<u8>) {
+    match load_reader(Cursor::new(bytes)) {
+        Err(PackageError::Archive(message)) => assert_eq!(
+            message,
+            "ZIP64 structures are not supported by the version 1 package profile"
+        ),
+        other => panic!("expected explicit ZIP64 rejection, got {other:?}"),
     }
 }
 
@@ -216,10 +304,105 @@ fn maximum_eocd_comment_with_invalid_embedded_candidate_remains_unambiguous() {
 }
 
 #[test]
+fn count_limit_is_applied_only_after_structural_eocd_qualification() {
+    let mut bytes = valid_package();
+    let mut comment = vec![b'c'; 96];
+    let fake = 24;
+    comment[fake..fake + 4].copy_from_slice(&EOCD);
+    patch_u16(&mut comment, fake + 4, 0);
+    patch_u16(&mut comment, fake + 6, 0);
+    patch_u16(&mut comment, fake + 8, 8);
+    patch_u16(&mut comment, fake + 10, 8);
+    let fake_comment_len = (comment.len() - fake - 22) as u16;
+    patch_u16(&mut comment, fake + 20, fake_comment_len);
+    append_eocd_comment(&mut bytes, &comment);
+
+    assert!(load_reader(Cursor::new(bytes)).is_ok());
+}
+
+#[test]
+fn sentinel_and_zip64_signatures_in_a_maximum_comment_are_not_candidates() {
+    for (offset, width) in [(4, 2), (6, 2), (8, 2), (10, 2), (12, 4), (16, 4)] {
+        let mut bytes = valid_package();
+        let mut comment = vec![0_u8; u16::MAX as usize];
+        let fake = 300;
+        let fake_zip64 = fake - 76;
+        let fake_locator = fake - 20;
+        comment[fake_zip64..fake_zip64 + 4].copy_from_slice(&ZIP64_EOCD);
+        comment[fake_locator..fake_locator + 4].copy_from_slice(&ZIP64_LOCATOR);
+        comment[fake_locator + 8..fake_locator + 16]
+            .copy_from_slice(&(bytes.len() as u64 + fake_zip64 as u64).to_le_bytes());
+        patch_u32(&mut comment, fake_locator + 16, 1);
+        comment[fake..fake + 4].copy_from_slice(&EOCD);
+        if width == 2 {
+            patch_u16(&mut comment, fake + offset, u16::MAX);
+        } else {
+            patch_u32(&mut comment, fake + offset, u32::MAX);
+        }
+        let fake_comment_len = (comment.len() - fake - 22) as u16;
+        patch_u16(&mut comment, fake + 20, fake_comment_len);
+        append_eocd_comment(&mut bytes, &comment);
+
+        let result = load_reader(Cursor::new(bytes));
+        assert!(result.is_ok(), "fake sentinel at {offset}: {result:?}");
+    }
+}
+
+#[test]
+fn structurally_valid_eight_entry_archive_fails_the_entry_limit() {
+    let names: Vec<String> = (0..8).map(|index| format!("entry-{index}")).collect();
+    let entries = names
+        .iter()
+        .map(|name| (name.as_str(), Vec::new()))
+        .collect();
+
+    assert!(matches!(
+        load_reader(Cursor::new(zip_bytes(entries))),
+        Err(PackageError::EntryLimit {
+            actual: 8,
+            limit: 7
+        })
+    ));
+}
+
+#[test]
+fn structurally_valid_multidisk_eocd_fails_after_qualification() {
+    let mut bytes = valid_package();
+    let end = eocd(&bytes);
+    patch_u16(&mut bytes, end + 4, 1);
+    patch_u16(&mut bytes, end + 6, 1);
+
+    assert_archive_contains(bytes, "multi-disk");
+}
+
+#[test]
+fn declared_compressed_bytes_over_the_input_limit_fail_in_preflight() {
+    let mut bytes = valid_package();
+    let start = central_start(&bytes);
+    patch_u32(&mut bytes, start + 20, LIMIT + 1);
+    patch_u32(&mut bytes, 18, LIMIT + 1);
+
+    assert_input_limit(Cursor::new(bytes));
+}
+
+#[test]
+fn sparse_oversized_archive_is_rejected_without_reading_input() {
+    let bytes_read = Rc::new(Cell::new(0));
+    let reader = SparseReader {
+        len: 128 * 1024 * 1024,
+        position: 0,
+        bytes_read: Rc::clone(&bytes_read),
+    };
+
+    assert_input_limit(reader);
+    assert_eq!(bytes_read.get(), 0);
+}
+
+#[test]
 fn zip64_central_extra_and_sentinel_forms_are_rejected_before_indexing() {
     let mut extra = valid_package();
     insert_central_extra(&mut extra, &[0x01, 0x00, 0x00, 0x00]);
-    assert_archive_contains(extra, "ZIP64");
+    assert_explicit_zip64_rejection(extra);
 
     for (offset, width) in [(20, 4), (24, 4), (34, 2), (42, 4)] {
         let mut sentinel = valid_package();
@@ -229,13 +412,13 @@ fn zip64_central_extra_and_sentinel_forms_are_rejected_before_indexing() {
         } else {
             patch_u32(&mut sentinel, start + offset, u32::MAX);
         }
-        assert_archive_contains(sentinel, "ZIP64");
+        assert_explicit_zip64_rejection(sentinel);
     }
 
     let mut version_needed = valid_package();
     let start = central_start(&version_needed);
     patch_u16(&mut version_needed, start + 6, 45);
-    assert_archive_contains(version_needed, "ZIP64");
+    assert_explicit_zip64_rejection(version_needed);
 }
 
 #[test]
@@ -245,33 +428,31 @@ fn zip64_local_extra_and_sentinel_forms_are_rejected_before_indexing() {
     patch_u16(&mut extra, 28, 4);
     let extra_start = 30 + name_len;
     extra[extra_start..extra_start + 4].copy_from_slice(&[0x01, 0x00, 0x00, 0x00]);
-    assert_archive_contains(extra, "ZIP64");
+    assert_explicit_zip64_rejection(extra);
 
-    let mut sentinel = valid_package();
-    patch_u32(&mut sentinel, 18, u32::MAX);
-    assert_archive_contains(sentinel, "ZIP64");
+    for offset in [18, 22] {
+        let mut sentinel = valid_package();
+        patch_u32(&mut sentinel, offset, u32::MAX);
+        assert_explicit_zip64_rejection(sentinel);
+    }
 
     let mut version = valid_package();
     patch_u16(&mut version, 4, 45);
-    assert_archive_contains(version, "ZIP64");
+    assert_explicit_zip64_rejection(version);
 }
 
 #[test]
 fn associated_zip64_locator_and_eocd_are_rejected_explicitly() {
-    let mut locator = valid_package();
-    let end = eocd(&locator);
-    let mut record = vec![0_u8; 20];
-    record[..4].copy_from_slice(&ZIP64_LOCATOR);
-    locator.splice(end..end, record);
-    assert_archive_contains(locator, "ZIP64");
-
-    let mut structures = valid_package();
-    let end = eocd(&structures);
-    let mut record = vec![0_u8; 56 + 20];
-    record[..4].copy_from_slice(&ZIP64_EOCD);
-    record[56..60].copy_from_slice(&ZIP64_LOCATOR);
-    structures.splice(end..end, record);
-    assert_archive_contains(structures, "ZIP64");
+    for (offset, width) in [(4, 2), (6, 2), (8, 2), (10, 2), (12, 4), (16, 4)] {
+        let mut bytes = valid_package();
+        let end = insert_associated_zip64_records(&mut bytes);
+        if width == 2 {
+            patch_u16(&mut bytes, end + offset, u16::MAX);
+        } else {
+            patch_u32(&mut bytes, end + offset, u32::MAX);
+        }
+        assert_explicit_zip64_rejection(bytes);
+    }
 }
 
 #[test]

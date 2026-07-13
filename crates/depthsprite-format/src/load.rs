@@ -14,6 +14,10 @@ use crate::{DepthSpriteModel, ManifestV1, PackageError};
 
 const MAX_ENTRIES: usize = 7;
 const MAX_EXPANDED_SIZE: u64 = 64 * 1024 * 1024;
+/// Maximum complete package size accepted before any archive bytes are read.
+pub const MAX_ARCHIVE_SIZE: u64 = 65 * 1024 * 1024;
+/// Maximum aggregate compressed payload declared by the central directory.
+pub const MAX_COMPRESSED_SIZE: u64 = 64 * 1024 * 1024;
 const LOCAL_HEADER_SIGNATURE: [u8; 4] = [0x50, 0x4b, 0x03, 0x04];
 const CENTRAL_HEADER_SIGNATURE: [u8; 4] = [0x50, 0x4b, 0x01, 0x02];
 const EOCD_SIGNATURE: [u8; 4] = [0x50, 0x4b, 0x05, 0x06];
@@ -53,11 +57,69 @@ struct PreflightArchive {
     central_start: u64,
     central_end: u64,
     eocd_offset: u64,
-    comment: Vec<u8>,
+}
+
+struct AuthoritativeArchiveReader<R> {
+    inner: R,
+    position: u64,
+    logical_end: u64,
+    eocd_comment_length: std::ops::Range<u64>,
+}
+
+impl<R: Read + Seek> AuthoritativeArchiveReader<R> {
+    fn new(inner: R, eocd_offset: u64) -> Result<Self, PackageError> {
+        let logical_end = eocd_offset
+            .checked_add(EOCD_FIXED_SIZE as u64)
+            .ok_or_else(|| malformed("selected ZIP end record bounds overflow"))?;
+        Ok(Self {
+            inner,
+            position: 0,
+            logical_end,
+            eocd_comment_length: eocd_offset + 20..eocd_offset + 22,
+        })
+    }
+}
+
+impl<R: Read + Seek> Read for AuthoritativeArchiveReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let available = self.logical_end.saturating_sub(self.position);
+        let requested = available.min(buffer.len() as u64) as usize;
+        if requested == 0 {
+            return Ok(0);
+        }
+        self.inner.seek(SeekFrom::Start(self.position))?;
+        let start = self.position;
+        let count = self.inner.read(&mut buffer[..requested])?;
+        self.position += count as u64;
+        for (index, byte) in buffer[..count].iter_mut().enumerate() {
+            if self.eocd_comment_length.contains(&(start + index as u64)) {
+                *byte = 0;
+            }
+        }
+        Ok(count)
+    }
+}
+
+impl<R: Read + Seek> Seek for AuthoritativeArchiveReader<R> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        let next = match position {
+            SeekFrom::Start(value) => value as i128,
+            SeekFrom::End(value) => self.logical_end as i128 + value as i128,
+            SeekFrom::Current(value) => self.position as i128 + value as i128,
+        };
+        if !(0..=u64::MAX as i128).contains(&next) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid authoritative archive seek",
+            ));
+        }
+        self.position = next as u64;
+        Ok(self.position)
+    }
 }
 
 enum CandidateParse {
-    Selected(Result<PreflightArchive, PackageError>),
+    Qualified(Result<PreflightArchive, PackageError>),
     Invalid(PackageError),
 }
 
@@ -70,7 +132,8 @@ pub fn load_reader<R: Read + Seek>(mut reader: R) -> Result<DepthSpriteModel, Pa
     let preflight = preflight_archive(&mut reader)?;
 
     reader.seek(SeekFrom::Start(0))?;
-    let mut archive = ZipArchive::new(reader)?;
+    let authoritative_reader = AuthoritativeArchiveReader::new(reader, preflight.eocd_offset)?;
+    let mut archive = ZipArchive::new(authoritative_reader)?;
     bind_dependency_index(&mut archive, &preflight)?;
     let contents = read_all_bounded(&mut archive, &preflight.entries)?;
 
@@ -97,6 +160,12 @@ pub fn load_reader<R: Read + Seek>(mut reader: R) -> Result<DepthSpriteModel, Pa
 
 fn preflight_archive<R: Read + Seek>(reader: &mut R) -> Result<PreflightArchive, PackageError> {
     let file_len = reader.seek(SeekFrom::End(0))?;
+    if file_len > MAX_ARCHIVE_SIZE {
+        return Err(PackageError::InputSizeLimit {
+            actual: file_len,
+            limit: MAX_ARCHIVE_SIZE,
+        });
+    }
     let search_len = file_len.min(MAX_EOCD_SEARCH) as usize;
     if search_len < EOCD_FIXED_SIZE {
         return Err(malformed("missing ZIP end record"));
@@ -119,10 +188,9 @@ fn preflight_archive<R: Read + Seek>(reader: &mut R) -> Result<PreflightArchive,
         match parse_candidate(
             reader,
             &tail[index..index + EOCD_FIXED_SIZE],
-            &tail[index + EOCD_FIXED_SIZE..],
             tail_start + index as u64,
         ) {
-            CandidateParse::Selected(candidate) => {
+            CandidateParse::Qualified(candidate) => {
                 selected.push(candidate);
                 if selected.len() > 1 {
                     return Err(malformed(
@@ -143,49 +211,47 @@ fn preflight_archive<R: Read + Seek>(reader: &mut R) -> Result<PreflightArchive,
 fn parse_candidate<R: Read + Seek>(
     reader: &mut R,
     fixed: &[u8],
-    comment: &[u8],
     eocd_offset: u64,
 ) -> CandidateParse {
     let disk = le_u16(fixed, 4);
     let central_disk = le_u16(fixed, 6);
     let disk_entries = le_u16(fixed, 8);
     let entry_count = le_u16(fixed, 10);
+    let central_size = le_u32(fixed, 12);
+    let central_start = le_u32(fixed, 16);
     if disk == u16::MAX
         || central_disk == u16::MAX
         || disk_entries == u16::MAX
         || entry_count == u16::MAX
+        || central_size == u32::MAX
+        || central_start == u32::MAX
     {
-        return CandidateParse::Selected(Err(zip64_error()));
-    }
-    if disk != 0 || central_disk != 0 || disk_entries != entry_count {
-        return CandidateParse::Invalid(malformed(
-            "multi-disk ZIP end record is not a valid version 1 package",
-        ));
-    }
-    if entry_count as usize > MAX_ENTRIES {
-        return CandidateParse::Selected(Err(PackageError::EntryLimit {
-            actual: entry_count as usize,
-            limit: MAX_ENTRIES,
-        }));
+        return qualify_zip64_candidate(reader, fixed, eocd_offset);
     }
 
-    let central_size = le_u32(fixed, 12) as u64;
-    let central_start = le_u32(fixed, 16) as u64;
-    if central_size == u32::MAX as u64 || central_start == u32::MAX as u64 {
-        return CandidateParse::Selected(Err(zip64_error()));
-    }
+    let central_size = central_size as u64;
+    let central_start = central_start as u64;
     let Some(central_end) = central_start.checked_add(central_size) else {
         return CandidateParse::Invalid(malformed("invalid ZIP central directory bounds"));
     };
     if central_end != eocd_offset {
-        if (eocd_offset >= 20
-            && has_signature_at(reader, eocd_offset - 20, ZIP64_LOCATOR_SIGNATURE))
-            || (central_end < eocd_offset
-                && has_signature_at(reader, central_end, ZIP64_EOCD_SIGNATURE))
-        {
-            return CandidateParse::Selected(Err(zip64_error()));
-        }
         return CandidateParse::Invalid(malformed("invalid ZIP central directory bounds"));
+    }
+    if let Err(error) =
+        qualify_central_directory(reader, central_start, central_end, entry_count as u64)
+    {
+        return CandidateParse::Invalid(error);
+    }
+    if disk != 0 || central_disk != 0 || disk_entries != entry_count {
+        return CandidateParse::Qualified(Err(malformed(
+            "multi-disk ZIP end record is not supported by the version 1 package profile",
+        )));
+    }
+    if entry_count as usize > MAX_ENTRIES {
+        return CandidateParse::Qualified(Err(PackageError::EntryLimit {
+            actual: entry_count as usize,
+            limit: MAX_ENTRIES,
+        }));
     }
 
     match parse_central_directory(reader, central_start, central_end, entry_count as usize) {
@@ -195,9 +261,8 @@ fn parse_candidate<R: Read + Seek>(
                 central_start,
                 central_end,
                 eocd_offset,
-                comment: comment.to_vec(),
             };
-            CandidateParse::Selected(match rejection {
+            CandidateParse::Qualified(match rejection {
                 Some(error) => Err(error),
                 None => validate_preflight(preflight)
                     .and_then(|preflight| validate_local_headers(reader, preflight)),
@@ -205,6 +270,187 @@ fn parse_candidate<R: Read + Seek>(
         }
         Err(error) => CandidateParse::Invalid(error),
     }
+}
+
+fn qualify_zip64_candidate<R: Read + Seek>(
+    reader: &mut R,
+    classic: &[u8],
+    eocd_offset: u64,
+) -> CandidateParse {
+    match validate_associated_zip64(reader, classic, eocd_offset) {
+        Ok(()) => CandidateParse::Qualified(Err(zip64_error())),
+        Err(error) => CandidateParse::Invalid(error),
+    }
+}
+
+fn validate_associated_zip64<R: Read + Seek>(
+    reader: &mut R,
+    classic: &[u8],
+    eocd_offset: u64,
+) -> Result<(), PackageError> {
+    let locator_offset = eocd_offset
+        .checked_sub(20)
+        .ok_or_else(|| malformed("ZIP64 end record has no associated locator"))?;
+    reader.seek(SeekFrom::Start(locator_offset))?;
+    let mut locator = [0_u8; 20];
+    reader
+        .read_exact(&mut locator)
+        .map_err(central_read_error)?;
+    if locator[..4] != ZIP64_LOCATOR_SIGNATURE {
+        return Err(malformed("ZIP64 end record has no associated locator"));
+    }
+
+    let locator_disk = le_u32(&locator, 4);
+    let record_offset = le_u64(&locator, 8);
+    let total_disks = le_u32(&locator, 16);
+    if record_offset >= locator_offset {
+        return Err(malformed("invalid associated ZIP64 end record offset"));
+    }
+    reader.seek(SeekFrom::Start(record_offset))?;
+    let mut record = [0_u8; 56];
+    reader.read_exact(&mut record).map_err(central_read_error)?;
+    if record[..4] != ZIP64_EOCD_SIGNATURE {
+        return Err(malformed("invalid associated ZIP64 end record signature"));
+    }
+    let record_size = le_u64(&record, 4);
+    if record_size < 44 {
+        return Err(malformed("invalid associated ZIP64 end record size"));
+    }
+    let record_end = record_offset
+        .checked_add(12)
+        .and_then(|start| start.checked_add(record_size))
+        .ok_or_else(|| malformed("associated ZIP64 end record bounds overflow"))?;
+    if record_end != locator_offset {
+        return Err(malformed(
+            "associated ZIP64 end record does not end at its locator",
+        ));
+    }
+
+    let version_needed = le_u16(&record, 14);
+    let disk = le_u32(&record, 16);
+    let central_disk = le_u32(&record, 20);
+    let disk_entries = le_u64(&record, 24);
+    let entry_count = le_u64(&record, 32);
+    let central_size = le_u64(&record, 40);
+    let central_start = le_u64(&record, 48);
+    if version_needed < 45
+        || locator_disk != disk
+        || total_disks != disk.checked_add(1).unwrap_or(0)
+        || central_disk > disk
+        || disk_entries > entry_count
+    {
+        return Err(malformed("inconsistent associated ZIP64 end records"));
+    }
+    if !classic_u16_matches(le_u16(classic, 4), disk)
+        || !classic_u16_matches(le_u16(classic, 6), central_disk)
+        || !classic_u16_matches_u64(le_u16(classic, 8), disk_entries)
+        || !classic_u16_matches_u64(le_u16(classic, 10), entry_count)
+        || !classic_u32_matches(le_u32(classic, 12), central_size)
+        || !classic_u32_matches(le_u32(classic, 16), central_start)
+    {
+        return Err(malformed(
+            "classic and ZIP64 end record declarations disagree",
+        ));
+    }
+    let central_end = central_start
+        .checked_add(central_size)
+        .ok_or_else(|| malformed("ZIP64 central directory bounds overflow"))?;
+    if central_end != record_offset {
+        return Err(malformed("invalid ZIP64 central directory bounds"));
+    }
+    qualify_central_directory(reader, central_start, central_end, entry_count)
+}
+
+fn classic_u16_matches(classic: u16, actual: u32) -> bool {
+    classic == u16::MAX || u32::from(classic) == actual
+}
+
+fn classic_u16_matches_u64(classic: u16, actual: u64) -> bool {
+    classic == u16::MAX || u64::from(classic) == actual
+}
+
+fn classic_u32_matches(classic: u32, actual: u64) -> bool {
+    classic == u32::MAX || u64::from(classic) == actual
+}
+
+fn qualify_central_directory<R: Read + Seek>(
+    reader: &mut R,
+    central_start: u64,
+    central_end: u64,
+    entry_count: u64,
+) -> Result<(), PackageError> {
+    let central_size = central_end
+        .checked_sub(central_start)
+        .ok_or_else(|| malformed("invalid ZIP central directory bounds"))?;
+    if entry_count > central_size / CENTRAL_FIXED_SIZE {
+        return Err(malformed(
+            "ZIP central directory cannot contain its declared entry count",
+        ));
+    }
+    reader.seek(SeekFrom::Start(central_start))?;
+    for _ in 0..entry_count {
+        let record_start = reader.stream_position()?;
+        let fixed_end = record_start
+            .checked_add(CENTRAL_FIXED_SIZE)
+            .ok_or_else(|| malformed("central directory fixed field overflows"))?;
+        if fixed_end > central_end {
+            return Err(malformed("truncated central directory fixed field"));
+        }
+        let mut fixed = [0_u8; CENTRAL_FIXED_SIZE as usize];
+        reader.read_exact(&mut fixed).map_err(central_read_error)?;
+        if fixed[..4] != CENTRAL_HEADER_SIGNATURE {
+            return Err(malformed("invalid ZIP central directory entry signature"));
+        }
+        let name_end = fixed_end
+            .checked_add(le_u16(&fixed, 28) as u64)
+            .ok_or_else(|| malformed("central directory name length overflows"))?;
+        let extra_end = name_end
+            .checked_add(le_u16(&fixed, 30) as u64)
+            .ok_or_else(|| malformed("central directory extra length overflows"))?;
+        let record_end = extra_end
+            .checked_add(le_u16(&fixed, 32) as u64)
+            .ok_or_else(|| malformed("central directory comment length overflows"))?;
+        if record_end > central_end {
+            return Err(malformed(
+                "truncated central directory name, extra, or comment field",
+            ));
+        }
+        reader.seek(SeekFrom::Start(name_end))?;
+        qualify_extra_fields(reader, extra_end - name_end, "central")?;
+        reader.seek(SeekFrom::Start(record_end))?;
+    }
+    if reader.stream_position()? != central_end {
+        return Err(malformed(
+            "ZIP central directory size does not match its entries",
+        ));
+    }
+    Ok(())
+}
+
+fn qualify_extra_fields<R: Read + Seek>(
+    reader: &mut R,
+    length: u64,
+    context: &str,
+) -> Result<(), PackageError> {
+    let start = reader.stream_position()?;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| malformed(format!("{context} extra field bounds overflow")))?;
+    while reader.stream_position()? < end {
+        let offset = reader.stream_position()?;
+        let header_end = offset
+            .checked_add(4)
+            .filter(|value| *value <= end)
+            .ok_or_else(|| malformed(format!("truncated {context} extra field header")))?;
+        let mut header = [0_u8; 4];
+        reader.read_exact(&mut header).map_err(central_read_error)?;
+        let field_end = header_end
+            .checked_add(le_u16(&header, 2) as u64)
+            .filter(|value| *value <= end)
+            .ok_or_else(|| malformed(format!("truncated {context} extra field payload")))?;
+        reader.seek(SeekFrom::Start(field_end))?;
+    }
+    Ok(())
 }
 
 fn parse_central_directory<R: Read + Seek>(
@@ -320,8 +566,26 @@ fn parse_extra_fields(extra: &[u8], context: &str) -> Result<bool, PackageError>
 
 fn validate_preflight(mut preflight: PreflightArchive) -> Result<PreflightArchive, PackageError> {
     let mut declared_total = 0_u64;
+    let mut compressed_total = 0_u64;
     for entry in &preflight.entries {
-        declared_total = declared_total.saturating_add(entry.declared_size);
+        compressed_total = compressed_total.checked_add(entry.compressed_size).ok_or(
+            PackageError::InputSizeLimit {
+                actual: u64::MAX,
+                limit: MAX_COMPRESSED_SIZE,
+            },
+        )?;
+        if compressed_total > MAX_COMPRESSED_SIZE {
+            return Err(PackageError::InputSizeLimit {
+                actual: compressed_total,
+                limit: MAX_COMPRESSED_SIZE,
+            });
+        }
+        declared_total = declared_total.checked_add(entry.declared_size).ok_or(
+            PackageError::ExpandedSizeLimit {
+                actual: u64::MAX,
+                limit: MAX_EXPANDED_SIZE,
+            },
+        )?;
         if declared_total > MAX_EXPANDED_SIZE {
             return Err(PackageError::ExpandedSizeLimit {
                 actual: declared_total,
@@ -411,7 +675,12 @@ fn validate_local_headers<R: Read + Seek>(
             return Err(zip64_error());
         }
         if local_flags & 0x0008 == 0 {
-            local_declared_total = local_declared_total.saturating_add(local_uncompressed as u64);
+            local_declared_total = local_declared_total
+                .checked_add(local_uncompressed as u64)
+                .ok_or(PackageError::ExpandedSizeLimit {
+                    actual: u64::MAX,
+                    limit: MAX_EXPANDED_SIZE,
+                })?;
             if local_declared_total > MAX_EXPANDED_SIZE {
                 return Err(PackageError::ExpandedSizeLimit {
                     actual: local_declared_total,
@@ -475,7 +744,7 @@ fn bind_dependency_index<R: Read + Seek>(
 ) -> Result<(), PackageError> {
     if archive.offset() != 0
         || archive.central_directory_start() != preflight.central_start
-        || archive.comment() != preflight.comment
+        || !archive.comment().is_empty()
         || preflight.central_end != preflight.eocd_offset
     {
         return Err(parser_differential(
@@ -641,12 +910,17 @@ fn le_u32(bytes: &[u8], offset: usize) -> u32 {
     ])
 }
 
-fn has_signature_at<R: Read + Seek>(reader: &mut R, offset: u64, signature: [u8; 4]) -> bool {
-    if reader.seek(SeekFrom::Start(offset)).is_err() {
-        return false;
-    }
-    let mut actual = [0_u8; 4];
-    reader.read_exact(&mut actual).is_ok() && actual == signature
+fn le_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+        bytes[offset + 4],
+        bytes[offset + 5],
+        bytes[offset + 6],
+        bytes[offset + 7],
+    ])
 }
 
 fn malformed(message: impl Into<String>) -> PackageError {

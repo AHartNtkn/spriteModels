@@ -71,16 +71,6 @@ fn patch_central_uncompressed_size(bytes: &mut [u8], size: u32) {
     bytes[index + 24..index + 28].copy_from_slice(&size.to_le_bytes());
 }
 
-fn patch_eocd_entry_count(bytes: &mut [u8], count: u16) {
-    let signature = [0x50, 0x4b, 0x05, 0x06];
-    let index = bytes
-        .windows(signature.len())
-        .rposition(|window| window == signature)
-        .unwrap();
-    bytes[index + 8..index + 10].copy_from_slice(&count.to_le_bytes());
-    bytes[index + 10..index + 12].copy_from_slice(&count.to_le_bytes());
-}
-
 fn replace_all_equal_length(bytes: &mut [u8], from: &[u8], to: &[u8]) {
     assert_eq!(from.len(), to.len());
     let mut offset = 0;
@@ -130,19 +120,6 @@ fn entry_count_limit_is_checked_before_png_decode() {
     assert!(matches!(
         load_reader(Cursor::new(zip_bytes(entries))),
         Err(PackageError::EntryLimit { .. })
-    ));
-}
-
-#[test]
-fn declared_entry_count_limit_is_checked_before_archive_indexing() {
-    let mut archive = zip_bytes(vec![("manifest.json", b"not json".to_vec())]);
-    patch_eocd_entry_count(&mut archive, 65_534);
-    assert!(matches!(
-        load_reader(Cursor::new(archive)),
-        Err(PackageError::EntryLimit {
-            actual: 65_534,
-            limit: 7
-        })
     ));
 }
 

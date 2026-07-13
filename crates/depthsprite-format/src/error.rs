@@ -15,6 +15,8 @@ pub enum PackageError {
     EntryLimit { actual: usize, limit: usize },
     #[error("archive expanded data is {actual} bytes; the limit is {limit}")]
     ExpandedSizeLimit { actual: u64, limit: u64 },
+    #[error("archive input data is {actual} bytes; the limit is {limit}")]
+    InputSizeLimit { actual: u64, limit: u64 },
     #[error("unsafe or non-normalized archive entry: {0}")]
     UnsafeEntry(String),
     #[error("duplicate archive entry: {0}")]
