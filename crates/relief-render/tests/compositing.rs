@@ -25,6 +25,12 @@ fn uncovered_output_remains_transparent() {
 
     assert_eq!(frame.rgba_at(0, 0), [0, 0, 0, 0]);
     assert!(frame.pixels().iter().all(|pixel| *pixel == [0, 0, 0, 0]));
+    assert!(
+        !frame
+            .diagnostics()
+            .iter()
+            .any(|item| matches!(item, RenderDiagnostic::InsufficientCoverage { .. }))
+    );
 }
 
 #[test]
@@ -38,6 +44,26 @@ fn a_chart_is_not_rendered_from_its_unsupported_back_side() {
     .unwrap();
 
     assert!(frame.pixels().iter().all(|pixel| *pixel == [0, 0, 0, 0]));
+}
+
+#[test]
+fn a_nonempty_registered_model_reports_zero_coverage_when_every_chart_is_culled() {
+    let bounds = Bounds::new(1, 1, 1).unwrap();
+    let front = Chart::from_rgba(bounds, CanonicalView::Front, 1, 1, vec![[5, 6, 7, 255]]).unwrap();
+    let frame = render_model(
+        &[front],
+        &RenderRequest::new(1, 1, TargetView::back_of_front_for_test()),
+    )
+    .unwrap();
+
+    assert!(
+        frame
+            .diagnostics()
+            .contains(&RenderDiagnostic::InsufficientCoverage {
+                covered_pixels: 0,
+                total_pixels: 1,
+            })
+    );
 }
 
 #[test]
@@ -78,6 +104,106 @@ fn a_flat_boundary_cell_covers_its_pixel_without_expanding_public_sampling() {
     .unwrap();
 
     assert_eq!(frame.rgba_at(0, 0), [23, 45, 67, 255]);
+}
+
+#[test]
+fn flat_isometric_right_and_top_winding_is_not_a_fold() {
+    let bounds = Bounds::new(2, 2, 2).unwrap();
+    let right = Chart::from_rgba(
+        bounds,
+        CanonicalView::Right,
+        2,
+        2,
+        vec![[10, 20, 30, 255]; 4],
+    )
+    .unwrap();
+    let top =
+        Chart::from_rgba(bounds, CanonicalView::Top, 2, 2, vec![[40, 50, 60, 255]; 4]).unwrap();
+    let frame = render_model(
+        &[right, top],
+        &RenderRequest::new(2, 2, TargetView::isometric_v1()),
+    )
+    .unwrap();
+
+    assert!(
+        !frame
+            .diagnostics()
+            .iter()
+            .any(|item| matches!(item, RenderDiagnostic::WarpFold { .. }))
+    );
+}
+
+#[test]
+fn flat_explicit_mirrored_camera_covers_without_a_fold() {
+    let chart = Chart::from_rgba(
+        Bounds::new(1, 1, 1).unwrap(),
+        CanonicalView::Front,
+        1,
+        1,
+        vec![[70, 80, 90, 255]],
+    )
+    .unwrap();
+    let target = TargetView::from_camera(CameraBasis::new(
+        [
+            Ratio::from_integer(-1),
+            Ratio::from_integer(0),
+            Ratio::from_integer(0),
+        ],
+        [
+            Ratio::from_integer(0),
+            Ratio::from_integer(1),
+            Ratio::from_integer(0),
+        ],
+        [
+            Ratio::from_integer(0),
+            Ratio::from_integer(0),
+            Ratio::from_integer(1),
+        ],
+    ));
+    let frame = render_model(&[chart], &RenderRequest::new(1, 1, target)).unwrap();
+
+    assert_eq!(frame.rgba_at(0, 0), [70, 80, 90, 255]);
+    assert!(
+        !frame
+            .diagnostics()
+            .iter()
+            .any(|item| matches!(item, RenderDiagnostic::WarpFold { .. }))
+    );
+}
+
+#[test]
+fn exact_shared_edge_has_one_top_left_owner_under_mirrored_winding() {
+    let bounds = Bounds::new(1, 1, 1).unwrap();
+    let front =
+        Chart::from_rgba(bounds, CanonicalView::Front, 1, 1, vec![[200, 10, 10, 255]]).unwrap();
+    let right =
+        Chart::from_rgba(bounds, CanonicalView::Right, 1, 1, vec![[10, 200, 10, 255]]).unwrap();
+    let target = TargetView::from_camera(CameraBasis::new(
+        [
+            Ratio::from_integer(1),
+            Ratio::from_integer(0),
+            Ratio::from_integer(1),
+        ],
+        [
+            Ratio::from_integer(0),
+            Ratio::from_integer(1),
+            Ratio::from_integer(0),
+        ],
+        [
+            Ratio::from_integer(-1),
+            Ratio::from_integer(0),
+            Ratio::from_integer(1),
+        ],
+    ));
+    let frame = render_model(&[front, right], &RenderRequest::new(1, 1, target)).unwrap();
+
+    assert_eq!(frame.rgba_at(0, 0), [10, 200, 10, 255]);
+    assert!(
+        !frame
+            .diagnostics()
+            .iter()
+            .any(|item| matches!(item, RenderDiagnostic::EqualDepthColorConflict { .. }))
+    );
 }
 
 #[test]
@@ -168,6 +294,106 @@ fn every_fold_preimage_competes_by_exact_transient_depth() {
     let frame = render_model(&[chart], &RenderRequest::new(11, 1, target)).unwrap();
 
     assert_eq!(frame.rgba_at(8, 0), [220, 20, 20, 255]);
+}
+
+#[test]
+fn different_exact_depth_planes_select_different_overlapping_preimages() {
+    let chart = Chart::from_rgba(
+        Bounds::new(3, 1, 1).unwrap(),
+        CanonicalView::Front,
+        3,
+        1,
+        vec![
+            rgba_with_relief([220, 20, 20], 0),
+            [0, 0, 0, 0],
+            rgba_with_relief([20, 20, 220], 2),
+        ],
+    )
+    .unwrap();
+    let screen_right = [
+        Ratio::from_integer(1),
+        Ratio::from_integer(0),
+        Ratio::from_integer(-8),
+    ];
+    let screen_down = [
+        Ratio::from_integer(0),
+        Ratio::from_integer(1),
+        Ratio::from_integer(0),
+    ];
+    let flat_nearer = TargetView::from_camera(CameraBasis::new(
+        screen_right,
+        screen_down,
+        [
+            Ratio::from_integer(0),
+            Ratio::from_integer(0),
+            Ratio::from_integer(8),
+        ],
+    ));
+    let displaced_nearer = TargetView::from_camera(CameraBasis::new(
+        screen_right,
+        screen_down,
+        [
+            Ratio::from_integer(-10),
+            Ratio::from_integer(0),
+            Ratio::from_integer(8),
+        ],
+    ));
+
+    let flat = render_model(
+        std::slice::from_ref(&chart),
+        &RenderRequest::new(11, 1, flat_nearer),
+    )
+    .unwrap();
+    let displaced = render_model(&[chart], &RenderRequest::new(11, 1, displaced_nearer)).unwrap();
+
+    assert_eq!(flat.rgba_at(8, 0), [220, 20, 20, 255]);
+    assert_eq!(displaced.rgba_at(8, 0), [20, 20, 220, 255]);
+}
+
+#[test]
+fn folded_same_view_colors_at_equal_depth_are_diagnostic_and_stably_owned() {
+    let chart = Chart::from_rgba(
+        Bounds::new(3, 1, 1).unwrap(),
+        CanonicalView::Front,
+        3,
+        1,
+        vec![
+            rgba_with_relief([220, 20, 20], 0),
+            rgba_with_relief([20, 220, 20], 16),
+            rgba_with_relief([20, 20, 220], 0),
+        ],
+    )
+    .unwrap();
+    let target = TargetView::from_camera(CameraBasis::new(
+        [
+            Ratio::from_integer(1),
+            Ratio::from_integer(0),
+            Ratio::from_integer(-8),
+        ],
+        [
+            Ratio::from_integer(0),
+            Ratio::from_integer(1),
+            Ratio::from_integer(0),
+        ],
+        [
+            Ratio::from_integer(-1),
+            Ratio::from_integer(0),
+            Ratio::from_integer(8),
+        ],
+    ));
+    let frame = render_model(&[chart], &RenderRequest::new(11, 1, target)).unwrap();
+
+    assert_eq!(frame.rgba_at(7, 0), [220, 20, 20, 255]);
+    assert!(
+        frame
+            .diagnostics()
+            .contains(&RenderDiagnostic::EqualDepthColorConflict {
+                x: 7,
+                y: 0,
+                first: CanonicalView::Front,
+                second: CanonicalView::Front,
+            })
+    );
 }
 
 #[test]
@@ -312,6 +538,46 @@ fn coverage_threshold_is_strictly_fewer_than_seventy_percent() {
             .contains(&RenderDiagnostic::InsufficientCoverage {
                 covered_pixels: 6,
                 total_pixels: 10,
+            })
+    );
+}
+
+#[test]
+fn fragments_outside_the_registered_region_do_not_count_as_coverage() {
+    let chart = Chart::from_rgba(
+        Bounds::new(1, 1, 1).unwrap(),
+        CanonicalView::Front,
+        1,
+        1,
+        vec![rgba_with_relief([90, 100, 110], 16)],
+    )
+    .unwrap();
+    let target = TargetView::from_camera(CameraBasis::new(
+        [
+            Ratio::from_integer(1),
+            Ratio::from_integer(0),
+            Ratio::from_integer(8),
+        ],
+        [
+            Ratio::from_integer(0),
+            Ratio::from_integer(1),
+            Ratio::from_integer(0),
+        ],
+        [
+            Ratio::from_integer(0),
+            Ratio::from_integer(0),
+            Ratio::from_integer(1),
+        ],
+    ));
+    let frame = render_model(&[chart], &RenderRequest::new(30, 1, target)).unwrap();
+
+    assert_eq!(frame.rgba_at(26, 0), [90, 100, 110, 255]);
+    assert!(
+        frame
+            .diagnostics()
+            .contains(&RenderDiagnostic::InsufficientCoverage {
+                covered_pixels: 0,
+                total_pixels: 9,
             })
     );
 }
