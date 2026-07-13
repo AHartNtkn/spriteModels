@@ -1,4 +1,4 @@
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 
 use depthsprite_format::{
     DepthSpriteModel, ManifestV1, PackageError, load_path, load_reader, save_path_atomic,
@@ -6,7 +6,7 @@ use depthsprite_format::{
 };
 use relief_core::{Bounds, CanonicalView, Chart, DecodedTexel};
 use tempfile::tempdir;
-use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
+use zip::ZipArchive;
 
 fn chart(bounds: Bounds, view: CanonicalView, pixels: Vec<[u8; 4]>) -> Chart {
     let (width, height) = view.dimensions(bounds);
@@ -17,6 +17,65 @@ fn saved(model: &DepthSpriteModel) -> Vec<u8> {
     let mut output = Cursor::new(Vec::new());
     save_writer(model, &mut output).unwrap();
     output.into_inner()
+}
+
+fn u16_at(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
+}
+
+fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn assert_canonical_zip32_envelope(bytes: &[u8]) {
+    let eocd = bytes.len() - 22;
+    assert_eq!(&bytes[eocd..eocd + 4], b"PK\x05\x06");
+    assert_eq!(u16_at(bytes, eocd + 4), 0);
+    assert_eq!(u16_at(bytes, eocd + 6), 0);
+    assert_eq!(u16_at(bytes, eocd + 8), u16_at(bytes, eocd + 10));
+    assert_eq!(u16_at(bytes, eocd + 20), 0);
+    let count = u16_at(bytes, eocd + 10) as usize;
+    let central_start = u32_at(bytes, eocd + 16) as usize;
+    assert_eq!(central_start + u32_at(bytes, eocd + 12) as usize, eocd);
+
+    let mut central = central_start;
+    let mut expected_local = 0_usize;
+    for _ in 0..count {
+        assert_eq!(&bytes[central..central + 4], b"PK\x01\x02");
+        assert!(matches!(u16_at(bytes, central + 4), 20 | 0x0314));
+        assert_eq!(u16_at(bytes, central + 6), 20);
+        assert_eq!(u16_at(bytes, central + 8), 0);
+        assert_eq!(u16_at(bytes, central + 10), 8);
+        assert_eq!(u16_at(bytes, central + 12), 0);
+        assert_eq!(u16_at(bytes, central + 14), 33);
+        assert_eq!(u16_at(bytes, central + 30), 0);
+        assert_eq!(u16_at(bytes, central + 32), 0);
+        assert_eq!(u16_at(bytes, central + 34), 0);
+        assert_eq!(u16_at(bytes, central + 36), 0);
+        assert_eq!(u32_at(bytes, central + 38), 0o100644 << 16);
+        let name_len = u16_at(bytes, central + 28) as usize;
+        let local = u32_at(bytes, central + 42) as usize;
+        assert_eq!(local, expected_local);
+        assert_eq!(&bytes[local..local + 4], b"PK\x03\x04");
+        assert_eq!(u16_at(bytes, local + 4), 20);
+        assert_eq!(u16_at(bytes, local + 6), 0);
+        assert_eq!(u16_at(bytes, local + 8), 8);
+        assert_eq!(u16_at(bytes, local + 10), 0);
+        assert_eq!(u16_at(bytes, local + 12), 33);
+        assert_eq!(u16_at(bytes, local + 28), 0);
+        assert_eq!(u16_at(bytes, local + 26) as usize, name_len);
+        assert_eq!(
+            &bytes[local + 30..local + 30 + name_len],
+            &bytes[central + 46..central + 46 + name_len]
+        );
+        assert_eq!(u32_at(bytes, local + 14), u32_at(bytes, central + 16));
+        assert_eq!(u32_at(bytes, local + 18), u32_at(bytes, central + 20));
+        assert_eq!(u32_at(bytes, local + 22), u32_at(bytes, central + 24));
+        expected_local = local + 30 + name_len + u32_at(bytes, local + 18) as usize;
+        central += 46 + name_len;
+    }
+    assert_eq!(expected_local, central_start);
+    assert_eq!(central, eocd);
 }
 
 #[test]
@@ -36,49 +95,28 @@ fn canonical_save_is_byte_identical_after_round_trip() {
 }
 
 #[test]
-fn input_entry_order_compression_and_manifest_order_do_not_change_canonical_output() {
+fn canonical_writer_rank_order_is_accepted_for_every_view() {
     let bounds = Bounds::new(1, 1, 1).unwrap();
+    let views = [
+        CanonicalView::Front,
+        CanonicalView::Right,
+        CanonicalView::Back,
+        CanonicalView::Left,
+        CanonicalView::Top,
+        CanonicalView::Bottom,
+    ];
     let model = DepthSpriteModel::new(
         bounds,
-        vec![
-            chart(bounds, CanonicalView::Front, vec![[1, 2, 3, 4]]),
-            chart(bounds, CanonicalView::Top, vec![[5, 6, 7, 8]]),
-        ],
+        views
+            .into_iter()
+            .map(|view| chart(bounds, view, vec![[7, 8, 9, 255]]))
+            .collect(),
     )
     .unwrap();
-    let canonical = saved(&model);
-    let mut source = ZipArchive::new(Cursor::new(&canonical)).unwrap();
-    let mut front = Vec::new();
-    source
-        .by_name("views/front.png")
-        .unwrap()
-        .read_to_end(&mut front)
-        .unwrap();
-    let mut top = Vec::new();
-    source
-        .by_name("views/top.png")
-        .unwrap()
-        .read_to_end(&mut top)
-        .unwrap();
+    let bytes = saved(&model);
 
-    let mut noncanonical = Cursor::new(Vec::new());
-    let mut writer = ZipWriter::new(&mut noncanonical);
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-    writer.start_file("views/top.png", options).unwrap();
-    writer.write_all(&top).unwrap();
-    writer.start_file("manifest.json", options).unwrap();
-    writer
-        .write_all(
-            br#"{"format":"depthsprite","version":1,"bounds_pixels":[1,1,1],"views":["top","front"]}
-"#,
-        )
-        .unwrap();
-    writer.start_file("views/front.png", options).unwrap();
-    writer.write_all(&front).unwrap();
-    writer.finish().unwrap();
-
-    let loaded = load_reader(Cursor::new(noncanonical.into_inner())).unwrap();
-    assert_eq!(saved(&loaded), canonical);
+    assert_canonical_zip32_envelope(&bytes);
+    assert_eq!(load_reader(Cursor::new(bytes)).unwrap(), model);
 }
 
 #[test]
@@ -145,6 +183,7 @@ fn canonical_archive_has_exact_schema_order_metadata_and_pixels() {
     )
     .unwrap();
     let bytes = saved(&model);
+    assert_canonical_zip32_envelope(&bytes);
     let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
 
     assert_eq!(archive.len(), 3);
