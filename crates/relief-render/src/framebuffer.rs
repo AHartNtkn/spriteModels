@@ -1,4 +1,5 @@
 use num_rational::Ratio;
+use relief_core::CanonicalView;
 
 use crate::RenderDiagnostic;
 
@@ -6,6 +7,14 @@ use crate::RenderDiagnostic;
 pub struct FragmentKey {
     pub depth: Ratio<i64>,
     pub chart_rank: u8,
+    pub source_y: u32,
+    pub source_x: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FragmentOwner {
+    pub view: CanonicalView,
+    pub depth: Ratio<i64>,
     pub source_y: u32,
     pub source_x: u32,
 }
@@ -49,6 +58,31 @@ impl FrameBuffer {
 
     pub fn rgba_at(&self, x: u32, y: u32) -> [u8; 4] {
         self.rgba[(y * self.width + x) as usize]
+    }
+
+    pub fn owner_at(&self, x: u32, y: u32) -> Option<FragmentOwner> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let key = self.keys[(y * self.width + x) as usize].as_ref()?;
+        Some(FragmentOwner {
+            view: view_from_rank(key.chart_rank),
+            depth: key.depth,
+            source_y: key.source_y,
+            source_x: key.source_x,
+        })
+    }
+}
+
+fn view_from_rank(rank: u8) -> CanonicalView {
+    match rank {
+        0 => CanonicalView::Front,
+        1 => CanonicalView::Right,
+        2 => CanonicalView::Back,
+        3 => CanonicalView::Left,
+        4 => CanonicalView::Top,
+        5 => CanonicalView::Bottom,
+        _ => unreachable!("fragment keys only use canonical chart ranks"),
     }
 }
 

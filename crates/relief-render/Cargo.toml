@@ -10,3 +10,7 @@ num-rational.workspace = true
 png.workspace = true
 relief-core = { path = "../relief-core" }
 thiserror.workspace = true
+
+[dev-dependencies]
+depthsprite-format = { path = "../depthsprite-format" }
+flate2.workspace = true

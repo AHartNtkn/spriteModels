@@ -1,0 +1,10 @@
+[package]
+name = "fixture-gen"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+depthsprite-format = { path = "../depthsprite-format" }
+relief-core = { path = "../relief-core" }

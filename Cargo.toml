@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/depthsprite-format",
+    "crates/fixture-gen",
     "crates/relief-core",
     "crates/relief-render",
 ]

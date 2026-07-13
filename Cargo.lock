@@ -89,6 +89,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fixture-gen"
+version = "0.1.0"
+dependencies = [
+ "depthsprite-format",
+ "relief-core",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -260,6 +268,8 @@ dependencies = [
 name = "relief-render"
 version = "0.1.0"
 dependencies = [
+ "depthsprite-format",
+ "flate2",
  "num-rational",
  "png",
  "relief-core",

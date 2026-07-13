@@ -82,6 +82,10 @@ impl TargetView {
         ))
     }
 
+    pub fn bowl_acceptance() -> Self {
+        Self::isometric_v1()
+    }
+
     pub fn preset_version(&self) -> u32 {
         self.preset_version
     }

@@ -87,6 +87,14 @@ struct RasterState<'a> {
     candidate_views: &'a mut [BTreeSet<CanonicalView>],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PixelBounds {
+    x_start: u32,
+    x_end: u32,
+    y_start: u32,
+    y_end: u32,
+}
+
 pub fn render_model(charts: &[Chart], request: &RenderRequest) -> Result<FrameBuffer, RenderError> {
     let pixel_count = (request.width as usize)
         .checked_mul(request.height as usize)
@@ -294,8 +302,13 @@ fn rasterize_triangle(
         area = -area;
     }
 
-    for y in 0..state.frame.height() {
-        for x in 0..state.frame.width() {
+    let Some(bounds) = triangle_pixel_bounds(&vertices, state.frame.width(), state.frame.height())
+    else {
+        return;
+    };
+
+    for y in bounds.y_start..bounds.y_end {
+        for x in bounds.x_start..bounds.x_end {
             let point_x = Ratio::new(2 * i64::from(x) + 1, 2);
             let point_y = Ratio::new(2 * i64::from(y) + 1, 2);
             if !covered_by_top_left_rule(&vertices, &point_x, &point_y) {
@@ -377,6 +390,47 @@ fn rasterize_triangle(
     }
 }
 
+fn triangle_pixel_bounds(vertices: &[&Vertex; 3], width: u32, height: u32) -> Option<PixelBounds> {
+    let min_x = vertices
+        .iter()
+        .map(|vertex| vertex.warped.screen_x)
+        .min()
+        .expect("a triangle has three x coordinates");
+    let max_x = vertices
+        .iter()
+        .map(|vertex| vertex.warped.screen_x)
+        .max()
+        .expect("a triangle has three x coordinates");
+    let min_y = vertices
+        .iter()
+        .map(|vertex| vertex.warped.screen_y)
+        .min()
+        .expect("a triangle has three y coordinates");
+    let max_y = vertices
+        .iter()
+        .map(|vertex| vertex.warped.screen_y)
+        .max()
+        .expect("a triangle has three y coordinates");
+    let (x_start, x_end) = pixel_center_range(min_x, max_x, width)?;
+    let (y_start, y_end) = pixel_center_range(min_y, max_y, height)?;
+    Some(PixelBounds {
+        x_start,
+        x_end,
+        y_start,
+        y_end,
+    })
+}
+
+fn pixel_center_range(minimum: Ratio<i64>, maximum: Ratio<i64>, limit: u32) -> Option<(u32, u32)> {
+    let half = Ratio::new(1, 2);
+    let start = (minimum - half)
+        .ceil()
+        .to_integer()
+        .clamp(0, i64::from(limit));
+    let end = ((maximum - half).floor().to_integer() + 1).clamp(0, i64::from(limit));
+    (start < end).then_some((start as u32, end as u32))
+}
+
 fn edge(first: &Vertex, second: &Vertex, x: &Ratio<i64>, y: &Ratio<i64>) -> Ratio<i64> {
     (second.warped.screen_x - first.warped.screen_x) * (*y - first.warped.screen_y)
         - (second.warped.screen_y - first.warped.screen_y) * (*x - first.warped.screen_x)
@@ -423,4 +477,129 @@ fn nearest_source_texel(chart: &Chart, point: &SourcePoint) -> Option<(u32, u32,
     }
 
     nearest.map(|(_, y, x, rgb)| (x, y, rgb))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use num_rational::Ratio;
+    use relief_core::{SourcePoint, WarpedSample};
+
+    use super::{PixelBounds, Vertex, covered_by_top_left_rule, edge, triangle_pixel_bounds};
+
+    fn vertex(x: Ratio<i64>, y: Ratio<i64>) -> Vertex {
+        Vertex {
+            source: SourcePoint::new(Ratio::from_integer(0), Ratio::from_integer(0)),
+            warped: WarpedSample {
+                screen_x: x,
+                screen_y: y,
+                depth: Ratio::from_integer(0),
+            },
+            flat_screen: [Ratio::from_integer(0), Ratio::from_integer(0)],
+        }
+    }
+
+    fn point(numerator: i64, denominator: i64) -> Ratio<i64> {
+        Ratio::new(numerator, denominator)
+    }
+
+    fn assert_bounds_match_full_scan(mut vertices: [Vertex; 3], width: u32, height: u32) {
+        if edge(
+            &vertices[0],
+            &vertices[1],
+            &vertices[2].warped.screen_x,
+            &vertices[2].warped.screen_y,
+        ) < Ratio::from_integer(0)
+        {
+            vertices.swap(1, 2);
+        }
+        let refs = [&vertices[0], &vertices[1], &vertices[2]];
+        let full: BTreeSet<_> = (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                covered_by_top_left_rule(
+                    &refs,
+                    &Ratio::new(2 * i64::from(*x) + 1, 2),
+                    &Ratio::new(2 * i64::from(*y) + 1, 2),
+                )
+            })
+            .collect();
+        let bounded = triangle_pixel_bounds(&refs, width, height);
+        let bounded_hits: BTreeSet<_> = bounded
+            .into_iter()
+            .flat_map(|bounds| {
+                (bounds.y_start..bounds.y_end).flat_map(move |y| {
+                    (bounds.x_start..bounds.x_end).filter_map(move |x| {
+                        covered_by_top_left_rule(
+                            &refs,
+                            &Ratio::new(2 * i64::from(x) + 1, 2),
+                            &Ratio::new(2 * i64::from(y) + 1, 2),
+                        )
+                        .then_some((x, y))
+                    })
+                })
+            })
+            .collect();
+        assert_eq!(bounded_hits, full);
+    }
+
+    #[test]
+    fn exact_bounds_keep_negative_and_partly_offscreen_coverage() {
+        assert_bounds_match_full_scan(
+            [
+                vertex(point(-3, 2), point(-1, 2)),
+                vertex(point(7, 2), point(1, 2)),
+                vertex(point(1, 2), point(9, 2)),
+            ],
+            4,
+            4,
+        );
+    }
+
+    #[test]
+    fn exact_bounds_keep_fractional_edge_pixel_centers() {
+        assert_bounds_match_full_scan(
+            [
+                vertex(point(1, 4), point(1, 4)),
+                vertex(point(13, 4), point(3, 4)),
+                vertex(point(3, 4), point(15, 4)),
+            ],
+            5,
+            5,
+        );
+    }
+
+    #[test]
+    fn exact_bounds_are_winding_independent_after_mirrored_normalization() {
+        assert_bounds_match_full_scan(
+            [
+                vertex(point(1, 1), point(1, 1)),
+                vertex(point(1, 1), point(4, 1)),
+                vertex(point(4, 1), point(1, 1)),
+            ],
+            6,
+            6,
+        );
+    }
+
+    #[test]
+    fn exact_bounds_keep_frame_boundary_touching_triangles_without_full_scan() {
+        let vertices = [
+            vertex(point(2, 1), point(2, 1)),
+            vertex(point(4, 1), point(2, 1)),
+            vertex(point(4, 1), point(4, 1)),
+        ];
+        let refs = [&vertices[0], &vertices[1], &vertices[2]];
+        assert_eq!(
+            triangle_pixel_bounds(&refs, 4, 4),
+            Some(PixelBounds {
+                x_start: 2,
+                x_end: 4,
+                y_start: 2,
+                y_end: 4,
+            })
+        );
+        assert_bounds_match_full_scan(vertices, 4, 4);
+    }
 }
