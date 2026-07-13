@@ -67,9 +67,12 @@ pub fn save_path_atomic(
         replace_file(&temporary, destination)?;
         Ok(())
     })();
-    if before_replace.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-        return before_replace;
+    if let Err(operation) = before_replace {
+        return Err(report_cleanup_result(
+            &temporary,
+            operation,
+            std::fs::remove_file(&temporary),
+        ));
     }
 
     sync_parent(destination)?;
@@ -118,6 +121,21 @@ fn temporary_path(destination: &Path) -> PathBuf {
     let mut name: OsString = destination.as_os_str().to_owned();
     name.push(".tmp");
     PathBuf::from(name)
+}
+
+fn report_cleanup_result(
+    temporary: &Path,
+    operation: PackageError,
+    cleanup: std::io::Result<()>,
+) -> PackageError {
+    match cleanup {
+        Ok(()) => operation,
+        Err(source) => PackageError::TempCleanup {
+            path: temporary.to_owned(),
+            operation: operation.to_string(),
+            source,
+        },
+    }
 }
 
 #[cfg(unix)]
@@ -175,4 +193,39 @@ fn sync_parent(_destination: &Path) -> Result<(), PackageError> {
     // MOVEFILE_WRITE_THROUGH flushes the move operation; Windows does not offer a portable
     // directory-handle equivalent to Unix directory fsync through std.
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{io, path::Path};
+
+    use crate::PackageError;
+
+    use super::report_cleanup_result;
+
+    #[test]
+    fn cleanup_failure_reports_stranded_temp_and_original_operation() {
+        let operation = PackageError::Io(io::Error::other("archive write failed"));
+        let error = report_cleanup_result(
+            Path::new("sprite.depthsprite.tmp"),
+            operation,
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "temp removal denied",
+            )),
+        );
+
+        match error {
+            PackageError::TempCleanup {
+                path,
+                operation,
+                source,
+            } => {
+                assert_eq!(path, Path::new("sprite.depthsprite.tmp"));
+                assert!(operation.to_string().contains("archive write failed"));
+                assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected visible temp cleanup error, got {other:?}"),
+        }
+    }
 }

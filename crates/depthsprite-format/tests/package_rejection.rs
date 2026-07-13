@@ -329,6 +329,7 @@ fn declared_expanded_size_limit_precedes_content_decode() {
 fn bounded_actual_reads_defeat_misleading_expanded_size_headers() {
     let mut archive = zip_bytes(vec![("manifest.json", vec![b' '; LIMIT + 1])]);
     patch_central_uncompressed_size(&mut archive, 1);
+    archive[22..26].copy_from_slice(&1_u32.to_le_bytes());
     assert!(matches!(
         load_reader(Cursor::new(archive)),
         Err(PackageError::ExpandedSizeLimit { .. })

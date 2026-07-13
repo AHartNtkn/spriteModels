@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, path::PathBuf};
 
 use relief_core::{Bounds, CanonicalView, ChartError};
 use thiserror::Error;
@@ -35,6 +35,13 @@ pub enum PackageError {
     },
     #[error("archive entry failed its CRC check: {0}")]
     Integrity(String),
+    #[error("failed to clean up stranded temporary package {path:?} after {operation}: {source}")]
+    TempCleanup {
+        path: PathBuf,
+        operation: String,
+        #[source]
+        source: io::Error,
+    },
     #[error("invalid manifest: {0}")]
     Manifest(String),
     #[error("expected manifest format 'depthsprite', got {0:?}")]
