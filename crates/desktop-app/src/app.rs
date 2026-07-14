@@ -147,32 +147,11 @@ pub struct DepthSpriteApp {
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CompositionStage {
-    TopMenu,
-    Palette,
-    ModelViewport,
-    SourceGrid,
-    TransientModals,
-}
-
-#[cfg(test)]
-struct SourceCardObservation {
-    column: usize,
-    row: usize,
-    card: egui::Rect,
-    color: egui::Rect,
-    depth: egui::Rect,
-}
-
-#[cfg(test)]
 struct CompositionObservation {
-    stages: Vec<CompositionStage>,
-    menu: egui::Rect,
-    palette: egui::Rect,
-    model: egui::Rect,
-    sources: egui::Rect,
-    source_cards: [SourceCardObservation; layout::SOURCE_SLOT_COUNT],
+    menu: crate::menu::MenuObservation,
+    palette: crate::palette::PaletteObservation,
+    model: crate::model_view::ModelViewObservation,
+    source_grid: crate::source_grid::SourceGridObservation,
 }
 
 impl DepthSpriteApp {
@@ -294,13 +273,16 @@ impl eframe::App for DepthSpriteApp {
                 .request_destructive(PendingDestructiveAction::Quit);
         }
 
-        let mut selected = None;
-        let _menu = egui::Panel::top("top-menu")
+        let mut menu_output = None;
+        egui::Panel::top("top-menu")
             .exact_size(layout::MENU_HEIGHT)
-            .show(root, |ui| selected = show_menu_bar(ui));
-        if let Some(action) = selected {
+            .show(root, |ui| menu_output = Some(show_menu_bar(ui)));
+        let menu_output = menu_output.expect("the top panel always renders its menu bar");
+        if let Some(action) = menu_output.action {
             self.handle_menu_action(action, &context);
         }
+        #[cfg(test)]
+        let menu_observation = menu_output.observation;
 
         let root_rect = root.max_rect();
         #[cfg(test)]
@@ -309,11 +291,14 @@ impl eframe::App for DepthSpriteApp {
             let layout = layout::calculate_layout(Size::new(root_rect.width(), root_rect.height()))
                 .expect("native window must respect the derived minimum size");
             let tools_rect = to_egui(layout.tools, root_rect.min);
-            ui.scope_builder(egui::UiBuilder::new().max_rect(tools_rect), |ui| {
-                self.palette.show(ui, &mut self.shell.document);
-            });
+            let palette_output = ui
+                .scope_builder(egui::UiBuilder::new().max_rect(tools_rect), |ui| {
+                    self.palette.show(ui, &mut self.shell.document)
+                })
+                .inner;
             let model_rect = to_egui(layout.model, root_rect.min);
-            if let Err(error) = self.model_view.show(ui, self.shell.document(), model_rect) {
+            let model_output = self.model_view.show(ui, self.shell.document(), model_rect);
+            if let Err(error) = &model_output {
                 ui.painter().text(
                     model_rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -322,7 +307,7 @@ impl eframe::App for DepthSpriteApp {
                     egui::Color32::LIGHT_RED,
                 );
             }
-            self.source_grid.show(
+            let source_grid_output = self.source_grid.show(
                 ui,
                 &mut self.shell.document,
                 &layout.source_cards,
@@ -331,24 +316,17 @@ impl eframe::App for DepthSpriteApp {
             #[cfg(test)]
             {
                 composition = Some(CompositionObservation {
-                    stages: vec![
-                        CompositionStage::TopMenu,
-                        CompositionStage::Palette,
-                        CompositionStage::ModelViewport,
-                        CompositionStage::SourceGrid,
-                    ],
-                    menu: _menu.response.rect,
-                    palette: tools_rect,
-                    model: model_rect,
-                    sources: to_egui(layout.sources, root_rect.min),
-                    source_cards: layout.source_cards.map(|card| SourceCardObservation {
-                        column: card.column,
-                        row: card.row,
-                        card: to_egui(card.card, root_rect.min),
-                        color: to_egui(card.color, root_rect.min),
-                        depth: to_egui(card.depth, root_rect.min),
-                    }),
+                    menu: menu_observation,
+                    palette: palette_output.observation,
+                    model: model_output
+                        .expect("the valid document always renders a model preview")
+                        .observation,
+                    source_grid: source_grid_output.observation,
                 });
+            }
+            #[cfg(not(test))]
+            {
+                let _ = (palette_output, model_output, source_grid_output);
             }
         });
 
@@ -359,9 +337,9 @@ impl eframe::App for DepthSpriteApp {
         }
         #[cfg(test)]
         {
-            let mut composition = composition.expect("workspace composition is always recorded");
-            composition.stages.push(CompositionStage::TransientModals);
-            self.last_composition = Some(composition);
+            self.last_composition = Some(
+                composition.expect("actual workspace widget observations are always recorded"),
+            );
         }
         self.finish_quit(&context);
     }
@@ -418,58 +396,86 @@ mod tests {
     }
 
     #[test]
-    fn real_frame_records_the_complete_semantic_workspace_and_ratios() {
+    fn real_frame_observes_every_rendered_workspace_widget_and_ratio() {
         let context = egui::Context::default();
         let mut app = DepthSpriteApp::from_startup_path(None);
+        for view in layout::CANONICAL_SOURCE_ORDER.into_iter().skip(1) {
+            app.shell.document.add_source(view).unwrap();
+        }
+        assert_eq!(app.shell.document.sources().len(), 6);
 
-        let output = run_frame(&context, &mut app, Vec::new());
+        let _output = run_frame(&context, &mut app, Vec::new());
         let composition = app.last_composition.as_ref().unwrap();
 
-        assert_eq!(
-            composition.stages,
-            [
-                CompositionStage::TopMenu,
-                CompositionStage::Palette,
-                CompositionStage::ModelViewport,
-                CompositionStage::SourceGrid,
-                CompositionStage::TransientModals,
-            ]
-        );
-        assert_eq!(composition.menu.left(), 0.0);
-        assert_eq!(composition.menu.top(), 0.0);
-        assert_eq!(composition.menu.right(), 1600.0);
-        assert!(composition.palette.height() > composition.palette.width() * 10.0);
-        assert!(composition.palette.right() < composition.model.left());
-        assert!(composition.model.width() > composition.sources.width());
+        assert!(composition.menu.rect.is_positive());
+        assert!(composition.menu.rect.left() >= 0.0);
+        assert!(composition.menu.rect.right() <= 1600.0);
 
-        for (index, card) in composition.source_cards.iter().enumerate() {
+        assert!(composition.palette.rect.is_positive());
+        assert!(composition.palette.controls.len() >= 9);
+        for control in &composition.palette.controls {
+            assert!(control.is_positive());
+            assert!(composition.palette.rect.contains_rect(*control));
+        }
+        for pair in composition.palette.controls.windows(2) {
+            assert!(pair[0].top() < pair[1].top());
+        }
+
+        assert!(composition.model.rect.is_positive());
+        assert!(composition.menu.rect.bottom() <= composition.palette.rect.top());
+        assert!(composition.menu.rect.bottom() <= composition.model.rect.top());
+        assert!(composition.palette.rect.right() < composition.model.rect.left());
+        assert_eq!(composition.source_grid.cards.len(), 6);
+        assert_eq!(
+            composition
+                .source_grid
+                .cards
+                .iter()
+                .map(|card| card.view)
+                .collect::<Vec<_>>(),
+            layout::CANONICAL_SOURCE_ORDER
+        );
+
+        for (index, card) in composition.source_grid.cards.iter().enumerate() {
             assert_eq!(card.column, index % layout::SOURCE_COLUMNS);
             assert_eq!(card.row, index / layout::SOURCE_COLUMNS);
+            assert!(card.card.is_positive());
+            assert!(card.card.contains_rect(card.color));
+            assert!(card.card.contains_rect(card.depth));
             assert!(card.color.bottom() < card.depth.top());
             assert_eq!(card.color.size(), card.depth.size());
             assert!(
-                composition.model.width() >= card.color.width() * layout::MODEL_TO_CANVAS_RATIO
+                composition.model.rect.width()
+                    >= card.color.width() * layout::MODEL_TO_CANVAS_RATIO
             );
             assert!(
-                composition.model.height() >= card.color.height() * layout::MODEL_TO_CANVAS_RATIO
+                composition.model.rect.height()
+                    >= card.color.height() * layout::MODEL_TO_CANVAS_RATIO
             );
         }
         for row in 0..layout::SOURCE_ROWS {
             for column in 1..layout::SOURCE_COLUMNS {
-                let previous = &composition.source_cards[row * layout::SOURCE_COLUMNS + column - 1];
-                let current = &composition.source_cards[row * layout::SOURCE_COLUMNS + column];
+                let previous =
+                    &composition.source_grid.cards[row * layout::SOURCE_COLUMNS + column - 1];
+                let current = &composition.source_grid.cards[row * layout::SOURCE_COLUMNS + column];
                 assert!(previous.card.right() < current.card.left());
             }
         }
         for column in 0..layout::SOURCE_COLUMNS {
-            let above = &composition.source_cards[column];
-            let below = &composition.source_cards[layout::SOURCE_COLUMNS + column];
+            let above = &composition.source_grid.cards[column];
+            let below = &composition.source_grid.cards[layout::SOURCE_COLUMNS + column];
             assert!(above.card.bottom() < below.card.top());
         }
-        assert!(output.shapes.iter().any(|clipped| {
-            let bounds = clipped.shape.visual_bounding_rect();
-            bounds.contains_rect(composition.model)
-        }));
+        let sources_rect = composition
+            .source_grid
+            .cards
+            .iter()
+            .skip(1)
+            .fold(composition.source_grid.cards[0].card, |bounds, card| {
+                bounds.union(card.card)
+            });
+        assert!(composition.model.rect.right() < sources_rect.left());
+        assert!(composition.model.rect.width() > sources_rect.width());
     }
 
     #[test]
@@ -477,7 +483,7 @@ mod tests {
         let context = egui::Context::default();
         let mut app = DepthSpriteApp::from_startup_path(None);
         run_frame(&context, &mut app, Vec::new());
-        let center = app.last_composition.as_ref().unwrap().model.center();
+        let center = app.last_composition.as_ref().unwrap().model.rect.center();
         run_frame(
             &context,
             &mut app,

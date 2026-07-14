@@ -88,6 +88,26 @@ pub struct SourceGridState {
     error: Option<String>,
 }
 
+pub(crate) struct SourceGridOutput {
+    #[cfg(test)]
+    pub observation: SourceGridObservation,
+}
+
+#[cfg(test)]
+pub(crate) struct SourceGridObservation {
+    pub cards: Vec<SourceCardObservation>,
+}
+
+#[cfg(test)]
+pub(crate) struct SourceCardObservation {
+    pub view: CanonicalView,
+    pub column: usize,
+    pub row: usize,
+    pub card: egui::Rect,
+    pub color: egui::Rect,
+    pub depth: egui::Rect,
+}
+
 impl Default for SourceGridState {
     fn default() -> Self {
         Self {
@@ -98,19 +118,33 @@ impl Default for SourceGridState {
 }
 
 impl SourceGridState {
-    pub fn show(
+    pub(crate) fn show(
         &mut self,
         ui: &mut egui::Ui,
         document: &mut EditorDocument,
         layouts: &[SourceCardLayout; 6],
         origin: egui::Pos2,
-    ) {
+    ) -> SourceGridOutput {
+        #[cfg(test)]
+        let mut observed_cards = Vec::new();
         let modes = slot_modes(document);
         for (index, layout) in layouts.iter().enumerate() {
             let card_rect = to_egui(layout.card, origin);
             match modes[index] {
                 SlotMode::Authored => {
-                    self.show_authored_card(ui, document, index, layout, card_rect, origin);
+                    let canvas =
+                        self.show_authored_card(ui, document, index, layout, card_rect, origin);
+                    #[cfg(test)]
+                    observed_cards.push(SourceCardObservation {
+                        view: layout.view,
+                        column: layout.column,
+                        row: layout.row,
+                        card: card_rect,
+                        color: canvas.observation.color,
+                        depth: canvas.observation.depth,
+                    });
+                    #[cfg(not(test))]
+                    let _ = canvas;
                 }
                 SlotMode::AddSprite => {
                     ui.painter()
@@ -134,6 +168,12 @@ impl SourceGridState {
                 egui::Color32::LIGHT_RED,
             );
         }
+        SourceGridOutput {
+            #[cfg(test)]
+            observation: SourceGridObservation {
+                cards: observed_cards,
+            },
+        }
     }
 
     fn show_authored_card(
@@ -144,7 +184,7 @@ impl SourceGridState {
         layout: &SourceCardLayout,
         card_rect: egui::Rect,
         origin: egui::Pos2,
-    ) {
+    ) -> crate::canvas::CanvasPairOutput {
         ui.painter()
             .rect_filled(card_rect, 4.0, egui::Color32::from_gray(36));
         let header = card_header(document, layout.view)
@@ -182,7 +222,7 @@ impl SourceGridState {
 
         let color_rect = to_egui(layout.color, origin);
         let depth_rect = to_egui(layout.depth, origin);
-        self.cards[index].show_pair(ui, document, layout.view, color_rect, depth_rect);
+        self.cards[index].show_pair(ui, document, layout.view, color_rect, depth_rect)
     }
 
     fn capture(&mut self, result: Result<(), EditorError>) {

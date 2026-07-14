@@ -7,15 +7,20 @@ pub struct ModelView {
     camera: OrbitCamera,
     preview: PreviewCache,
     texture: Option<egui::TextureHandle>,
+    uploaded_generation: Option<u64>,
     #[cfg(test)]
-    last_frame: FrameObservation,
+    texture_upload_calls: u64,
+}
+
+pub struct ModelViewOutput {
+    pub response: egui::Response,
+    #[cfg(test)]
+    pub(crate) observation: ModelViewObservation,
 }
 
 #[cfg(test)]
-#[derive(Default)]
-struct FrameObservation {
-    preview_renders: u8,
-    texture_updates: u8,
+pub(crate) struct ModelViewObservation {
+    pub rect: egui::Rect,
 }
 
 impl ModelView {
@@ -32,7 +37,7 @@ impl ModelView {
         ui: &mut egui::Ui,
         document: &EditorDocument,
         rect: egui::Rect,
-    ) -> Result<egui::Response, EditorError> {
+    ) -> Result<ModelViewOutput, EditorError> {
         let response = ui.interact(rect, ui.id().with("model-view"), egui::Sense::drag());
         if response.dragged_by(egui::PointerButton::Primary) {
             let delta = response.drag_delta();
@@ -50,25 +55,34 @@ impl ModelView {
         let width = rect.width().round().max(1.0) as u32;
         let height = rect.height().round().max(1.0) as u32;
         let preview = self.preview.frame(document, self.camera, width, height)?;
-        let changed = preview.changed();
-        #[cfg(test)]
-        {
-            self.last_frame = FrameObservation {
-                preview_renders: u8::from(changed),
-                texture_updates: u8::from(changed),
-            };
-        }
-        let image = changed.then(|| color_image(preview.framebuffer()));
+        let generation = preview.generation();
+        let image = (self.uploaded_generation != Some(generation))
+            .then(|| color_image(preview.framebuffer()));
         if let Some(image) = image {
             if let Some(texture) = &mut self.texture {
                 texture.set(image, egui::TextureOptions::NEAREST);
+                #[cfg(test)]
+                {
+                    self.texture_upload_calls = self
+                        .texture_upload_calls
+                        .checked_add(1)
+                        .expect("texture upload count must remain monotonic");
+                }
             } else {
                 self.texture = Some(ui.ctx().load_texture(
                     "depthsprite-model-preview",
                     image,
                     egui::TextureOptions::NEAREST,
                 ));
+                #[cfg(test)]
+                {
+                    self.texture_upload_calls = self
+                        .texture_upload_calls
+                        .checked_add(1)
+                        .expect("texture upload count must remain monotonic");
+                }
             }
+            self.uploaded_generation = Some(generation);
         }
 
         ui.painter()
@@ -81,7 +95,13 @@ impl ModelView {
                 egui::Color32::WHITE,
             );
         }
-        Ok(response)
+        Ok(ModelViewOutput {
+            #[cfg(test)]
+            observation: ModelViewObservation {
+                rect: response.rect,
+            },
+            response,
+        })
     }
 }
 
@@ -126,6 +146,8 @@ mod tests {
         document.set_current_depth(DepthValue::Relief(ReliefValue::new(8).unwrap()));
         let mut model_view = ModelView::default();
         run_frame(&context, &mut model_view, &document);
+        let generation_before_edits = model_view.preview.generation();
+        let uploads_before_edits = model_view.texture_upload_calls;
 
         for x in 0..3 {
             document.begin_stroke().unwrap();
@@ -133,11 +155,14 @@ mod tests {
             document.finish_stroke().unwrap();
         }
         run_frame(&context, &mut model_view, &document);
-        assert_eq!(model_view.last_frame.preview_renders, 1);
-        assert_eq!(model_view.last_frame.texture_updates, 1);
+        assert_eq!(model_view.preview.generation() - generation_before_edits, 1);
+        assert_eq!(model_view.texture_upload_calls - uploads_before_edits, 1);
+
+        let unchanged_generation = model_view.preview.generation();
+        let unchanged_uploads = model_view.texture_upload_calls;
 
         run_frame(&context, &mut model_view, &document);
-        assert_eq!(model_view.last_frame.preview_renders, 0);
-        assert_eq!(model_view.last_frame.texture_updates, 0);
+        assert_eq!(model_view.preview.generation(), unchanged_generation);
+        assert_eq!(model_view.texture_upload_calls, unchanged_uploads);
     }
 }

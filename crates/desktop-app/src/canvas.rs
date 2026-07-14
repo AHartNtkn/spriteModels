@@ -272,6 +272,17 @@ pub struct CanvasPairState {
     interaction_error: Option<String>,
 }
 
+pub struct CanvasPairOutput {
+    #[cfg(test)]
+    pub(crate) observation: CanvasPairObservation,
+}
+
+#[cfg(test)]
+pub(crate) struct CanvasPairObservation {
+    pub color: Rect,
+    pub depth: Rect,
+}
+
 impl CanvasPairState {
     pub fn show_pair(
         &mut self,
@@ -280,7 +291,7 @@ impl CanvasPairState {
         view: CanonicalView,
         color_rect: Rect,
         depth_rect: Rect,
-    ) {
+    ) -> CanvasPairOutput {
         let color_response = ui.allocate_rect(color_rect, Sense::click_and_drag());
         let depth_response = ui.allocate_rect(depth_rect, Sense::click_and_drag());
         let dimensions = document.source(view).map(|source| source.dimensions());
@@ -329,6 +340,13 @@ impl CanvasPairState {
                     Color32::LIGHT_RED,
                 );
             }
+        }
+        CanvasPairOutput {
+            #[cfg(test)]
+            observation: CanvasPairObservation {
+                color: color_response.rect,
+                depth: depth_response.rect,
+            },
         }
     }
 

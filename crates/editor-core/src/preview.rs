@@ -14,13 +14,14 @@ struct PreviewKey {
 pub struct PreviewCache {
     key: Option<PreviewKey>,
     framebuffer: Option<FrameBuffer>,
+    generation: u64,
     #[cfg(test)]
     render_count: u64,
 }
 
 pub struct PreviewFrame<'a> {
     framebuffer: &'a FrameBuffer,
-    changed: bool,
+    generation: u64,
 }
 
 impl PreviewFrame<'_> {
@@ -28,12 +29,16 @@ impl PreviewFrame<'_> {
         self.framebuffer
     }
 
-    pub fn changed(&self) -> bool {
-        self.changed
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
 impl PreviewCache {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub fn frame(
         &mut self,
         document: &EditorDocument,
@@ -47,11 +52,14 @@ impl PreviewCache {
             width,
             height,
         };
-        let changed = self.key != Some(key);
-        if changed {
+        if self.key != Some(key) {
             let charts = document.resolved_charts()?;
             let request = RenderRequest::new(width, height, camera.target_view());
             let framebuffer = render_model(document.bounds(), &charts, &request)?;
+            self.generation = self
+                .generation
+                .checked_add(1)
+                .expect("preview generation must remain monotonic");
             self.framebuffer = Some(framebuffer);
             self.key = Some(key);
             #[cfg(test)]
@@ -68,7 +76,7 @@ impl PreviewCache {
                 .framebuffer
                 .as_ref()
                 .expect("a successful preview request always stores its framebuffer"),
-            changed,
+            generation: self.generation,
         })
     }
 }

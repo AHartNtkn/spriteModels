@@ -96,9 +96,20 @@ pub const fn menu_items(group: MenuGroup) -> &'static [MenuItem] {
     }
 }
 
-pub(crate) fn show_menu_bar(ui: &mut eframe::egui::Ui) -> Option<MenuAction> {
+pub(crate) struct MenuBarOutput {
+    pub action: Option<MenuAction>,
+    #[cfg(test)]
+    pub observation: MenuObservation,
+}
+
+#[cfg(test)]
+pub(crate) struct MenuObservation {
+    pub rect: eframe::egui::Rect,
+}
+
+pub(crate) fn show_menu_bar(ui: &mut eframe::egui::Ui) -> MenuBarOutput {
     let mut selected = None;
-    eframe::egui::MenuBar::new().ui(ui, |ui| {
+    let menu = eframe::egui::MenuBar::new().ui(ui, |ui| {
         for group in [MenuGroup::File, MenuGroup::Edit, MenuGroup::View] {
             ui.menu_button(group.label(), |ui| {
                 for item in menu_items(group) {
@@ -110,5 +121,13 @@ pub(crate) fn show_menu_bar(ui: &mut eframe::egui::Ui) -> Option<MenuAction> {
             });
         }
     });
-    selected
+    #[cfg(not(test))]
+    let _ = &menu;
+    MenuBarOutput {
+        action: selected,
+        #[cfg(test)]
+        observation: MenuObservation {
+            rect: menu.response.rect,
+        },
+    }
 }

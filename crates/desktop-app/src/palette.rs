@@ -134,6 +134,17 @@ pub struct PaletteState {
     hex_error: bool,
 }
 
+pub struct PaletteOutput {
+    #[cfg(test)]
+    pub(crate) observation: PaletteObservation,
+}
+
+#[cfg(test)]
+pub(crate) struct PaletteObservation {
+    pub rect: egui::Rect,
+    pub controls: Vec<egui::Rect>,
+}
+
 impl PaletteState {
     pub fn new(document: &EditorDocument) -> Self {
         let synced_rgb = document.current_rgb();
@@ -144,8 +155,10 @@ impl PaletteState {
         }
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, document: &mut EditorDocument) {
-        ui.vertical(|ui| {
+    pub fn show(&mut self, ui: &mut egui::Ui, document: &mut EditorDocument) -> PaletteOutput {
+        #[cfg(test)]
+        let mut controls = Vec::new();
+        let palette = ui.vertical(|ui| {
             for entry in tool_entries() {
                 let selected = document.tool() == entry.tool;
                 let response = ui
@@ -157,6 +170,8 @@ impl PaletteState {
                     })
                     .inner
                     .on_hover_text(entry.label);
+                #[cfg(test)]
+                controls.push(response.rect);
                 if response.clicked() {
                     select_tool(document, entry.tool);
                 }
@@ -164,14 +179,15 @@ impl PaletteState {
 
             ui.separator();
             let mut rgb = document.current_rgb();
-            if ui
+            let color_response = ui
                 .color_edit_button_srgb(&mut rgb)
-                .on_hover_text("Color: hue and saturation/value")
-                .changed()
-            {
+                .on_hover_text("Color: hue and saturation/value");
+            #[cfg(test)]
+            controls.push(color_response.rect);
+            if color_response.changed() {
                 document.set_current_rgb(rgb);
             }
-            ui.menu_button("RGB", |ui| {
+            let rgb_response = ui.menu_button("RGB", |ui| {
                 ui.set_min_width(170.0);
                 let rgb = document.current_rgb();
                 for (channel, label) in ["R", "G", "B"].into_iter().enumerate() {
@@ -214,24 +230,30 @@ impl PaletteState {
                     ui.colored_label(egui::Color32::LIGHT_RED, "Use six hex digits");
                 }
             });
+            #[cfg(test)]
+            controls.push(rgb_response.response.rect);
+            #[cfg(not(test))]
+            let _ = &rgb_response;
 
             ui.separator();
-            if ui
+            let color_layer_response = ui
                 .selectable_label(document.active_layer() == ActiveLayer::Color, "C")
-                .on_hover_text("Edit color")
-                .clicked()
-            {
+                .on_hover_text("Edit color");
+            #[cfg(test)]
+            controls.push(color_layer_response.rect);
+            if color_layer_response.clicked() {
                 document.set_active_layer(ActiveLayer::Color);
             }
-            if ui
+            let depth_layer_response = ui
                 .selectable_label(document.active_layer() == ActiveLayer::Depth, "D")
-                .on_hover_text("Edit relief")
-                .clicked()
-            {
+                .on_hover_text("Edit relief");
+            #[cfg(test)]
+            controls.push(depth_layer_response.rect);
+            if depth_layer_response.clicked() {
                 document.set_active_layer(ActiveLayer::Depth);
             }
 
-            ui.menu_button("Z", |ui| {
+            let depth_response = ui.menu_button("Z", |ui| {
                 ui.set_min_width(190.0);
                 let mut relief = match document.current_depth() {
                     DepthValue::Empty => 0,
@@ -249,7 +271,20 @@ impl PaletteState {
                 ui.label(labels.units);
                 ui.label(labels.model_pixels);
             });
+            #[cfg(test)]
+            controls.push(depth_response.response.rect);
+            #[cfg(not(test))]
+            let _ = &depth_response;
         });
+        #[cfg(not(test))]
+        let _ = &palette;
+        PaletteOutput {
+            #[cfg(test)]
+            observation: PaletteObservation {
+                rect: palette.response.rect,
+                controls,
+            },
+        }
     }
 
     fn sync_hex(&mut self, rgb: [u8; 3]) {

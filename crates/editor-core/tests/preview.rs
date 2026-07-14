@@ -179,17 +179,41 @@ fn an_unchanged_preview_key_returns_the_same_framebuffer() {
 }
 
 #[test]
-fn preview_result_reports_only_newly_rendered_frames_as_changed() {
+fn preview_generation_advances_once_per_successful_render() {
     let mut document = one_pixel_document();
     let camera = OrbitCamera::default();
     let mut preview = PreviewCache::default();
 
-    assert!(preview.frame(&document, camera, 48, 32).unwrap().changed());
-    assert!(!preview.frame(&document, camera, 48, 32).unwrap().changed());
+    let initial_generation = preview
+        .frame(&document, camera, 48, 32)
+        .unwrap()
+        .generation();
+    assert_eq!(initial_generation, 1);
+    assert_eq!(preview.generation(), initial_generation);
+    assert_eq!(
+        preview
+            .frame(&document, camera, 48, 32)
+            .unwrap()
+            .generation(),
+        initial_generation
+    );
 
-    recolor(&mut document, CanonicalView::Front, [91, 82, 73]);
-    assert!(preview.frame(&document, camera, 48, 32).unwrap().changed());
-    assert!(!preview.frame(&document, camera, 48, 32).unwrap().changed());
+    for rgb in [[91, 82, 73], [64, 55, 46], [37, 28, 19]] {
+        recolor(&mut document, CanonicalView::Front, rgb);
+    }
+    let edited_generation = preview
+        .frame(&document, camera, 48, 32)
+        .unwrap()
+        .generation();
+    assert_eq!(edited_generation, initial_generation + 1);
+    assert_eq!(preview.generation(), edited_generation);
+    assert_eq!(
+        preview
+            .frame(&document, camera, 48, 32)
+            .unwrap()
+            .generation(),
+        edited_generation
+    );
 }
 
 #[test]
