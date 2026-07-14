@@ -5,7 +5,7 @@ use eframe::egui;
 use relief_core::CanonicalView;
 
 use crate::{
-    canvas::{CanvasKind, CanvasPairState},
+    canvas::CanvasPairState,
     layout::{CANONICAL_SOURCE_ORDER, SourceCardLayout},
 };
 
@@ -181,25 +181,8 @@ impl SourceGridState {
         });
 
         let color_rect = to_egui(layout.color, origin);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(color_rect), |ui| {
-            self.cards[index].show_canvas(
-                ui,
-                document,
-                layout.view,
-                CanvasKind::Color,
-                color_rect.size(),
-            );
-        });
         let depth_rect = to_egui(layout.depth, origin);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(depth_rect), |ui| {
-            self.cards[index].show_canvas(
-                ui,
-                document,
-                layout.view,
-                CanvasKind::Depth,
-                depth_rect.size(),
-            );
-        });
+        self.cards[index].show_pair(ui, document, layout.view, color_rect, depth_rect);
     }
 
     fn capture(&mut self, result: Result<(), EditorError>) {

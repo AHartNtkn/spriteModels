@@ -19,6 +19,12 @@ pub enum Tool {
     Eyedropper,
 }
 
+impl Tool {
+    pub const fn is_available_on(self, layer: ActiveLayer) -> bool {
+        !matches!((self, layer), (Self::Eraser, ActiveLayer::Color))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DocumentState {
     pub(crate) bounds: Bounds,

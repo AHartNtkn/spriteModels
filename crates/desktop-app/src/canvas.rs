@@ -185,6 +185,9 @@ impl StrokeController {
         pixel: PixelCoord,
     ) -> Result<(), EditorError> {
         document.set_active_layer(kind.layer());
+        if !document.tool().is_available_on(document.active_layer()) {
+            return Ok(());
+        }
         match document.tool() {
             Tool::Pencil | Tool::Eraser => {
                 document.begin_stroke()?;
@@ -270,44 +273,81 @@ pub struct CanvasPairState {
 }
 
 impl CanvasPairState {
-    pub fn show_canvas(
+    pub fn show_pair(
         &mut self,
         ui: &mut egui::Ui,
         document: &mut EditorDocument,
         view: CanonicalView,
-        kind: CanvasKind,
-        size: Vec2,
-    ) -> egui::Response {
-        let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
-        ui.painter().rect_filled(rect, 0.0, Color32::from_gray(24));
+        color_rect: Rect,
+        depth_rect: Rect,
+    ) {
+        let color_response = ui.allocate_rect(color_rect, Sense::click_and_drag());
+        let depth_response = ui.allocate_rect(depth_rect, Sense::click_and_drag());
+        let dimensions = document.source(view).map(|source| source.dimensions());
 
-        let Some(source) = document.source(view) else {
-            return response;
-        };
-        let dimensions = source.dimensions();
-        for y in 0..dimensions.1 {
-            for x in 0..dimensions.0 {
-                let sample = source
-                    .pixel(x, y)
-                    .expect("coordinates come from source dimensions");
-                let color = match kind {
-                    CanvasKind::Color => color_display(sample.rgb()),
-                    CanvasKind::Depth => depth_display_alpha(sample.alpha()),
-                };
-                if let Some(pixel_rect) =
-                    self.transform
-                        .pixel_rect(rect, dimensions, PixelCoord::new(x, y))
-                {
-                    ui.painter().rect_filled(pixel_rect, 0.0, color);
-                }
-            }
+        if let Some(dimensions) = dimensions {
+            self.apply_pair_input(
+                ui,
+                document,
+                view,
+                dimensions,
+                &color_response,
+                &depth_response,
+            );
+        } else {
+            self.hover = None;
         }
 
-        if response.dragged_by(egui::PointerButton::Middle) {
+        let transform = self.transform;
+        let hover = self.hover;
+        paint_canvas(
+            ui,
+            document,
+            view,
+            CanvasKind::Color,
+            color_rect,
+            transform,
+            hover,
+        );
+        paint_canvas(
+            ui,
+            document,
+            view,
+            CanvasKind::Depth,
+            depth_rect,
+            transform,
+            hover,
+        );
+
+        if let Some(error) = &self.interaction_error {
+            for rect in [color_rect, depth_rect] {
+                ui.painter().text(
+                    rect.left_top() + egui::vec2(3.0, 3.0),
+                    egui::Align2::LEFT_TOP,
+                    error,
+                    egui::FontId::monospace(9.0),
+                    Color32::LIGHT_RED,
+                );
+            }
+        }
+    }
+
+    fn apply_pair_input(
+        &mut self,
+        ui: &egui::Ui,
+        document: &mut EditorDocument,
+        view: CanonicalView,
+        dimensions: (u32, u32),
+        color_response: &egui::Response,
+        depth_response: &egui::Response,
+    ) {
+        if color_response.dragged_by(egui::PointerButton::Middle)
+            || depth_response.dragged_by(egui::PointerButton::Middle)
+        {
             self.transform
                 .pan_by(ui.input(|input| input.pointer.delta()));
         }
-        if response.hovered() {
+        if color_response.hovered() || depth_response.hovered() {
             let scroll = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 self.transform
@@ -315,20 +355,28 @@ impl CanvasPairState {
             }
         }
 
-        let pointer = response.interact_pointer_pos();
-        let hovered = pointer
-            .and_then(|position| self.transform.pointer_to_pixel(rect, dimensions, position));
-        if response.hovered() {
-            self.hover = hovered;
-        }
+        let hovered_canvas = ui
+            .input(|input| input.pointer.hover_pos())
+            .and_then(|position| {
+                if color_response.hovered() {
+                    Some((CanvasKind::Color, color_response.rect, position))
+                } else if depth_response.hovered() {
+                    Some((CanvasKind::Depth, depth_response.rect, position))
+                } else {
+                    None
+                }
+            });
+        self.hover = hovered_canvas.and_then(|(_, rect, position)| {
+            self.transform.pointer_to_pixel(rect, dimensions, position)
+        });
 
-        if response.hovered() && ui.input(|input| input.pointer.primary_pressed()) {
-            if let Some(pixel) = hovered {
+        if ui.input(|input| input.pointer.primary_pressed()) {
+            if let (Some((kind, _, _)), Some(pixel)) = (hovered_canvas, self.hover) {
                 let result = self.stroke.pointer_down(document, view, kind, pixel);
                 self.capture(result);
             }
         } else if ui.input(|input| input.pointer.primary_down())
-            && let Some(pixel) = hovered
+            && let Some(pixel) = self.hover
         {
             let result = self.stroke.pointer_dragged(document, pixel);
             self.capture(result);
@@ -337,27 +385,6 @@ impl CanvasPairState {
             let result = self.stroke.pointer_released(document);
             self.capture(result);
         }
-
-        if let Some(pixel) = hovered
-            && let Some(pixel_rect) = self.transform.pixel_rect(rect, dimensions, pixel)
-        {
-            ui.painter().rect_stroke(
-                pixel_rect,
-                0.0,
-                egui::Stroke::new(1.0, Color32::YELLOW),
-                egui::StrokeKind::Inside,
-            );
-        }
-        if let Some(error) = &self.interaction_error {
-            ui.painter().text(
-                rect.left_top() + egui::vec2(3.0, 3.0),
-                egui::Align2::LEFT_TOP,
-                error,
-                egui::FontId::monospace(9.0),
-                Color32::LIGHT_RED,
-            );
-        }
-        response
     }
 
     fn capture<T>(&mut self, result: Result<T, EditorError>) {
@@ -365,5 +392,47 @@ impl CanvasPairState {
             Ok(_) => self.interaction_error = None,
             Err(error) => self.interaction_error = Some(error.to_string()),
         }
+    }
+}
+
+fn paint_canvas(
+    ui: &egui::Ui,
+    document: &EditorDocument,
+    view: CanonicalView,
+    kind: CanvasKind,
+    rect: Rect,
+    transform: CanvasTransform,
+    hover: Option<PixelCoord>,
+) {
+    ui.painter().rect_filled(rect, 0.0, Color32::from_gray(24));
+    let Some(source) = document.source(view) else {
+        return;
+    };
+    let dimensions = source.dimensions();
+    for y in 0..dimensions.1 {
+        for x in 0..dimensions.0 {
+            let sample = source
+                .pixel(x, y)
+                .expect("coordinates come from source dimensions");
+            let color = match kind {
+                CanvasKind::Color => color_display(sample.rgb()),
+                CanvasKind::Depth => depth_display_alpha(sample.alpha()),
+            };
+            if let Some(pixel_rect) = transform.pixel_rect(rect, dimensions, PixelCoord::new(x, y))
+            {
+                ui.painter().rect_filled(pixel_rect, 0.0, color);
+            }
+        }
+    }
+
+    if let Some(pixel) = hover
+        && let Some(pixel_rect) = transform.pixel_rect(rect, dimensions, pixel)
+    {
+        ui.painter().rect_stroke(
+            pixel_rect,
+            0.0,
+            egui::Stroke::new(1.0, Color32::YELLOW),
+            egui::StrokeKind::Inside,
+        );
     }
 }

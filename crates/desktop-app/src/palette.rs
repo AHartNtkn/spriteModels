@@ -149,10 +149,13 @@ impl PaletteState {
             for entry in tool_entries() {
                 let selected = document.tool() == entry.tool;
                 let response = ui
-                    .add_sized(
-                        [ui.available_width(), 28.0],
-                        egui::Button::selectable(selected, entry.glyph),
-                    )
+                    .add_enabled_ui(entry.tool.is_available_on(document.active_layer()), |ui| {
+                        ui.add_sized(
+                            [ui.available_width(), 28.0],
+                            egui::Button::selectable(selected, entry.glyph),
+                        )
+                    })
+                    .inner
                     .on_hover_text(entry.label);
                 if response.clicked() {
                     select_tool(document, entry.tool);
