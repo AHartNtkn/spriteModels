@@ -135,9 +135,9 @@ impl ModelView {
         if !wheel_delta.is_finite() {
             return;
         }
-        let delta = (f64::from(wheel_delta) * ZOOM_MILLI_PER_UNIT).round() as i64;
-        self.zoom_milli = (i64::from(self.zoom_milli) + delta)
-            .clamp(i64::from(MIN_ZOOM_MILLI), i64::from(MAX_ZOOM_MILLI))
+        let delta = i128::from((f64::from(wheel_delta) * ZOOM_MILLI_PER_UNIT).round() as i64);
+        self.zoom_milli = (i128::from(self.zoom_milli) + delta)
+            .clamp(i128::from(MIN_ZOOM_MILLI), i128::from(MAX_ZOOM_MILLI))
             as u32;
     }
 }

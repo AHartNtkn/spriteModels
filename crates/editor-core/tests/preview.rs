@@ -5,6 +5,7 @@ use editor_core::{
     ActiveLayer, DepthValue, EditorDocument, OrbitCamera, PreviewCache, ReliefValue, SourceSprite,
 };
 use relief_core::{Bounds, CanonicalView, Chart};
+use relief_render::FrameBuffer;
 
 fn one_pixel_document() -> EditorDocument {
     let bounds = Bounds::new(1, 1, 1).unwrap();
@@ -18,6 +19,20 @@ fn maximum_relief_shallow_document() -> EditorDocument {
     let chart = Chart::from_rgba(CanonicalView::Front, 1, 1, vec![[11, 22, 33, 1]]).unwrap();
     let model = DepthSpriteModel::new(bounds, vec![chart]).unwrap();
     EditorDocument::from_model(model, None).unwrap()
+}
+
+fn assert_occupied_with_breathing_room(frame: &FrameBuffer) {
+    let occupied = (0..frame.height())
+        .flat_map(|y| (0..frame.width()).map(move |x| (x, y)))
+        .filter(|&(x, y)| frame.owner_at(x, y).is_some())
+        .collect::<Vec<_>>();
+    assert!(!occupied.is_empty(), "relief geometry remains rendered");
+    assert!(
+        occupied
+            .iter()
+            .all(|&(x, y)| x >= 2 && y >= 2 && x + 2 < frame.width() && y + 2 < frame.height()),
+        "relief geometry remains inside the two-pixel raster breathing room"
+    );
 }
 
 fn bowl_document() -> EditorDocument {
@@ -142,7 +157,7 @@ fn extreme_finite_orbit_input_remains_bounded_and_deterministic() {
     let mut preview = PreviewCache::default();
     let frame = preview.frame(&document, first).unwrap();
     let frame = frame.framebuffer();
-    assert_eq!((frame.width(), frame.height()), (71, 71));
+    assert_eq!((frame.width(), frame.height()), (6, 6));
 
     let pitch_maximum = first;
     first.drag(0.0, 1.0);
@@ -291,8 +306,9 @@ fn native_preview_cell_depends_only_on_registered_bounds_and_legal_relief() {
     let first = preview.frame(&document, camera).unwrap();
     assert_eq!(
         (first.framebuffer().width(), first.framebuffer().height()),
-        (148, 148)
+        (52, 52)
     );
+    assert_occupied_with_breathing_room(first.framebuffer());
     let generation = first.generation();
 
     camera.drag(24.0, -12.0);
@@ -302,8 +318,9 @@ fn native_preview_cell_depends_only_on_registered_bounds_and_legal_relief() {
             orbited.framebuffer().width(),
             orbited.framebuffer().height()
         ),
-        (148, 148)
+        (52, 52)
     );
+    assert_occupied_with_breathing_room(orbited.framebuffer());
     assert_eq!(orbited.generation(), generation + 1);
 }
 
@@ -314,18 +331,8 @@ fn shallow_bounds_contain_maximum_legal_relief_with_raster_breathing_room() {
     let preview_frame = preview.frame(&document, OrbitCamera::default()).unwrap();
     let frame = preview_frame.framebuffer();
 
-    assert_eq!((frame.width(), frame.height()), (71, 71));
-    let occupied = (0..frame.height())
-        .flat_map(|y| (0..frame.width()).map(move |x| (x, y)))
-        .filter(|&(x, y)| frame.owner_at(x, y).is_some())
-        .collect::<Vec<_>>();
-    assert!(!occupied.is_empty(), "maximum relief remains rendered");
-    assert!(
-        occupied
-            .iter()
-            .all(|&(x, y)| x >= 2 && y >= 2 && x + 2 < frame.width() && y + 2 < frame.height()),
-        "maximum relief remains inside the two-pixel raster breathing room"
-    );
+    assert_eq!((frame.width(), frame.height()), (67, 67));
+    assert_occupied_with_breathing_room(frame);
 }
 
 #[test]

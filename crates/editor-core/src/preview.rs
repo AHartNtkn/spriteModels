@@ -1,9 +1,8 @@
+use relief_core::{Bounds, CanonicalView, Chart};
 use relief_render::{FrameBuffer, RenderRequest, render_model};
 
 use crate::{EditorDocument, EditorError, OrbitCamera, camera::OrbitOrientation};
 
-const MAX_RELIEF_EIGHTHS: u32 = 254;
-const RELIEF_EIGHTHS_PER_MODEL_PIXEL: u32 = 8;
 const RASTER_BREATHING_ROOM: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,7 +54,7 @@ impl PreviewCache {
         };
         if self.key != Some(key) {
             let charts = document.resolved_charts()?;
-            let side = native_cell_side(document.bounds());
+            let side = native_cell_side(document.bounds(), &charts);
             let request = RenderRequest::new(side, side, camera.target_view());
             let framebuffer = render_model(document.bounds(), &charts, &request)?;
             self.generation = self
@@ -83,14 +82,36 @@ impl PreviewCache {
     }
 }
 
-fn native_cell_side(bounds: relief_core::Bounds) -> u32 {
-    let maximum_relief_pixels = MAX_RELIEF_EIGHTHS.div_ceil(RELIEF_EIGHTHS_PER_MODEL_PIXEL);
-    bounds
-        .width()
-        .saturating_add(bounds.height())
-        .saturating_add(bounds.depth())
-        .saturating_add(maximum_relief_pixels.saturating_mul(2))
-        .saturating_add(RASTER_BREATHING_ROOM.saturating_mul(2))
+fn native_cell_side(bounds: Bounds, charts: &[Chart]) -> u32 {
+    let mut minimum = [0.0_f64; 3];
+    let mut maximum = [
+        f64::from(bounds.width()),
+        f64::from(bounds.height()),
+        f64::from(bounds.depth()),
+    ];
+
+    for chart in charts {
+        let relief = chart
+            .rgba()
+            .iter()
+            .filter(|pixel| pixel[3] != 0)
+            .map(|pixel| f64::from(255 - pixel[3]) / 8.0)
+            .fold(0.0_f64, f64::max);
+        match chart.view() {
+            CanonicalView::Front => maximum[2] = maximum[2].max(relief),
+            CanonicalView::Back => minimum[2] = minimum[2].min(f64::from(bounds.depth()) - relief),
+            CanonicalView::Left => maximum[0] = maximum[0].max(relief),
+            CanonicalView::Right => minimum[0] = minimum[0].min(f64::from(bounds.width()) - relief),
+            CanonicalView::Top => maximum[1] = maximum[1].max(relief),
+            CanonicalView::Bottom => {
+                minimum[1] = minimum[1].min(f64::from(bounds.height()) - relief);
+            }
+        }
+    }
+
+    let spans = std::array::from_fn::<_, 3, _>(|axis| maximum[axis] - minimum[axis]);
+    let diagonal = spans.iter().map(|span| span * span).sum::<f64>().sqrt();
+    (diagonal.ceil() as u32).saturating_add(RASTER_BREATHING_ROOM * 2)
 }
 
 #[cfg(test)]

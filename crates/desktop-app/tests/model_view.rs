@@ -63,7 +63,7 @@ fn model_texture_delta(output: &egui::FullOutput) -> Option<(TextureId, TextureO
         .textures_delta
         .set
         .iter()
-        .find(|(_, delta)| delta.image.size() == [74, 74])
+        .find(|(_, delta)| delta.image.size() == [8, 8])
         .map(|(id, delta)| (*id, delta.options))
 }
 
