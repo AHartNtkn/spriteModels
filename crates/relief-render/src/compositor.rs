@@ -1,0 +1,517 @@
+use num_rational::Ratio;
+use relief_core::{Bounds, Chart, DecodedTexel, InverseWarpLine, ReliefField, SourcePoint};
+use thiserror::Error;
+
+use crate::{
+    FragmentKey, FrameBuffer, TargetView, framebuffer::commit_fragment, presets::TargetExtents,
+};
+
+const MAX_RELIEF: f64 = 254.0;
+const ROOT_SCALE: i64 = 1 << 24;
+const COORDINATE_EPSILON: f64 = 1.0e-9;
+const POLYNOMIAL_EPSILON: f64 = 1.0e-10;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenderRequest {
+    width: u32,
+    height: u32,
+    target: TargetView,
+}
+
+impl RenderRequest {
+    pub fn new(width: u32, height: u32, target: TargetView) -> Self {
+        Self {
+            width,
+            height,
+            target,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum RenderError {
+    #[error("framebuffer dimensions overflow addressable storage")]
+    FrameBufferTooLarge,
+}
+
+#[derive(Clone, Debug)]
+struct Preimage {
+    relief: Ratio<i64>,
+    source_x: u32,
+    source_y: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReliefTerms {
+    weighted: f64,
+    total: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReliefPatch {
+    corners: [ReliefTerms; 4],
+}
+
+#[derive(Clone, Debug)]
+struct PreparedRelief {
+    width: u32,
+    height: u32,
+    cells: Vec<Option<[ReliefPatch; 4]>>,
+}
+
+impl PreparedRelief {
+    fn new(field: &ReliefField) -> Self {
+        let (width, height) = field.dimensions();
+        let mut cells = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                cells.push(field.foreground_cell(x, y).map(|cell| {
+                    std::array::from_fn(|quadrant| {
+                        let right = quadrant % 2 == 1;
+                        let bottom = quadrant / 2 == 1;
+                        let left = Ratio::new(2 * i64::from(x) + i64::from(right), 2);
+                        let top = Ratio::new(2 * i64::from(y) + i64::from(bottom), 2);
+                        let corners = [
+                            (left, top),
+                            (left + Ratio::new(1, 2), top),
+                            (left, top + Ratio::new(1, 2)),
+                            (left + Ratio::new(1, 2), top + Ratio::new(1, 2)),
+                        ]
+                        .map(|(sample_x, sample_y)| {
+                            let (weighted, total) = cell
+                                .sample_terms_closure(SourcePoint::new(sample_x, sample_y))
+                                .expect("quadrant corners belong to the foreground cell closure");
+                            ReliefTerms {
+                                weighted: ratio_to_f64(weighted),
+                                total: ratio_to_f64(total),
+                            }
+                        });
+                        ReliefPatch { corners }
+                    })
+                }));
+            }
+        }
+        Self {
+            width,
+            height,
+            cells,
+        }
+    }
+
+    fn is_foreground(&self, x: u32, y: u32) -> bool {
+        self.cells[(y * self.width + x) as usize].is_some()
+    }
+
+    fn terms_at(&self, source_x: u32, source_y: u32, x: f64, y: f64) -> ReliefTerms {
+        let patches = self.cells[(source_y * self.width + source_x) as usize]
+            .expect("only foreground cells reach analytic evaluation");
+        let local_x = (x - f64::from(source_x)).clamp(0.0, 1.0);
+        let local_y = (y - f64::from(source_y)).clamp(0.0, 1.0);
+        let right = local_x > 0.5;
+        let bottom = local_y > 0.5;
+        let patch = patches[usize::from(right) + 2 * usize::from(bottom)];
+        let u = if right {
+            2.0 * local_x - 1.0
+        } else {
+            2.0 * local_x
+        };
+        let v = if bottom {
+            2.0 * local_y - 1.0
+        } else {
+            2.0 * local_y
+        };
+        let interpolate = |values: [f64; 4]| {
+            values[0] * (1.0 - u) * (1.0 - v)
+                + values[1] * u * (1.0 - v)
+                + values[2] * (1.0 - u) * v
+                + values[3] * u * v
+        };
+        ReliefTerms {
+            weighted: interpolate(patch.corners.map(|terms| terms.weighted)),
+            total: interpolate(patch.corners.map(|terms| terms.total)),
+        }
+    }
+}
+
+pub fn render_model(
+    bounds: Bounds,
+    charts: &[Chart],
+    request: &RenderRequest,
+) -> Result<FrameBuffer, RenderError> {
+    (request.width as usize)
+        .checked_mul(request.height as usize)
+        .ok_or(RenderError::FrameBufferTooLarge)?;
+    let mut frame = FrameBuffer::transparent(request.width, request.height);
+    if request.width == 0 || request.height == 0 {
+        return Ok(frame);
+    }
+
+    let Some(TargetExtents {
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+    }) = projected_extents(bounds, charts, &request.target)
+    else {
+        return Ok(frame);
+    };
+    let offset_x = Ratio::new(i64::from(request.width), 2) - (min_x + max_x) / 2;
+    let offset_y = Ratio::new(i64::from(request.height), 2) - (min_y + max_y) / 2;
+    let prepared: Vec<_> = charts
+        .iter()
+        .filter_map(|chart| {
+            request
+                .target
+                .warp_coefficients(chart.view(), bounds)
+                .map(|warp| {
+                    let field = ReliefField::new(chart);
+                    (chart, PreparedRelief::new(&field), warp)
+                })
+        })
+        .collect();
+
+    for y in 0..request.height {
+        for x in 0..request.width {
+            let screen_x = Ratio::new(2 * i64::from(x) + 1, 2) - offset_x;
+            let screen_y = Ratio::new(2 * i64::from(y) + 1, 2) - offset_y;
+
+            for (chart, relief, warp) in &prepared {
+                let Some(line) = warp.inverse_line(screen_x, screen_y) else {
+                    continue;
+                };
+
+                for preimage in solve_preimages(relief, &line) {
+                    let Some(DecodedTexel::Relief { rgb, .. }) =
+                        chart.texel_at(preimage.source_x, preimage.source_y)
+                    else {
+                        continue;
+                    };
+                    commit_fragment(
+                        &mut frame,
+                        x,
+                        y,
+                        FragmentKey {
+                            depth: line.depth_at(preimage.relief),
+                            chart_rank: chart.view().rank(),
+                            source_y: preimage.source_y,
+                            source_x: preimage.source_x,
+                        },
+                        rgb,
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(frame)
+}
+
+fn projected_extents(
+    bounds: Bounds,
+    charts: &[Chart],
+    target: &TargetView,
+) -> Option<TargetExtents> {
+    charts.first().map(|_| target.framing_extents(bounds))
+}
+
+fn solve_preimages(field: &PreparedRelief, line: &InverseWarpLine) -> Vec<Preimage> {
+    let [[x_offset, x_slope], [y_offset, y_slope]] = line.source_coefficients();
+    let x_offset = ratio_to_f64(x_offset);
+    let x_slope = ratio_to_f64(x_slope);
+    let y_offset = ratio_to_f64(y_offset);
+    let y_slope = ratio_to_f64(y_slope);
+    let (width, height) = (field.width, field.height);
+    let mut boundaries = vec![0.0, MAX_RELIEF];
+    add_grid_crossings(&mut boundaries, x_offset, x_slope, width);
+    add_grid_crossings(&mut boundaries, y_offset, y_slope, height);
+    boundaries.sort_by(f64::total_cmp);
+    boundaries.dedup_by(|left, right| (*left - *right).abs() <= COORDINATE_EPSILON);
+
+    let mut preimages = Vec::new();
+    for window in boundaries.windows(2) {
+        let start = window[0];
+        let end = window[1];
+        if end - start <= COORDINATE_EPSILON {
+            continue;
+        }
+        let middle = (start + end) * 0.5;
+        let middle_x = x_offset + x_slope * middle;
+        let middle_y = y_offset + y_slope * middle;
+
+        for source_y in containing_cells(middle_y, height) {
+            for source_x in containing_cells(middle_x, width) {
+                if !field.is_foreground(source_x, source_y) {
+                    continue;
+                }
+                let values = [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0].map(|unit| {
+                    let relief = start + (end - start) * unit;
+                    let x = x_offset + x_slope * relief;
+                    let y = y_offset + y_slope * relief;
+                    let terms = field.terms_at(source_x, source_y, x, y);
+                    relief * terms.total - terms.weighted
+                });
+                let polynomial = interpolate_unit_cubic(values);
+
+                for unit in roots_in_unit_interval(polynomial) {
+                    let relief = start + (end - start) * unit;
+                    let x = x_offset + x_slope * relief;
+                    let y = y_offset + y_slope * relief;
+                    if x < f64::from(source_x) - COORDINATE_EPSILON
+                        || x > f64::from(source_x) + 1.0 + COORDINATE_EPSILON
+                        || y < f64::from(source_y) - COORDINATE_EPSILON
+                        || y > f64::from(source_y) + 1.0 + COORDINATE_EPSILON
+                    {
+                        continue;
+                    }
+                    let candidate = Preimage {
+                        relief: quantized_ratio(relief),
+                        source_x,
+                        source_y,
+                    };
+                    if !preimages.iter().any(|existing: &Preimage| {
+                        existing.source_x == source_x
+                            && existing.source_y == source_y
+                            && (ratio_to_f64(existing.relief) - relief).abs() <= 1.0e-6
+                    }) {
+                        preimages.push(candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    preimages
+}
+
+fn add_grid_crossings(boundaries: &mut Vec<f64>, offset: f64, slope: f64, extent: u32) {
+    if slope.abs() <= COORDINATE_EPSILON {
+        return;
+    }
+    for half_step in 0..=extent * 2 {
+        let coordinate = f64::from(half_step) * 0.5;
+        let relief = (coordinate - offset) / slope;
+        if relief > 0.0 && relief < MAX_RELIEF {
+            boundaries.push(relief);
+        }
+    }
+}
+
+fn containing_cells(coordinate: f64, extent: u32) -> Vec<u32> {
+    if extent == 0
+        || coordinate < -COORDINATE_EPSILON
+        || coordinate > f64::from(extent) + COORDINATE_EPSILON
+    {
+        return Vec::new();
+    }
+
+    let rounded = coordinate.round();
+    if (coordinate - rounded).abs() <= COORDINATE_EPSILON {
+        let boundary = rounded.clamp(0.0, f64::from(extent)) as u32;
+        match boundary {
+            0 => vec![0],
+            value if value == extent => vec![extent - 1],
+            value => vec![value - 1, value],
+        }
+    } else {
+        vec![(coordinate.floor() as u32).min(extent - 1)]
+    }
+}
+
+fn interpolate_unit_cubic(values: [f64; 4]) -> [f64; 4] {
+    const NODES: [f64; 4] = [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0];
+    let mut result = [0.0; 4];
+    for index in 0..4 {
+        let mut basis = [0.0; 4];
+        basis[0] = 1.0;
+        let mut degree = 0;
+        let mut denominator = 1.0;
+        for (other, &node) in NODES.iter().enumerate() {
+            if other == index {
+                continue;
+            }
+            denominator *= NODES[index] - node;
+            for coefficient in (0..=degree).rev() {
+                basis[coefficient + 1] += basis[coefficient];
+                basis[coefficient] *= -node;
+            }
+            degree += 1;
+        }
+        for coefficient in 0..4 {
+            result[coefficient] += values[index] * basis[coefficient] / denominator;
+        }
+    }
+    result
+}
+
+fn roots_in_unit_interval(mut polynomial: [f64; 4]) -> Vec<f64> {
+    let scale = polynomial
+        .iter()
+        .fold(1.0_f64, |largest, value| largest.max(value.abs()));
+    let tolerance = POLYNOMIAL_EPSILON * scale;
+    let mut degree = 3;
+    while degree > 0 && polynomial[degree].abs() <= tolerance {
+        polynomial[degree] = 0.0;
+        degree -= 1;
+    }
+    if degree == 0 {
+        return (polynomial[0].abs() <= tolerance)
+            .then_some(vec![0.0, 1.0])
+            .unwrap_or_default();
+    }
+
+    let mut partitions = vec![0.0, 1.0];
+    match degree {
+        2 => {
+            let critical = -polynomial[1] / (2.0 * polynomial[2]);
+            if critical > 0.0 && critical < 1.0 {
+                partitions.push(critical);
+            }
+        }
+        3 => {
+            partitions.extend(
+                quadratic_roots(polynomial[1], 2.0 * polynomial[2], 3.0 * polynomial[3])
+                    .into_iter()
+                    .filter(|root| *root > 0.0 && *root < 1.0),
+            );
+        }
+        _ => {}
+    }
+    partitions.sort_by(f64::total_cmp);
+    partitions.dedup_by(|left, right| (*left - *right).abs() <= COORDINATE_EPSILON);
+
+    let evaluate = |value: f64| {
+        polynomial[0] + value * (polynomial[1] + value * (polynomial[2] + value * polynomial[3]))
+    };
+    let mut roots = Vec::new();
+    for &point in &partitions {
+        if evaluate(point).abs() <= tolerance {
+            roots.push(point);
+        }
+    }
+    for interval in partitions.windows(2) {
+        let mut left = interval[0];
+        let mut right = interval[1];
+        let mut left_value = evaluate(left);
+        let right_value = evaluate(right);
+        if left_value.abs() <= tolerance
+            || right_value.abs() <= tolerance
+            || left_value.signum() == right_value.signum()
+        {
+            continue;
+        }
+        for _ in 0..56 {
+            let middle = (left + right) * 0.5;
+            let middle_value = evaluate(middle);
+            if middle_value.abs() <= tolerance {
+                left = middle;
+                right = middle;
+                break;
+            }
+            if middle_value.signum() == left_value.signum() {
+                left = middle;
+                left_value = middle_value;
+            } else {
+                right = middle;
+            }
+        }
+        roots.push((left + right) * 0.5);
+    }
+    roots.sort_by(f64::total_cmp);
+    roots.dedup_by(|left, right| (*left - *right).abs() <= 1.0e-7);
+    roots
+}
+
+fn quadratic_roots(constant: f64, linear: f64, quadratic: f64) -> Vec<f64> {
+    if quadratic.abs() <= POLYNOMIAL_EPSILON {
+        return (linear.abs() > POLYNOMIAL_EPSILON)
+            .then_some(vec![-constant / linear])
+            .unwrap_or_default();
+    }
+    let discriminant = linear * linear - 4.0 * quadratic * constant;
+    if discriminant < -POLYNOMIAL_EPSILON {
+        return Vec::new();
+    }
+    let root = discriminant.max(0.0).sqrt();
+    vec![
+        (-linear - root) / (2.0 * quadratic),
+        (-linear + root) / (2.0 * quadratic),
+    ]
+}
+
+fn ratio_to_f64(value: Ratio<i64>) -> f64 {
+    *value.numer() as f64 / *value.denom() as f64
+}
+
+fn quantized_ratio(value: f64) -> Ratio<i64> {
+    Ratio::new((value * ROOT_SCALE as f64).round() as i64, ROOT_SCALE)
+}
+
+#[cfg(test)]
+mod tests {
+    use num_rational::Ratio;
+    use relief_core::{CanonicalView, Chart, ReliefField, WarpCoefficients};
+
+    use super::{
+        PreparedRelief, interpolate_unit_cubic, ratio_to_f64, roots_in_unit_interval,
+        solve_preimages,
+    };
+
+    #[test]
+    fn scalar_solver_retains_three_preimages_of_a_fold() {
+        let values = [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]
+            .map(|value| (value - 0.2) * (value - 0.5) * (value - 0.8));
+        let roots = roots_in_unit_interval(interpolate_unit_cubic(values));
+
+        assert_eq!(roots.len(), 3);
+        assert!((roots[0] - 0.2).abs() < 1.0e-6);
+        assert!((roots[1] - 0.5).abs() < 1.0e-6);
+        assert!((roots[2] - 0.8).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn scalar_solver_keeps_a_tangent_preimage() {
+        let values = [0.25, 1.0 / 36.0, 1.0 / 36.0, 0.25];
+        let roots = roots_in_unit_interval(interpolate_unit_cubic(values));
+
+        assert_eq!(roots, vec![0.5]);
+    }
+
+    #[test]
+    fn normalized_tent_fold_retains_all_three_source_preimages() {
+        let chart = Chart::from_rgba(
+            CanonicalView::Front,
+            3,
+            1,
+            vec![[1, 0, 0, 239], [2, 0, 0, 255], [3, 0, 0, 239]],
+        )
+        .unwrap();
+        let field = ReliefField::new(&chart);
+        let prepared = PreparedRelief::new(&field);
+        let zero = Ratio::from_integer(0);
+        let warp = WarpCoefficients::from_rational(
+            [
+                [Ratio::from_integer(1), zero, zero],
+                [zero, Ratio::from_integer(1), zero],
+            ],
+            [Ratio::new(-1, 8), zero],
+            [zero, zero, zero],
+            Ratio::from_integer(1),
+        );
+        let line = warp
+            .inverse_line(Ratio::new(3, 4), Ratio::new(1, 2))
+            .unwrap();
+
+        let preimages = solve_preimages(&prepared, &line);
+        let locations: Vec<_> = preimages
+            .iter()
+            .map(|preimage| {
+                (
+                    preimage.source_x,
+                    (ratio_to_f64(preimage.relief) * 1_000.0).round() / 1_000.0,
+                )
+            })
+            .collect();
+
+        assert_eq!(locations, vec![(1, 4.0), (2, 12.0), (2, 16.0)]);
+    }
+}

@@ -325,7 +325,7 @@ fn native_preview_cell_depends_only_on_registered_bounds_and_legal_relief() {
 }
 
 #[test]
-fn shallow_bounds_contain_maximum_legal_relief_with_raster_breathing_room() {
+fn shallow_bounds_contain_maximum_legal_relief_with_frame_breathing_room() {
     let document = maximum_relief_shallow_document();
     let mut preview = PreviewCache::default();
     let preview_frame = preview.frame(&document, OrbitCamera::default()).unwrap();

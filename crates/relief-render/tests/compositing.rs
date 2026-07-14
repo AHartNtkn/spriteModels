@@ -89,7 +89,7 @@ fn explicit_mirrored_camera_still_covers_the_chart() {
 }
 
 #[test]
-fn exact_shared_source_edge_has_one_stable_owner() {
+fn exact_shared_source_edge_uses_the_lowest_nearest_texel_tie() {
     let bounds = Bounds::new(2, 1, 1).unwrap();
     let chart = Chart::from_rgba(
         CanonicalView::Front,
@@ -106,9 +106,9 @@ fn exact_shared_source_edge_has_one_stable_owner() {
     )
     .unwrap();
 
-    assert_eq!(frame.rgba_at(0, 0), [10, 20, 200, 255]);
+    assert_eq!(frame.rgba_at(0, 0), [200, 10, 20, 255]);
     let owner = frame.owner_at(0, 0).unwrap();
-    assert_eq!((owner.source_x, owner.source_y), (1, 0));
+    assert_eq!((owner.source_x, owner.source_y), (0, 0));
 }
 
 #[test]

@@ -3,7 +3,7 @@ use relief_render::{FrameBuffer, RenderRequest, render_model};
 
 use crate::{EditorDocument, EditorError, OrbitCamera, camera::OrbitOrientation};
 
-const RASTER_BREATHING_ROOM: u32 = 2;
+const FRAME_BREATHING_ROOM: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PreviewKey {
@@ -111,7 +111,7 @@ fn native_cell_side(bounds: Bounds, charts: &[Chart]) -> u32 {
 
     let spans = std::array::from_fn::<_, 3, _>(|axis| maximum[axis] - minimum[axis]);
     let diagonal = spans.iter().map(|span| span * span).sum::<f64>().sqrt();
-    (diagonal.ceil() as u32).saturating_add(RASTER_BREATHING_ROOM * 2)
+    (diagonal.ceil() as u32).saturating_add(FRAME_BREATHING_ROOM * 2)
 }
 
 #[cfg(test)]

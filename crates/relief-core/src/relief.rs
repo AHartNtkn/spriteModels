@@ -72,7 +72,20 @@ impl ReliefField {
         })
     }
 
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     fn sample_component(&self, point: SourcePoint, component: ComponentId) -> Option<Ratio<i64>> {
+        let (weighted, total) = self.sample_terms_component(point, component)?;
+        Some(weighted / total)
+    }
+
+    fn sample_terms_component(
+        &self,
+        point: SourcePoint,
+        component: ComponentId,
+    ) -> Option<(Ratio<i64>, Ratio<i64>)> {
         let SourcePoint { x, y } = point;
         let cell_x = x.to_integer();
         let cell_y = y.to_integer();
@@ -100,7 +113,7 @@ impl ReliefField {
             }
         }
 
-        (total != Ratio::from_integer(0)).then(|| weighted / total)
+        (total != Ratio::from_integer(0)).then_some((weighted, total))
     }
 }
 
@@ -124,5 +137,18 @@ impl ForegroundCell<'_> {
         }
 
         self.field.sample_component(point, self.component)
+    }
+
+    pub fn sample_terms_closure(&self, point: SourcePoint) -> Option<(Ratio<i64>, Ratio<i64>)> {
+        let left = Ratio::from_integer(i64::from(self.x));
+        let right = Ratio::from_integer(i64::from(self.x) + 1);
+        let top = Ratio::from_integer(i64::from(self.y));
+        let bottom = Ratio::from_integer(i64::from(self.y) + 1);
+
+        if point.x < left || point.x > right || point.y < top || point.y > bottom {
+            return None;
+        }
+
+        self.field.sample_terms_component(point, self.component)
     }
 }

@@ -102,3 +102,18 @@ fn direct_warp_accepts_exact_rational_camera_coefficients() {
     assert_eq!(sample.screen_y, Ratio::from_integer(-2));
     assert_eq!(sample.depth, Ratio::from_integer(4));
 }
+
+#[test]
+fn inverse_warp_line_recovers_source_as_a_function_of_relief() {
+    let warp = WarpCoefficients::new([[2, 1, 3], [-1, 2, 5]], [3, -2], [4, -3, 7], 5);
+    let source = SourcePoint::new(Ratio::new(3, 2), Ratio::new(5, 4));
+    let relief = Ratio::new(7, 3);
+    let warped = warp.apply(source.clone(), relief);
+
+    let line = warp
+        .inverse_line(warped.screen_x, warped.screen_y)
+        .expect("front-facing affine chart transform is invertible");
+
+    assert_eq!(line.source_at(relief), source);
+    assert_eq!(line.depth_at(relief), warped.depth);
+}

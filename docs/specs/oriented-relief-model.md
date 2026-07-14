@@ -1,121 +1,171 @@
-# Oriented relief model and renderer specification
+# Oriented relief-sprite mathematical specification
 
-## Model authority
+## Authority
 
-The authoritative model is a bundle of oriented color-and-relief images. Each
-rendered frame derives displaced samples from those images, composites them, and
-then discards the samples. Model editing changes the images themselves. This keeps
-the representation aligned with the goal: transform authored sprites to create the
-impression of depth, including concave detail.
+A model is a bundle of oriented RGBA images. The images are the complete authored
+model. Rendering directly resamples those images into a target view to produce a
+pseudo-3D impression. The only persistent spatial information is each image's
+canonical side and the shared integer model bounds used to register it.
 
-## Model space and charts
-
-A model has positive integer bounds `(width, height, depth)` in model pixels and
-one to six canonical charts. Their image dimensions are:
-
-| Chart | PNG width | PNG height | Relief direction |
-| --- | ---: | ---: | --- |
-| front, back | model width | model height | inward along model depth |
-| left, right | model depth | model height | inward along model width |
-| top, bottom | model width | model depth | inward along model height |
-
-Each chart defines its own oriented plane and inward unit axis. Opposing charts
-use mirrored frames so that their pixels refer to the same model-space bounds.
-
-## Alpha semantics
-
-The PNG must be non-premultiplied 8-bit RGBA.
-
-- `alpha = 0` means background and contributes no surface sample.
-- `alpha > 0` means foreground color `(red, green, blue)`.
-- The inverted relief value is `h = 255 - alpha`.
-- One relief unit is `1 / RELIEF_UNITS_PER_PIXEL` model pixel.
-- `RELIEF_UNITS_PER_PIXEL = 8` is the shared program standard for every model.
-
-Thus opaque alpha 255 lies on its chart plane, while decreasing nonzero alpha
-moves the sample inward. This convention supports both protruding profiles and
-recessed surfaces depending on which oriented chart supplies the visible surface.
-
-## Relief field
-
-Foreground pixels are divided into four-connected components. Relief is
-interpolated only among nearby samples belonging to the same component. Background
-does not become zero relief and disconnected islands do not influence each other.
-This preserves holes, gaps, and separate parts rather than bridging them with an
-invented surface.
-
-For rasterization, each foreground pixel owns its closed cell. The relief field is
-sampled across that cell and subdivided into small triangles. Subdivision is an
-accuracy choice, not a persistent geometric representation.
-
-## Direct image transform
-
-For chart `i`, let:
-
-- `P_i(u, v)` map an image coordinate to its point on the canonical chart plane;
-- `n_i` be the chart's inward model-space axis;
-- `h_i(u, v)` be inverted-alpha relief in model pixels;
-- `r` and `s` be the camera's screen-right and screen-down rows;
-- `q` be the camera depth row.
-
-The displaced sample exists only for the current render:
+For source alpha `a`:
 
 ```text
-X_i(u, v) = P_i(u, v) + n_i * h_i(u, v)
-screen_i  = (dot(r, X_i), dot(s, X_i))
-depth_i   = dot(q, X_i)
+a = 0       => outside the chart domain
+a in 1..255 => foreground
+h = 255 - a => inward relief in eighth-pixel units
 ```
 
-A chart is drawn only when its inward axis faces the camera. The screen transform
-and depth comparison use exact rational coefficients so equivalent inputs do not
-change because of floating-point drift.
+`RELIEF_UNITS_PER_PIXEL` is 8 for every model. Source RGB is authored color;
+alpha encodes relief rather than display opacity. A selected foreground sample is
+displayed with alpha 255.
 
-## Compositing and stability
+## Canonical charts
 
-All visible chart samples compete in one transient framebuffer. The sample nearest
-the camera owns the pixel. Exact depth ties use a permanent canonical chart rank,
-then source row and column, never the order in which files or charts were loaded.
-This makes a fixed model and camera deterministic and prevents alternating edge
-ownership.
+Bounds `(width, height, depth)` register up to six canonical charts:
 
-The winning chart supplies RGB directly. The renderer does not blend chart colors
-or create new edge colors. If authored charts disagree where their displaced
-surfaces meet, the deterministic visibility rule still selects one authored color;
-the application must not turn that disagreement into temporal flicker.
+| Chart | Image dimensions | Positive relief direction |
+| --- | --- | --- |
+| front, back | `width × height` | inward along model depth |
+| left, right | `depth × height` | inward along model width |
+| top, bottom | `width × depth` | inward along model height |
 
-## Single-file model format
+Opposing charts use mirrored signed-axis frames. Bounds register image planes; they
+do not assert that the enclosed box is occupied. Each chart remains an independent
+two-dimensional source domain.
 
-A `.depthsprite` file is a ZIP archive containing:
+## Continuous relief within a chart
+
+Foreground texels are partitioned into four-connected components. Let `K` be the
+texel centers in one component, `h_k` their encoded relief, and
 
 ```text
-manifest.json
-views/front.png
-views/right.png
-views/back.png
-views/left.png
-views/top.png
-views/bottom.png
+phi(dx, dy) = max(0, 1 - |dx|) × max(0, 1 - |dy|)
 ```
 
-Only the views declared by the manifest are present. Version 1 manifest data is:
+For a source point `p` in the union of that component's half-open texel cells:
 
-```json
-{
-  "format": "depthsprite",
-  "version": 1,
-  "bounds_pixels": [32, 16, 32],
-  "views": ["front", "top"]
-}
+```text
+N(p) = sum(k in K, h_k × phi(p - k))
+D(p) = sum(k in K,       phi(p - k))
+h(p) = N(p) / D(p)
 ```
 
-The manifest and decoded PNG contents define the model. The loader validates the
-manifest, unique canonical views, chart dimensions, and PNG representation.
+`D` is positive throughout the component domain. This normalized tent field is
+exact at texel centers, continuous through connected relief gradients, works for
+one-pixel-wide regions, and ends at the alpha-zero boundary. Samples from another
+component or chart never enter `N` or `D`.
 
-## Decisive example
+## Direct image warp
 
-The reference bowl contains only a front chart and a top chart. The front chart's
-silhouette and relief form the rounded outer wall and near rim. The top chart's
-radial inverted-alpha field forms a recessed basin. At an oblique camera both
-charts remain visibly responsible for the result, the center is deeper than the
-rim, and transparent gaps remain transparent. Passing this case demonstrates the
-additional depth behavior that the inspiration does not provide.
+For chart `i` and target view `V`, let `p = (x, y, 1)` be a homogeneous source
+coordinate. Canonical registration and the camera compile to:
+
+- `H_i,V`, the flat two-dimensional image transform;
+- `e_i,V`, the screen displacement per relief unit;
+- `g_i,V`, the flat transient-depth coefficients;
+- `gamma_i,V`, the transient-depth displacement per relief unit.
+
+The image warp and compositor depth are:
+
+```text
+W_i,V(p) = H_i,V p + h_i(p) e_i,V
+Z_i,V(p) = g_i,V · p + gamma_i,V h_i(p)
+```
+
+`W` is the entire rendering model: an affine image transform plus relief-driven
+two-dimensional displacement. `Z` exists only to choose among image samples for
+the current frame. Both can be evaluated without constructing world geometry.
+
+## Exhaustive inverse sampling
+
+Rendering is output-first. For every output pixel center `s` and eligible chart,
+the renderer solves `W(p) = s` and retains every solution.
+
+Write the nonhomogeneous part of `H` as an invertible `2 × 2` matrix `A` and a
+translation `b`. For a fixed output sample, inversion of the flat transform gives
+a source line parameterized by relief:
+
+```text
+p(h) = A^-1 (s - b - e h)
+     = p0 + d h
+```
+
+The finite relief range is `0 <= h <= 254`. Intersections of `p(h)` with source
+cell boundaries and tent-kernel break lines divide that range into analytic
+intervals. On each interval, `N(p(h))` and `D(p(h))` are polynomials of degree at
+most two. Every preimage is therefore a real root in the interval of:
+
+```text
+Q(h) = h D(p(h)) - N(p(h))
+```
+
+`Q` has degree at most three. The solver retains ordinary roots, repeated roots at
+fold tangencies, and roots on interval endpoints. A root on a shared source-cell
+boundary is evaluated against every foreground cell closure that owns that point.
+Duplicate roots are removed only within the same source texel; distinct roots in
+one texel remain distinct preimages. If `Q` is identically zero on an interval,
+`Z(p(h))` is linear there, so the interval endpoint with minimum depth is sufficient
+for that texel's compositing candidate.
+
+The prototype reconstructs each interval polynomial at fixed nodes, partitions it
+at derivative roots, and bisects every sign-changing monotone span. Critical points
+are tested directly so tangent roots are retained. Resolved relief is quantized to
+`1 / 2^24` of an eighth-pixel before rational depth comparison. This numerical
+precision rule affects only root representation; it does not change the warp or
+replace it with another rendering representation.
+
+## Color ownership and compositing
+
+Each retained preimage produces the key:
+
+```text
+(Z, chart_rank, source_y, source_x)
+```
+
+The lexicographically smallest key owns the output pixel. The owning source texel
+supplies RGB unchanged. At an exact source-cell edge or corner, the stable source
+coordinates select the lowest nearest texel. An output pixel with no preimage is
+transparent black.
+
+This rule preserves multiple preimages under folds, lets the nearer portion of a
+relief image occlude a farther portion, makes overlap independent of chart loading
+order, and prevents camera motion from inventing or blending colors.
+
+Charts are eligible only while their authored side faces the camera. Regions not
+covered by an authored chart remain transparent. Additional angular coverage comes
+from additional authored charts.
+
+## Two-sprite rounded bowl
+
+The reference bowl uses a top chart and a front chart. In the top chart, the rim
+has low inward relief, the inner wall increases continuously, and the basin floor
+has the greatest inward relief. The front chart supplies the rounded exterior and
+near rim.
+
+In an elevated oblique view, the top chart's relief warp moves the basin farther
+than the rim. Exhaustive preimage sampling retains the fold around the near rim,
+and transient depth lets that rim hide the farther basin where appropriate. The
+front chart supplies the exterior pixels. The result is a rounded, recessed bowl
+made from two transformed images.
+
+## File and editor integration
+
+A `.depthsprite` is one ZIP file containing `manifest.json` and the declared
+canonical PNGs under `views/`. The manifest records format version, integer bounds,
+and present sides. The PNG contents remain the model authority.
+
+The editor changes RGB and alpha in those source images. Every document edit and
+orbit change reruns the same inverse-warp compositor used by model viewing, so the
+dominant model viewport is always derived from the current source sprites.
+
+## Decisive validation
+
+- Alpha decoding and normalized tent interpolation are exact at encoded samples
+  and component boundaries.
+- Inverting `W` recovers the source point as a function of relief.
+- A normalized-tent fold with three source preimages retains all three.
+- A tangent fold retains its repeated preimage.
+- Exact source-cell ties choose the lowest nearest texel.
+- Transient depth chooses the correct source when relief preimages overlap.
+- The two-chart bowl shows both its front rim and recessed top basin.
+- The editor preview, save, and reopen path renders through this compositor.

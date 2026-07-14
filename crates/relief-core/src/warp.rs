@@ -20,6 +20,13 @@ pub struct WarpCoefficients {
     depth_relief: Ratio<i64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InverseWarpLine {
+    source_x: [Ratio<i64>; 2],
+    source_y: [Ratio<i64>; 2],
+    depth: [Ratio<i64>; 2],
+}
+
 impl WarpCoefficients {
     pub fn new(
         screen: [[i64; 3]; 2],
@@ -65,6 +72,60 @@ impl WarpCoefficients {
             screen_y: dot(&self.screen[1]) + relief * self.parallax[1],
             depth: dot(&self.depth_plane) + relief * self.depth_relief,
         }
+    }
+
+    pub fn inverse_line(
+        &self,
+        screen_x: Ratio<i64>,
+        screen_y: Ratio<i64>,
+    ) -> Option<InverseWarpLine> {
+        let [[a, b, translate_x], [c, d, translate_y]] = &self.screen;
+        let determinant = *a * *d - *b * *c;
+        if determinant == Ratio::from_integer(0) {
+            return None;
+        }
+
+        let target_x = screen_x - *translate_x;
+        let target_y = screen_y - *translate_y;
+        let source_x = [
+            (*d * target_x - *b * target_y) / determinant,
+            (-*d * self.parallax[0] + *b * self.parallax[1]) / determinant,
+        ];
+        let source_y = [
+            (-*c * target_x + *a * target_y) / determinant,
+            (*c * self.parallax[0] - *a * self.parallax[1]) / determinant,
+        ];
+        let depth = [
+            self.depth_plane[0] * source_x[0]
+                + self.depth_plane[1] * source_y[0]
+                + self.depth_plane[2],
+            self.depth_plane[0] * source_x[1]
+                + self.depth_plane[1] * source_y[1]
+                + self.depth_relief,
+        ];
+
+        Some(InverseWarpLine {
+            source_x,
+            source_y,
+            depth,
+        })
+    }
+}
+
+impl InverseWarpLine {
+    pub fn source_at(&self, relief: Ratio<i64>) -> SourcePoint {
+        SourcePoint::new(
+            self.source_x[0] + self.source_x[1] * relief,
+            self.source_y[0] + self.source_y[1] * relief,
+        )
+    }
+
+    pub fn depth_at(&self, relief: Ratio<i64>) -> Ratio<i64> {
+        self.depth[0] + self.depth[1] * relief
+    }
+
+    pub fn source_coefficients(&self) -> [[Ratio<i64>; 2]; 2] {
+        [self.source_x, self.source_y]
     }
 }
 
