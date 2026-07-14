@@ -114,6 +114,11 @@ fn depth_display_maps_empty_near_and_far_relief_exactly() {
 }
 
 #[test]
+fn depth_display_rounds_midpoint_relief_to_nearest_gray() {
+    assert_eq!(depth_display([19, 29, 39, 128]), Color32::from_gray(128));
+}
+
+#[test]
 fn color_projection_shows_stored_rgb_even_when_depth_is_empty() {
     let mut document = document(1, 1);
     document.set_current_rgb([12, 34, 56]);

@@ -123,7 +123,7 @@ fn depth_display_alpha(alpha: u8) -> Color32 {
         Color32::MAGENTA
     } else {
         let relief = 255 - alpha;
-        let gray = ((u16::from(relief) * 255) / 254) as u8;
+        let gray = ((u16::from(relief) * 255 + 127) / 254) as u8;
         Color32::from_gray(gray)
     }
 }
