@@ -138,6 +138,7 @@ fn extreme_finite_orbit_input_remains_bounded_and_deterministic() {
     let document = one_pixel_document();
     let mut preview = PreviewCache::default();
     let frame = preview.frame(&document, first, 48, 32).unwrap();
+    let frame = frame.framebuffer();
     assert_eq!((frame.width(), frame.height()), (48, 32));
 
     let pitch_maximum = first;
@@ -163,10 +164,32 @@ fn an_unchanged_preview_key_returns_the_same_framebuffer() {
     let camera = OrbitCamera::default();
     let mut preview = PreviewCache::default();
 
-    let first = preview.frame(&document, camera, 48, 32).unwrap().clone();
-    let second = preview.frame(&document, camera, 48, 32).unwrap().clone();
+    let first = preview
+        .frame(&document, camera, 48, 32)
+        .unwrap()
+        .framebuffer()
+        .clone();
+    let second = preview
+        .frame(&document, camera, 48, 32)
+        .unwrap()
+        .framebuffer()
+        .clone();
 
     assert_eq!(first, second);
+}
+
+#[test]
+fn preview_result_reports_only_newly_rendered_frames_as_changed() {
+    let mut document = one_pixel_document();
+    let camera = OrbitCamera::default();
+    let mut preview = PreviewCache::default();
+
+    assert!(preview.frame(&document, camera, 48, 32).unwrap().changed());
+    assert!(!preview.frame(&document, camera, 48, 32).unwrap().changed());
+
+    recolor(&mut document, CanonicalView::Front, [91, 82, 73]);
+    assert!(preview.frame(&document, camera, 48, 32).unwrap().changed());
+    assert!(!preview.frame(&document, camera, 48, 32).unwrap().changed());
 }
 
 #[test]
@@ -174,13 +197,25 @@ fn several_document_mutations_update_then_stabilize_the_framebuffer() {
     let mut document = one_pixel_document();
     let camera = OrbitCamera::default();
     let mut preview = PreviewCache::default();
-    let initial = preview.frame(&document, camera, 48, 32).unwrap().clone();
+    let initial = preview
+        .frame(&document, camera, 48, 32)
+        .unwrap()
+        .framebuffer()
+        .clone();
 
     for rgb in [[40, 50, 60], [70, 80, 90], [100, 110, 120]] {
         recolor(&mut document, CanonicalView::Front, rgb);
     }
-    let changed = preview.frame(&document, camera, 48, 32).unwrap().clone();
-    let repeated = preview.frame(&document, camera, 48, 32).unwrap().clone();
+    let changed = preview
+        .frame(&document, camera, 48, 32)
+        .unwrap()
+        .framebuffer()
+        .clone();
+    let repeated = preview
+        .frame(&document, camera, 48, 32)
+        .unwrap()
+        .framebuffer()
+        .clone();
 
     assert_eq!(document.revision(), 3);
     assert_ne!(changed, initial);
@@ -192,14 +227,26 @@ fn both_bowl_sources_update_preview_and_reopen_with_a_visible_recessed_basin() {
     let mut document = bowl_document();
     let camera = OrbitCamera::default();
     let mut preview = PreviewCache::default();
-    let original = preview.frame(&document, camera, 96, 96).unwrap().clone();
+    let original = preview
+        .frame(&document, camera, 96, 96)
+        .unwrap()
+        .framebuffer()
+        .clone();
 
     recolor(&mut document, CanonicalView::Front, [19, 211, 83]);
-    let front_edited = preview.frame(&document, camera, 96, 96).unwrap().clone();
+    let front_edited = preview
+        .frame(&document, camera, 96, 96)
+        .unwrap()
+        .framebuffer()
+        .clone();
     assert_ne!(front_edited, original);
 
     recolor(&mut document, CanonicalView::Top, [67, 101, 239]);
-    let both_edited = preview.frame(&document, camera, 96, 96).unwrap().clone();
+    let both_edited = preview
+        .frame(&document, camera, 96, 96)
+        .unwrap()
+        .framebuffer()
+        .clone();
     assert_ne!(both_edited, front_edited);
 
     let saved_model = document.to_model().unwrap();
@@ -211,6 +258,7 @@ fn both_bowl_sources_update_preview_and_reopen_with_a_visible_recessed_basin() {
     let reopened = EditorDocument::from_model(reopened_model, None).unwrap();
     let mut reopened_preview = PreviewCache::default();
     let reopened_frame = reopened_preview.frame(&reopened, camera, 96, 96).unwrap();
+    let reopened_frame = reopened_frame.framebuffer();
     assert_eq!(reopened_frame, &both_edited);
 
     let mut basin = None;

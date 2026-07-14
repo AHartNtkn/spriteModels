@@ -5,8 +5,9 @@ use eframe::egui;
 use relief_core::{Bounds, CanonicalView};
 
 use crate::{
-    layout::{self, Rect, Size, WorkspaceLayout},
+    layout::{self, Rect, Size},
     menu::{MenuAction, PendingDestructiveAction, UnsavedChoice, show_menu_bar},
+    model_view::ModelView,
     palette::PaletteState,
     source_grid::SourceGridState,
 };
@@ -139,7 +140,39 @@ impl ShellState {
 pub struct DepthSpriteApp {
     shell: ShellState,
     palette: PaletteState,
+    model_view: ModelView,
     source_grid: SourceGridState,
+    #[cfg(test)]
+    last_composition: Option<CompositionObservation>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompositionStage {
+    TopMenu,
+    Palette,
+    ModelViewport,
+    SourceGrid,
+    TransientModals,
+}
+
+#[cfg(test)]
+struct SourceCardObservation {
+    column: usize,
+    row: usize,
+    card: egui::Rect,
+    color: egui::Rect,
+    depth: egui::Rect,
+}
+
+#[cfg(test)]
+struct CompositionObservation {
+    stages: Vec<CompositionStage>,
+    menu: egui::Rect,
+    palette: egui::Rect,
+    model: egui::Rect,
+    sources: egui::Rect,
+    source_cards: [SourceCardObservation; layout::SOURCE_SLOT_COUNT],
 }
 
 impl DepthSpriteApp {
@@ -149,7 +182,10 @@ impl DepthSpriteApp {
         Self {
             shell,
             palette,
+            model_view: ModelView::default(),
             source_grid: SourceGridState::default(),
+            #[cfg(test)]
+            last_composition: None,
         }
     }
 
@@ -188,7 +224,7 @@ impl DepthSpriteApp {
                 .request_destructive(PendingDestructiveAction::Quit),
             MenuAction::Undo => self.shell.undo(),
             MenuAction::Redo => self.shell.redo(),
-            MenuAction::ResetView => {}
+            MenuAction::ResetView => self.model_view.reset(),
         }
         self.finish_quit(context);
     }
@@ -259,7 +295,7 @@ impl eframe::App for DepthSpriteApp {
         }
 
         let mut selected = None;
-        egui::Panel::top("top-menu")
+        let _menu = egui::Panel::top("top-menu")
             .exact_size(layout::MENU_HEIGHT)
             .show(root, |ui| selected = show_menu_bar(ui));
         if let Some(action) = selected {
@@ -267,26 +303,65 @@ impl eframe::App for DepthSpriteApp {
         }
 
         let root_rect = root.max_rect();
+        #[cfg(test)]
+        let mut composition = None;
         egui::CentralPanel::default().show(root, |ui| {
             let layout = layout::calculate_layout(Size::new(root_rect.width(), root_rect.height()))
                 .expect("native window must respect the derived minimum size");
-            paint_model_placeholder(ui, &layout, root_rect.min);
             let tools_rect = to_egui(layout.tools, root_rect.min);
             ui.scope_builder(egui::UiBuilder::new().max_rect(tools_rect), |ui| {
                 self.palette.show(ui, &mut self.shell.document);
             });
+            let model_rect = to_egui(layout.model, root_rect.min);
+            if let Err(error) = self.model_view.show(ui, self.shell.document(), model_rect) {
+                ui.painter().text(
+                    model_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("Preview unavailable: {error}"),
+                    egui::FontId::monospace(12.0),
+                    egui::Color32::LIGHT_RED,
+                );
+            }
             self.source_grid.show(
                 ui,
                 &mut self.shell.document,
                 &layout.source_cards,
                 root_rect.min,
             );
+            #[cfg(test)]
+            {
+                composition = Some(CompositionObservation {
+                    stages: vec![
+                        CompositionStage::TopMenu,
+                        CompositionStage::Palette,
+                        CompositionStage::ModelViewport,
+                        CompositionStage::SourceGrid,
+                    ],
+                    menu: _menu.response.rect,
+                    palette: tools_rect,
+                    model: model_rect,
+                    sources: to_egui(layout.sources, root_rect.min),
+                    source_cards: layout.source_cards.map(|card| SourceCardObservation {
+                        column: card.column,
+                        row: card.row,
+                        card: to_egui(card.card, root_rect.min),
+                        color: to_egui(card.color, root_rect.min),
+                        depth: to_egui(card.depth, root_rect.min),
+                    }),
+                });
+            }
         });
 
         if self.shell.file_error().is_some() {
             self.show_file_error_modal(&context);
         } else {
             self.show_unsaved_modal(&context);
+        }
+        #[cfg(test)]
+        {
+            let mut composition = composition.expect("workspace composition is always recorded");
+            composition.stages.push(CompositionStage::TransientModals);
+            self.last_composition = Some(composition);
         }
         self.finish_quit(&context);
     }
@@ -312,25 +387,119 @@ fn pick_save_path() -> Option<PathBuf> {
         .save_file()
 }
 
-fn paint_model_placeholder(ui: &mut egui::Ui, layout: &WorkspaceLayout, origin: egui::Pos2) {
-    let painter = ui.painter();
-    painter.rect_filled(
-        to_egui(layout.model, origin),
-        4.0,
-        egui::Color32::from_gray(24),
-    );
-    painter.text(
-        to_egui(layout.model, origin).left_top() + egui::vec2(10.0, 10.0),
-        egui::Align2::LEFT_TOP,
-        "MODEL",
-        egui::FontId::monospace(12.0),
-        egui::Color32::LIGHT_GRAY,
-    );
-}
-
 fn to_egui(rect: Rect, origin: egui::Pos2) -> egui::Rect {
     egui::Rect::from_min_max(
         origin + egui::vec2(rect.left(), rect.top()),
         origin + egui::vec2(rect.right(), rect.bottom()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::App as _;
+
+    use super::*;
+
+    fn run_frame(
+        context: &egui::Context,
+        app: &mut DepthSpriteApp,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 1000.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut frame = eframe::Frame::_new_kittest();
+        context.run_ui(input, |ui| app.ui(ui, &mut frame))
+    }
+
+    #[test]
+    fn real_frame_records_the_complete_semantic_workspace_and_ratios() {
+        let context = egui::Context::default();
+        let mut app = DepthSpriteApp::from_startup_path(None);
+
+        let output = run_frame(&context, &mut app, Vec::new());
+        let composition = app.last_composition.as_ref().unwrap();
+
+        assert_eq!(
+            composition.stages,
+            [
+                CompositionStage::TopMenu,
+                CompositionStage::Palette,
+                CompositionStage::ModelViewport,
+                CompositionStage::SourceGrid,
+                CompositionStage::TransientModals,
+            ]
+        );
+        assert_eq!(composition.menu.left(), 0.0);
+        assert_eq!(composition.menu.top(), 0.0);
+        assert_eq!(composition.menu.right(), 1600.0);
+        assert!(composition.palette.height() > composition.palette.width() * 10.0);
+        assert!(composition.palette.right() < composition.model.left());
+        assert!(composition.model.width() > composition.sources.width());
+
+        for (index, card) in composition.source_cards.iter().enumerate() {
+            assert_eq!(card.column, index % layout::SOURCE_COLUMNS);
+            assert_eq!(card.row, index / layout::SOURCE_COLUMNS);
+            assert!(card.color.bottom() < card.depth.top());
+            assert_eq!(card.color.size(), card.depth.size());
+            assert!(
+                composition.model.width() >= card.color.width() * layout::MODEL_TO_CANVAS_RATIO
+            );
+            assert!(
+                composition.model.height() >= card.color.height() * layout::MODEL_TO_CANVAS_RATIO
+            );
+        }
+        for row in 0..layout::SOURCE_ROWS {
+            for column in 1..layout::SOURCE_COLUMNS {
+                let previous = &composition.source_cards[row * layout::SOURCE_COLUMNS + column - 1];
+                let current = &composition.source_cards[row * layout::SOURCE_COLUMNS + column];
+                assert!(previous.card.right() < current.card.left());
+            }
+        }
+        for column in 0..layout::SOURCE_COLUMNS {
+            let above = &composition.source_cards[column];
+            let below = &composition.source_cards[layout::SOURCE_COLUMNS + column];
+            assert!(above.card.bottom() < below.card.top());
+        }
+        assert!(output.shapes.iter().any(|clipped| {
+            let bounds = clipped.shape.visual_bounding_rect();
+            bounds.contains_rect(composition.model)
+        }));
+    }
+
+    #[test]
+    fn reset_menu_action_restores_the_integrated_model_camera() {
+        let context = egui::Context::default();
+        let mut app = DepthSpriteApp::from_startup_path(None);
+        run_frame(&context, &mut app, Vec::new());
+        let center = app.last_composition.as_ref().unwrap().model.center();
+        run_frame(
+            &context,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(center),
+                egui::Event::PointerButton {
+                    pos: center,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        run_frame(
+            &context,
+            &mut app,
+            vec![egui::Event::PointerMoved(center + egui::vec2(16.0, 7.0))],
+        );
+        assert_ne!(app.model_view.camera(), editor_core::OrbitCamera::default());
+
+        app.handle_menu_action(MenuAction::ResetView, &context);
+
+        assert_eq!(app.model_view.camera(), editor_core::OrbitCamera::default());
+    }
 }

@@ -11,7 +11,7 @@ pub use camera::OrbitCamera;
 pub use document::{ActiveLayer, EditorDocument, Tool};
 pub use edit::{DepthValue, ReliefValue};
 pub use fallback::opposite;
-pub use preview::PreviewCache;
+pub use preview::{PreviewCache, PreviewFrame};
 pub use source::{SourcePixel, SourceSprite};
 
 use depthsprite_format::PackageError;

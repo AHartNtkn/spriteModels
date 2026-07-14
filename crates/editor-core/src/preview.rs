@@ -18,6 +18,21 @@ pub struct PreviewCache {
     render_count: u64,
 }
 
+pub struct PreviewFrame<'a> {
+    framebuffer: &'a FrameBuffer,
+    changed: bool,
+}
+
+impl PreviewFrame<'_> {
+    pub fn framebuffer(&self) -> &FrameBuffer {
+        self.framebuffer
+    }
+
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+}
+
 impl PreviewCache {
     pub fn frame(
         &mut self,
@@ -25,14 +40,15 @@ impl PreviewCache {
         camera: OrbitCamera,
         width: u32,
         height: u32,
-    ) -> Result<&FrameBuffer, EditorError> {
+    ) -> Result<PreviewFrame<'_>, EditorError> {
         let key = PreviewKey {
             revision: document.revision(),
             camera,
             width,
             height,
         };
-        if self.key != Some(key) {
+        let changed = self.key != Some(key);
+        if changed {
             let charts = document.resolved_charts()?;
             let request = RenderRequest::new(width, height, camera.target_view());
             let framebuffer = render_model(document.bounds(), &charts, &request)?;
@@ -47,10 +63,13 @@ impl PreviewCache {
             }
         }
 
-        Ok(self
-            .framebuffer
-            .as_ref()
-            .expect("a successful preview request always stores its framebuffer"))
+        Ok(PreviewFrame {
+            framebuffer: self
+                .framebuffer
+                .as_ref()
+                .expect("a successful preview request always stores its framebuffer"),
+            changed,
+        })
     }
 }
 

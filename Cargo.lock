@@ -436,6 +436,7 @@ dependencies = [
  "eframe",
  "png",
  "relief-core",
+ "relief-render",
  "rfd",
  "tempfile",
 ]

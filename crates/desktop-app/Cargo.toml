@@ -10,6 +10,7 @@ publish = false
 editor-core = { path = "../editor-core" }
 eframe.workspace = true
 relief-core = { path = "../relief-core" }
+relief-render = { path = "../relief-render" }
 rfd.workspace = true
 
 [dev-dependencies]
