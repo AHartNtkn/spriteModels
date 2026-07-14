@@ -16,7 +16,8 @@ fixture-only chart interpretation or rendering path.
   padding around the intended silhouette.
 - Empty pixels are `[255, 0, 255, 0]`.
 - Nonempty alpha encodes inward relief at eight units per model pixel.
-- Relief never exceeds four times the opposing model dimension.
+- Relief never exceeds the side's maximum inward depth: half the opposing model
+  dimension, or four times that dimension in relief units.
 - Cross-sections determine relief in both source axes wherever the intended form
   curves in both axes.
 - One upper-left-front light direction controls all baked RGB shading in an asset.
@@ -50,8 +51,9 @@ separate the exterior from the rim.
 
 The Top chart is a circular domain. Its outer rim has zero or near-zero inward
 relief, the inner wall descends continuously, and the basin floor reaches the
-greatest legal bowl depth. Its warm ceramic RGB has an upper-left highlight,
-lower-right falloff, identifiable rim band, and modest depth darkening.
+greatest intended bowl depth without crossing the model midpoint. Its warm ceramic
+RGB has an upper-left highlight, lower-right falloff, identifiable rim band, and
+modest depth darkening.
 
 The Front mask is built row by row from a vertical bowl profile. The rim fills the
 first row at full projected width; rows narrow smoothly to bottom-center foreground
@@ -64,7 +66,7 @@ must show connected rim ownership, a recessed basin, and a rounded exterior.
 
 `globe.depthsprite` has cubic bounds `[48, 48, 48]` and exactly two explicit charts:
 Front and Back. Each chart contains a circular hemisphere. Relief is shallowest at
-the projected center and increases radially to the legal midplane depth at the
+the projected center and increases radially to the maximum inward depth at the
 silhouette band, so opposite surfaces meet without a gap and never cross.
 
 The charts carry different but geographically corresponding continent and ocean
@@ -131,7 +133,7 @@ fixtures, or examples. Its workflow is:
 2. Assign the minimum suitable set of explicit canonical observations.
 3. Derive raster dimensions and signed edge mappings from model bounds.
 4. Construct tight masks and shared landmarks without global padding.
-5. Derive relief from explicit cross-sections within the legal midplane limit.
+5. Derive relief from explicit cross-sections without exceeding maximum inward depth.
 6. Add restrained baked RGB lighting that exposes the intended form.
 7. Generate the package deterministically through the repository fixture path.
 8. Inspect color, depth, and several rendered target views.
@@ -182,4 +184,4 @@ instead of restating a competing contract.
 
 - Skill metadata passes the standard structural validator.
 - A forward use on one concrete asset task produces canonical dimensions,
-  legal cross-section relief, coherent lighting, and multi-view rendered evidence.
+  in-range cross-section relief, coherent lighting, and multi-view rendered evidence.

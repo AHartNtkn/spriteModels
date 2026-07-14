@@ -26,17 +26,19 @@ alpha encodes relief rather than display opacity. A selected foreground sample i
 displayed with alpha 255.
 
 For chart `i`, let `L_i` be the opposing model dimension: depth for Front/Back,
-width for Left/Right, and height for Top/Bottom. Its maximum legal relief is:
+width for Left/Right, and height for Top/Bottom. Its maximum inward depth, expressed
+in relief units, is:
 
 ```text
 h_max(i) = 4 L_i
 ```
 
 This is half the opposing dimension at eight relief units per pixel. Two explicit
-opposing charts at their legal maximum therefore meet exactly at the model
+opposing charts at their maximum inward depth therefore meet exactly at the model
 midplane. They neither leave a gap nor pass through one another. The 63-pixel
 bound limit keeps `h_max <= 252`, which remains representable by nonzero alpha.
-Every model construction and mutation path enforces this chart-specific limit.
+Every model construction and mutation path rejects relief beyond this derived
+maximum; it is not a separate model setting.
 
 For example, along a depth axis of length `D`, the opposing surface coordinates
 are exactly:
@@ -145,10 +147,10 @@ p(h) = A^-1 (s - b - e h)
      = p0 + d h
 ```
 
-The legal chart-specific relief range and intersections of `p(h)` with source cell
-boundaries and tent-kernel break lines divide the search into analytic intervals.
-On each interval, `N(p(h))` and `D(p(h))` are polynomials of degree at most two.
-Every preimage is therefore a real root in the interval of:
+The chart-specific range `0 <= h <= h_max(i)` and intersections of `p(h)` with
+source cell boundaries and tent-kernel break lines divide the search into analytic
+intervals. On each interval, `N(p(h))` and `D(p(h))` are polynomials of degree at
+most two. Every preimage is therefore a real root in the interval of:
 
 ```text
 Q(h) = h D(p(h)) - N(p(h))
@@ -226,9 +228,9 @@ dominant model viewport is always derived from the current source sprites.
 
 - Alpha decoding and normalized tent interpolation are exact at encoded samples
   and component boundaries.
-- Bounds and relief limits are enforced by model construction, package loading,
-  PNG import, editing, resizing, and saving.
-- Legal maxima on explicit opposite charts meet exactly at the midplane.
+- Bounds and maximum inward depth are enforced by model construction, package
+  loading, PNG import, editing, resizing, and saving.
+- Explicit opposite charts at maximum inward depth meet exactly at the midplane.
 - All 24 chart-edge operations preserve signed-world-edge registration across
   every affected chart.
 - Inverting `W` recovers the source point as a function of relief.

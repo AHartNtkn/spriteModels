@@ -123,15 +123,16 @@ Existing pixels are copied exactly; there is no scaling, interpolation, centerin
 or per-chart dimension override.
 
 Charts normal to the changed axis do not change raster dimensions, but that axis is
-their relief direction, so their legal relief ceiling changes and is validated as
-part of the same transaction.
+their relief direction. Their maximum inward depth is half the new axis length and
+is validated as part of the same transaction.
 
 Adding beyond 63 or removing below 1 is unavailable. Removing an edge containing
 any non-default RGBA opens one confirmation naming every chart edge that will be
 discarded. A prospective shrink is rejected if remaining relief would exceed the
-new chart-specific midplane limit; the error identifies the affected side and
-permitted maximum instead of clamping authored relief. The complete synchronized
-resize is one undoable command and one preview revision.
+new maximum inward depth. The transaction then makes no changes, and the error
+identifies the affected side, its deepest remaining pixel, and the new maximum in
+both eighth-pixel units and model pixels. Authored relief is never clamped. The
+complete synchronized resize is one undoable command and one preview revision.
 
 ## Layer visualization
 
@@ -142,10 +143,14 @@ The depth canvas uses this mapping:
 
 - alpha zero: magenta, meaning no surface sample;
 - relief zero / alpha 255: black;
-- increasing inward relief: increasing grayscale brightness;
-- the selected chart's legal maximum relief: white.
+- for nonempty alpha `a`, relief `h = 255 - a` and grayscale intensity is
+  `round(255h / 254)`;
+- relief 254 / alpha 1: white.
 
-Magenta is categorical and does not participate in the relief scale.
+Magenta is categorical and does not participate in the relief scale. The mapping is
+absolute and identical for every side and model: equal alpha, relief units, and
+physical inward depth always display as equal gray. A shallow side's maximum inward
+depth therefore need not appear white.
 
 ## Tools
 
@@ -155,9 +160,11 @@ opens compact hue and saturation/value controls with direct RGB and hexadecimal
 entry. Changing it updates the current paint color without changing chart pixels.
 
 The relief selector is editable in eighth-pixel and model-pixel units and is
-limited to `4 ×` the selected chart's opposing model dimension. Selecting a chart
-with a lower limit clamps only the current tool value to that limit; it does not
-edit chart pixels or create history.
+limited to the selected side's maximum inward depth: half its opposing model
+dimension, or `4 ×` that dimension in relief units. Selecting a side whose maximum
+inward depth is smaller than the current pencil/fill value reduces only that
+transient tool value. It does not edit chart pixels, dirty the document, or create
+history.
 
 | Tool | Color canvas | Depth canvas |
 | --- | --- | --- |
