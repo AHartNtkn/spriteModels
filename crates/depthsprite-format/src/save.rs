@@ -6,7 +6,7 @@ use std::{
 };
 
 use png::{BitDepth, ColorType, Compression, Encoder, Filter};
-use relief_core::{Chart, DecodedTexel};
+use relief_core::Chart;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 use crate::{CanonicalViewName, DepthSpriteModel, ManifestV1, PackageError};
@@ -77,15 +77,9 @@ pub fn save_path_atomic(
 
 fn encode_chart(chart: &Chart, entry: &str) -> Result<Vec<u8>, PackageError> {
     let (width, height) = chart.dimensions();
-    let mut rgba = Vec::with_capacity(chart.texels().len() * 4);
-    for texel in chart.texels() {
-        match texel {
-            DecodedTexel::Background => rgba.extend_from_slice(&[0, 0, 0, 0]),
-            DecodedTexel::Relief { rgb, eighths } => {
-                rgba.extend_from_slice(rgb);
-                rgba.push(255 - eighths);
-            }
-        }
+    let mut rgba = Vec::with_capacity(chart.rgba().len() * 4);
+    for pixel in chart.rgba() {
+        rgba.extend_from_slice(pixel);
     }
 
     let mut bytes = Vec::new();

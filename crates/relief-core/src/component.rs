@@ -22,7 +22,7 @@ impl ComponentMap {
             for x in 0..width {
                 let index = (y * width + x) as usize;
                 if labels[index].is_some()
-                    || !matches!(chart.texel(x, y), Some(DecodedTexel::Relief { .. }))
+                    || !matches!(chart.texel_at(x, y), Some(DecodedTexel::Relief { .. }))
                 {
                     continue;
                 }
@@ -37,7 +37,7 @@ impl ComponentMap {
                         let neighbor_index = (neighbor_y * width + neighbor_x) as usize;
                         if labels[neighbor_index].is_none()
                             && matches!(
-                                chart.texel(neighbor_x, neighbor_y),
+                                chart.texel_at(neighbor_x, neighbor_y),
                                 Some(DecodedTexel::Relief { .. })
                             )
                         {

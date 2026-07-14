@@ -146,7 +146,7 @@ fn rasterize_triangle(
     state: &mut RasterState<'_>,
     source_cell: (u32, u32),
 ) {
-    let rgb = match chart.texel(source_cell.0, source_cell.1) {
+    let rgb = match chart.texel_at(source_cell.0, source_cell.1) {
         Some(DecodedTexel::Relief { rgb, .. }) => rgb,
         _ => unreachable!("only an owning foreground cell reaches rasterization"),
     };

@@ -96,7 +96,7 @@ pub struct Chart {
     view: CanonicalView,
     width: u32,
     height: u32,
-    texels: Vec<DecodedTexel>,
+    rgba: Vec<[u8; 4]>,
 }
 
 impl Chart {
@@ -122,7 +122,7 @@ impl Chart {
             view,
             width,
             height,
-            texels: rgba.into_iter().map(decode_rgba).collect(),
+            rgba,
         })
     }
 
@@ -138,12 +138,20 @@ impl Chart {
         (self.width, self.height)
     }
 
-    pub fn texels(&self) -> &[DecodedTexel] {
-        &self.texels
+    pub fn rgba(&self) -> &[[u8; 4]] {
+        &self.rgba
     }
 
-    pub fn texel(&self, x: u32, y: u32) -> Option<DecodedTexel> {
-        (x < self.width && y < self.height).then(|| self.texels[(y * self.width + x) as usize])
+    pub fn rgba_at(&self, x: u32, y: u32) -> Option<[u8; 4]> {
+        (x < self.width && y < self.height).then(|| self.rgba[(y * self.width + x) as usize])
+    }
+
+    pub fn texel_at(&self, x: u32, y: u32) -> Option<DecodedTexel> {
+        self.rgba_at(x, y).map(decode_rgba)
+    }
+
+    pub fn texels(&self) -> impl ExactSizeIterator<Item = DecodedTexel> + '_ {
+        self.rgba.iter().copied().map(decode_rgba)
     }
 }
 

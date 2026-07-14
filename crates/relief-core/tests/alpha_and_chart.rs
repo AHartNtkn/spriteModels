@@ -100,3 +100,33 @@ fn chart_rejects_any_non_exact_texel_count() {
         assert_eq!(error, ChartError::PixelCount);
     }
 }
+
+#[test]
+fn chart_preserves_raw_rgba_while_decoding_relief_on_demand() {
+    let bounds = Bounds::new(2, 1, 1).unwrap();
+    let chart = Chart::from_rgba(
+        bounds,
+        CanonicalView::Front,
+        2,
+        1,
+        vec![[17, 31, 47, 0], [9, 8, 7, 1]],
+    )
+    .unwrap();
+
+    assert_eq!(chart.rgba(), &[[17, 31, 47, 0], [9, 8, 7, 1]]);
+    assert_eq!(chart.rgba_at(0, 0), Some([17, 31, 47, 0]));
+    assert_eq!(chart.rgba_at(2, 0), None);
+    assert_eq!(chart.texel_at(0, 0), Some(DecodedTexel::Background));
+    assert_eq!(chart.texel_at(2, 0), None);
+    assert_eq!(
+        chart.texels().collect::<Vec<_>>(),
+        vec![
+            DecodedTexel::Background,
+            DecodedTexel::Relief {
+                rgb: [9, 8, 7],
+                eighths: 254,
+            },
+        ]
+    );
+    assert_eq!(chart.texels().len(), 2);
+}

@@ -38,14 +38,14 @@ fn bowl_open_render_save_reopen_preserves_model_and_relief() {
         (CanonicalView::Top, 16, 16)
     );
     assert_eq!(
-        model.charts()[0].texel(rim.source_x, rim.source_y),
+        model.charts()[0].texel_at(rim.source_x, rim.source_y),
         Some(DecodedTexel::Relief {
             rgb: FRONT_RGB,
             eighths: 40,
         })
     );
     assert_eq!(
-        model.charts()[1].texel(basin.source_x, basin.source_y),
+        model.charts()[1].texel_at(basin.source_x, basin.source_y),
         Some(DecodedTexel::Relief {
             rgb: TOP_RGB,
             eighths: 64,

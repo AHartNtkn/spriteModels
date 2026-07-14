@@ -14,8 +14,8 @@ pub struct ReliefField {
 impl ReliefField {
     pub fn new(chart: &Chart) -> Self {
         let (width, height) = chart.dimensions();
-        let mut rgb = Vec::with_capacity(chart.texels().len());
-        let mut relief = Vec::with_capacity(chart.texels().len());
+        let mut rgb = Vec::with_capacity(chart.rgba().len());
+        let mut relief = Vec::with_capacity(chart.rgba().len());
 
         for texel in chart.texels() {
             match texel {
@@ -27,8 +27,8 @@ impl ReliefField {
                     rgb: color,
                     eighths,
                 } => {
-                    rgb.push(Some(*color));
-                    relief.push(Some(*eighths));
+                    rgb.push(Some(color));
+                    relief.push(Some(eighths));
                 }
             }
         }

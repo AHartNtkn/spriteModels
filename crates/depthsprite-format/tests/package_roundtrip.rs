@@ -33,11 +33,11 @@ fn save_and_load_preserve_model_semantics() {
 
     assert_eq!(loaded, model);
     assert_eq!(
-        loaded.charts()[0].texel(0, 0),
+        loaded.charts()[0].texel_at(0, 0),
         Some(DecodedTexel::Background)
     );
     assert_eq!(
-        loaded.charts()[1].texel(0, 0),
+        loaded.charts()[1].texel_at(0, 0),
         Some(DecodedTexel::Relief {
             rgb: [0, 0, 255],
             eighths: 254,
