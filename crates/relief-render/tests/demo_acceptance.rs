@@ -46,6 +46,28 @@ fn rgbs(chart: &Chart) -> BTreeSet<[u8; 3]> {
         .collect()
 }
 
+fn authored_pixel(chart: &Chart, x: u32, y: u32) -> ([u8; 3], u8) {
+    match chart.texel_at(x, y) {
+        Some(DecodedTexel::Relief { rgb, eighths }) => (rgb, eighths),
+        _ => panic!("expected authored foreground at ({x}, {y})"),
+    }
+}
+
+fn brightness(rgb: [u8; 3]) -> u32 {
+    rgb.into_iter().map(u32::from).sum()
+}
+
+fn average_brightness(chart: &Chart) -> u32 {
+    let total: u32 = chart
+        .texels()
+        .map(|texel| match texel {
+            DecodedTexel::Background => panic!("the block must fully author every face"),
+            DecodedTexel::Relief { rgb, .. } => brightness(rgb),
+        })
+        .sum();
+    total / chart.texels().len() as u32
+}
+
 fn row_reliefs(chart: &Chart, y: u32) -> BTreeSet<u8> {
     let (width, _) = chart.dimensions();
     (0..width)
@@ -101,7 +123,30 @@ fn foundational_block_authors_six_lit_zero_relief_charts() {
             "{:?} must carry a visible within-face light gradient",
             chart.view()
         );
+        let (upper_left, upper_left_relief) = authored_pixel(chart, 0, 0);
+        let (lower_right, lower_right_relief) = authored_pixel(chart, 15, 15);
+        assert_eq!(upper_left_relief, lower_right_relief);
+        assert!(
+            brightness(upper_left) > brightness(lower_right),
+            "{:?} must be brighter at upper-left than lower-right",
+            chart.view()
+        );
     }
+
+    let ordered_faces = [
+        CanonicalView::Top,
+        CanonicalView::Front,
+        CanonicalView::Left,
+        CanonicalView::Right,
+        CanonicalView::Back,
+        CanonicalView::Bottom,
+    ];
+    let ordered_brightness =
+        ordered_faces.map(|view| average_brightness(model.chart(view).unwrap()));
+    assert!(
+        ordered_brightness.windows(2).all(|pair| pair[0] > pair[1]),
+        "average face brightness must be Top > Front > Left > Right > Back > Bottom: {ordered_brightness:?}"
+    );
 }
 
 #[test]
@@ -152,6 +197,59 @@ fn foundational_bowl_has_shallow_basin_narrowing_exterior_and_lighting() {
     assert!(reliefs(front).len() >= 4);
     assert!(rgbs(top).len() >= 4, "Top must be directionally lit");
     assert!(rgbs(front).len() >= 4, "Front must be directionally lit");
+
+    let (top_upper_left, top_upper_left_relief) = authored_pixel(top, 8, 8);
+    let (top_lower_right, top_lower_right_relief) = authored_pixel(top, 23, 23);
+    assert_eq!(
+        top_upper_left_relief, top_lower_right_relief,
+        "symmetric Top lighting samples must control for relief darkening"
+    );
+    assert!(
+        brightness(top_upper_left) > brightness(top_lower_right),
+        "the relief-matched Top upper-left must be brighter than lower-right"
+    );
+
+    let (front_left, front_left_relief) = authored_pixel(front, 5, 4);
+    let (front_right, front_right_relief) = authored_pixel(front, 26, 4);
+    assert_eq!(
+        front_left_relief, front_right_relief,
+        "same-row symmetric Front samples must control for relief darkening"
+    );
+    assert!(
+        brightness(front_left) > brightness(front_right),
+        "the relief-matched Front left must be brighter than right"
+    );
+}
+
+fn classified_mask(chart: &Chart, is_land: impl Fn([u8; 3]) -> bool) -> BTreeSet<(u32, u32)> {
+    let (width, height) = chart.dimensions();
+    (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .filter(|&(x, y)| match chart.texel_at(x, y) {
+            Some(DecodedTexel::Relief { rgb, .. }) => is_land(rgb),
+            _ => false,
+        })
+        .collect()
+}
+
+fn foreground_count(chart: &Chart) -> usize {
+    chart
+        .texels()
+        .filter(|texel| matches!(texel, DecodedTexel::Relief { .. }))
+        .count()
+}
+
+fn assert_center_out_relief_is_monotonic(chart: &Chart, coordinates: Vec<(u32, u32)>) {
+    let relief = coordinates
+        .into_iter()
+        .map(|(x, y)| authored_pixel(chart, x, y).1)
+        .collect::<Vec<_>>();
+    assert!(relief.len() >= 20);
+    assert!(
+        relief.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{:?} center-out relief must be nondecreasing: {relief:?}",
+        chart.view()
+    );
 }
 
 #[test]
@@ -165,6 +263,23 @@ fn foundational_globe_authors_distinct_hemispheres_with_meeting_boundaries() {
     let front = model.chart(CanonicalView::Front).unwrap();
     let back = model.chart(CanonicalView::Back).unwrap();
     assert_ne!(front.rgba(), back.rgba(), "hemisphere patterns must differ");
+
+    let front_land = classified_mask(front, |rgb| rgb[1] > rgb[2]);
+    let back_land = classified_mask(back, |rgb| rgb[0] > rgb[2]);
+    for (view, land, foreground) in [
+        (CanonicalView::Front, &front_land, foreground_count(front)),
+        (CanonicalView::Back, &back_land, foreground_count(back)),
+    ] {
+        assert!(!land.is_empty(), "{view:?} must contain classified land");
+        assert!(
+            land.len() < foreground,
+            "{view:?} must contain classified water"
+        );
+    }
+    assert_ne!(
+        front_land, back_land,
+        "hemisphere land masks must differ independently of palette"
+    );
 
     for chart in [front, back] {
         let mut boundary_count = 0;
@@ -190,6 +305,11 @@ fn foundational_globe_authors_distinct_hemispheres_with_meeting_boundaries() {
             }
         }
         assert!(boundary_count > 0);
+
+        assert_center_out_relief_is_monotonic(chart, (24..48).map(|x| (x, 23)).collect());
+        assert_center_out_relief_is_monotonic(chart, (0..=23).rev().map(|x| (x, 23)).collect());
+        assert_center_out_relief_is_monotonic(chart, (24..48).map(|y| (23, y)).collect());
+        assert_center_out_relief_is_monotonic(chart, (0..=23).rev().map(|y| (23, y)).collect());
     }
 }
 
@@ -260,6 +380,18 @@ fn foundational_globe_renders_explicit_front_back_and_connected_oblique_silhouet
 
     assert_frame_uses_explicit_chart(&front, model.chart(CanonicalView::Front).unwrap());
     assert_frame_uses_explicit_chart(&back, model.chart(CanonicalView::Back).unwrap());
+    for y in 0..oblique.height() {
+        for x in 0..oblique.width() {
+            if oblique.rgba_at(x, y)[3] == 0 {
+                continue;
+            }
+            assert_eq!(
+                oblique.owner_at(x, y).unwrap().view,
+                CanonicalView::Front,
+                "the front-right-top globe view must not contain Back ownership"
+            );
+        }
+    }
     assert!(
         opaque_is_connected(&oblique),
         "the oblique globe silhouette must be one eight-connected region"
