@@ -239,17 +239,64 @@ fn foreground_count(chart: &Chart) -> usize {
         .count()
 }
 
-fn assert_center_out_relief_is_monotonic(chart: &Chart, coordinates: Vec<(u32, u32)>) {
-    let relief = coordinates
-        .into_iter()
-        .map(|(x, y)| authored_pixel(chart, x, y).1)
-        .collect::<Vec<_>>();
-    assert!(relief.len() >= 20);
-    assert!(
-        relief.windows(2).all(|pair| pair[0] <= pair[1]),
-        "{:?} center-out relief must be nondecreasing: {relief:?}",
-        chart.view()
-    );
+fn definition_floor_sqrt(value: u32) -> u32 {
+    let mut root: u32 = 0;
+    while (root + 1).pow(2) <= value {
+        root += 1;
+    }
+    root
+}
+
+fn globe_circle_contains(x: i32, y: i32) -> bool {
+    let dx = 2 * x + 1 - 48;
+    let dy = 2 * y + 1 - 48;
+    dx * dx + dy * dy <= 48_i32.pow(2)
+}
+
+fn globe_circle_boundary(x: i32, y: i32) -> bool {
+    globe_circle_contains(x, y)
+        && (-1..=1).any(|dy| {
+            (-1..=1).any(|dx| (dx != 0 || dy != 0) && !globe_circle_contains(x + dx, y + dy))
+        })
+}
+
+fn assert_exact_globe_source_profile(chart: &Chart) {
+    for y in 0..48_i32 {
+        for x in 0..48_i32 {
+            let actual = chart.texel_at(x as u32, y as u32);
+            if !globe_circle_contains(x, y) {
+                assert_eq!(
+                    actual,
+                    Some(DecodedTexel::Background),
+                    "{:?} ({x}, {y}) must be outside the radius-48 circle",
+                    chart.view()
+                );
+                continue;
+            }
+
+            let dx = 2 * x + 1 - 48;
+            let dy = 2 * y + 1 - 48;
+            let remaining = (48_i32.pow(2) - dx * dx - dy * dy) as u32;
+            let sphere_relief = (4 * (48 - definition_floor_sqrt(remaining))).min(192) as u8;
+            let expected_relief = if globe_circle_boundary(x, y) {
+                192
+            } else {
+                sphere_relief
+            };
+            let Some(DecodedTexel::Relief { eighths, .. }) = actual else {
+                panic!(
+                    "{:?} ({x}, {y}) must be foreground inside the radius-48 circle",
+                    chart.view()
+                )
+            };
+            assert_eq!(
+                eighths,
+                expected_relief,
+                "{:?} ({x}, {y}) must follow the exact sphere profile",
+                chart.view()
+            );
+        }
+    }
 }
 
 #[test]
@@ -281,36 +328,8 @@ fn foundational_globe_authors_distinct_hemispheres_with_meeting_boundaries() {
         "hemisphere land masks must differ independently of palette"
     );
 
-    for chart in [front, back] {
-        let mut boundary_count = 0;
-        for y in 0..48_i32 {
-            for x in 0..48_i32 {
-                if foreground(chart, x, y)
-                    && (-1..=1).any(|dy| {
-                        (-1..=1)
-                            .any(|dx| (dx != 0 || dy != 0) && !foreground(chart, x + dx, y + dy))
-                    })
-                {
-                    boundary_count += 1;
-                    let Some(DecodedTexel::Relief { eighths, .. }) =
-                        chart.texel_at(x as u32, y as u32)
-                    else {
-                        unreachable!("the boundary predicate selected foreground")
-                    };
-                    assert_eq!(
-                        eighths, 192,
-                        "every silhouette boundary texel must meet at relief 192"
-                    );
-                }
-            }
-        }
-        assert!(boundary_count > 0);
-
-        assert_center_out_relief_is_monotonic(chart, (24..48).map(|x| (x, 23)).collect());
-        assert_center_out_relief_is_monotonic(chart, (0..=23).rev().map(|x| (x, 23)).collect());
-        assert_center_out_relief_is_monotonic(chart, (24..48).map(|y| (23, y)).collect());
-        assert_center_out_relief_is_monotonic(chart, (0..=23).rev().map(|y| (23, y)).collect());
-    }
+    assert_exact_globe_source_profile(front);
+    assert_exact_globe_source_profile(back);
 }
 
 fn assert_frame_uses_explicit_chart(frame: &FrameBuffer, chart: &Chart) {
