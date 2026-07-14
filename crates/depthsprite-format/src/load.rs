@@ -5,16 +5,16 @@ use std::{
 };
 
 use png::{BitDepth, ColorType, Decoder, Transformations};
-use relief_core::{CanonicalView, Chart};
+use relief_core::{AuthoredModel, CanonicalView, Chart, ModelError};
 use zip::ZipArchive;
 
-use crate::{DepthSpriteModel, ManifestV1, PackageError};
+use crate::{ManifestV1, PackageError};
 
-pub fn load_path(path: impl AsRef<Path>) -> Result<DepthSpriteModel, PackageError> {
+pub fn load_path(path: impl AsRef<Path>) -> Result<AuthoredModel, PackageError> {
     load_reader(BufReader::new(File::open(path)?))
 }
 
-pub fn load_reader<R: Read + Seek>(reader: R) -> Result<DepthSpriteModel, PackageError> {
+pub fn load_reader<R: Read + Seek>(reader: R) -> Result<AuthoredModel, PackageError> {
     let mut archive = ZipArchive::new(reader)?;
     let manifest_bytes = read_entry(&mut archive, "manifest.json")?;
     let manifest: ManifestV1 = serde_json::from_slice(&manifest_bytes)
@@ -27,7 +27,7 @@ pub fn load_reader<R: Read + Seek>(reader: R) -> Result<DepthSpriteModel, Packag
         let bytes = read_entry(&mut archive, entry)?;
         charts.push(decode_chart(entry, &bytes, view_name.into())?);
     }
-    DepthSpriteModel::new(bounds, charts)
+    Ok(AuthoredModel::new(bounds, charts)?)
 }
 
 fn read_entry<R: Read + Seek>(
@@ -76,6 +76,5 @@ fn decode_chart(entry: &str, bytes: &[u8], view: CanonicalView) -> Result<Chart,
         .chunks_exact(4)
         .map(|chunk| [chunk[0], chunk[1], chunk[2], chunk[3]])
         .collect();
-    Chart::from_rgba(view, output.width, output.height, pixels)
-        .map_err(|source| PackageError::InvalidChart { view, source })
+    Ok(Chart::from_rgba(view, output.width, output.height, pixels).map_err(ModelError::from)?)
 }

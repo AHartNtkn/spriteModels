@@ -4,7 +4,7 @@ use desktop_app::canvas::{
 };
 use editor_core::{ActiveLayer, EditorDocument, Tool};
 use eframe::egui::{self, Color32, Pos2, Rect, pos2};
-use relief_core::{Bounds, CanonicalView};
+use relief_core::{Bounds, CanonicalView, EMPTY_RGBA};
 
 const VIEW: CanonicalView = CanonicalView::Front;
 
@@ -186,7 +186,7 @@ fn one_pointer_drag_paints_all_crossed_pixels_as_one_document_command() {
     assert_eq!(document.active_layer(), ActiveLayer::Color);
     assert_eq!(pixels(&document), [[70, 80, 90, 0]; 6]);
     assert!(document.undo());
-    assert_eq!(pixels(&document), [[0, 0, 0, 0]; 6]);
+    assert_eq!(pixels(&document), [EMPTY_RGBA; 6]);
     assert!(
         !document.undo(),
         "the drag must create exactly one undo entry"
@@ -328,9 +328,9 @@ fn color_eraser_stays_out_of_stroke_history_while_depth_eraser_works() {
     depth.finish_stroke().unwrap();
     depth.set_tool(Tool::Eraser);
     click_pair(&context, &mut state, &mut depth, DEPTH_RECT.center());
-    assert_eq!(pixels(&depth), [[0, 0, 0, 0]]);
+    assert_eq!(pixels(&depth), [EMPTY_RGBA]);
     assert!(depth.undo());
-    assert_eq!(pixels(&depth), [[0, 0, 0, 255]]);
+    assert_eq!(pixels(&depth), [[255, 0, 255, 255]]);
 }
 
 #[test]
@@ -367,6 +367,6 @@ fn primary_release_outside_pair_finishes_one_stroke_command() {
     assert!(!document.stroke_active());
     assert_eq!(pixels(&document), [[40, 50, 60, 0]; 3]);
     assert!(document.undo());
-    assert_eq!(pixels(&document), [[0, 0, 0, 0]; 3]);
+    assert_eq!(pixels(&document), [EMPTY_RGBA; 3]);
     assert!(!document.undo());
 }

@@ -1,9 +1,7 @@
 use std::{io, path::PathBuf};
 
-use relief_core::{CanonicalView, ChartError};
+use relief_core::ModelError;
 use thiserror::Error;
-
-use crate::CanonicalViewName;
 
 #[derive(Debug, Error)]
 pub enum PackageError {
@@ -26,20 +24,6 @@ pub enum PackageError {
     WrongFormat(String),
     #[error("unsupported manifest version {0}")]
     UnsupportedVersion(u32),
-    #[error("model bounds must be nonzero, got {0:?}")]
-    InvalidBounds([u32; 3]),
-    #[error("model must contain between one and six views, got {0}")]
-    ViewCount(usize),
-    #[error("model contains duplicate view {0:?}")]
-    DuplicateView(CanonicalViewName),
-    #[error("model contains no charts")]
-    EmptyModel,
-    #[error("chart {view:?} dimensions {actual:?} do not match model bounds {expected:?}")]
-    DimensionMismatch {
-        view: CanonicalView,
-        expected: (u32, u32),
-        actual: (u32, u32),
-    },
     #[error(
         "entry {entry} must encode nonpremultiplied 8-bit RGBA PNG, got {color_type} {bit_depth}"
     )]
@@ -50,12 +34,8 @@ pub enum PackageError {
     },
     #[error("invalid PNG in {entry}: {message}")]
     InvalidPng { entry: String, message: String },
-    #[error("invalid chart for {view:?}: {source}")]
-    InvalidChart {
-        view: CanonicalView,
-        #[source]
-        source: ChartError,
-    },
+    #[error(transparent)]
+    Model(#[from] ModelError),
 }
 
 impl From<zip::result::ZipError> for PackageError {

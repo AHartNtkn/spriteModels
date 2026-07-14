@@ -6,13 +6,13 @@ use desktop_app::{
 };
 use editor_core::EditorDocument;
 use png::{BitDepth, ColorType, Encoder};
-use relief_core::{Bounds, CanonicalView};
+use relief_core::{Bounds, CanonicalView, EMPTY_RGBA};
 use tempfile::tempdir;
 
 const FRONT: CanonicalView = CanonicalView::Front;
 
 fn document() -> EditorDocument {
-    EditorDocument::new(Bounds::new(2, 1, 1).unwrap(), FRONT)
+    EditorDocument::new(Bounds::new(2, 1, 63).unwrap(), FRONT)
 }
 
 fn write_png(path: &Path, pixels: &[[u8; 4]]) {
@@ -62,7 +62,7 @@ fn add_import_replace_and_remove_are_undoable_document_commands() {
     replace_source_from_png(&mut document, FRONT, &path).unwrap();
     assert_eq!(document.source(FRONT).unwrap().rgba(), replacement);
     assert!(document.undo());
-    assert_eq!(document.source(FRONT).unwrap().rgba(), &[[0, 0, 0, 0]; 2]);
+    assert_eq!(document.source(FRONT).unwrap().rgba(), &[EMPTY_RGBA; 2]);
 
     add_next_source(&mut document).unwrap();
     remove_source(&mut document, CanonicalView::Right).unwrap();

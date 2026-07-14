@@ -1,6 +1,6 @@
-use relief_core::CanonicalView;
+use relief_core::{CanonicalView, Chart};
 
-use crate::{ActiveLayer, EditorDocument, EditorError, SourceSprite, Tool};
+use crate::{ActiveLayer, EditorDocument, EditorError, Tool};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DepthValue {
@@ -97,8 +97,11 @@ impl EditorDocument {
 
     pub fn fill(&mut self, view: CanonicalView, x: u32, y: u32) -> Result<bool, EditorError> {
         self.ensure_no_active_stroke()?;
-        let source_index = self.source_index(view)?;
-        let source = &self.state.sources[source_index];
+        let source = self
+            .state
+            .model
+            .chart(view)
+            .ok_or(relief_core::ModelError::MissingView(view))?;
         let start = pixel_index(source, view, x, y)?;
         let (width, height) = source.dimensions();
         let mut rgba = source.rgba().to_vec();
@@ -140,7 +143,7 @@ impl EditorDocument {
             }
         }
 
-        self.state.sources[source_index] = SourceSprite::from_rgba(view, width, height, rgba)?;
+        self.state.model.set_rgba(view, rgba)?;
         Ok(self.finish_command(before))
     }
 
@@ -171,17 +174,15 @@ impl EditorDocument {
     }
 
     fn pixel(&self, view: CanonicalView, x: u32, y: u32) -> Result<[u8; 4], EditorError> {
-        let source = &self.state.sources[self.source_index(view)?];
-        let index = pixel_index(source, view, x, y)?;
-        Ok(source.rgba()[index])
-    }
-
-    fn source_index(&self, view: CanonicalView) -> Result<usize, EditorError> {
-        self.state
-            .sources
-            .iter()
-            .position(|source| source.view() == view)
-            .ok_or(EditorError::SourceNotFound(view))
+        let source = self
+            .state
+            .model
+            .chart(view)
+            .ok_or(relief_core::ModelError::MissingView(view))?;
+        pixel_index(source, view, x, y)?;
+        Ok(source
+            .rgba_at(x, y)
+            .expect("validated coordinates are inside the chart"))
     }
 
     fn write_live_pixel(
@@ -191,27 +192,24 @@ impl EditorDocument {
         y: u32,
         replacement: [u8; 4],
     ) -> Result<bool, EditorError> {
-        let source_index = self.source_index(view)?;
-        let source = &self.state.sources[source_index];
+        let source = self
+            .state
+            .model
+            .chart(view)
+            .ok_or(relief_core::ModelError::MissingView(view))?;
         let index = pixel_index(source, view, x, y)?;
         if source.rgba()[index] == replacement {
             return Ok(false);
         }
-        let (width, height) = source.dimensions();
         let mut rgba = source.rgba().to_vec();
         rgba[index] = replacement;
-        self.state.sources[source_index] = SourceSprite::from_rgba(view, width, height, rgba)?;
+        self.state.model.set_rgba(view, rgba)?;
         self.advance_revision();
         Ok(true)
     }
 }
 
-fn pixel_index(
-    source: &SourceSprite,
-    view: CanonicalView,
-    x: u32,
-    y: u32,
-) -> Result<usize, EditorError> {
+fn pixel_index(source: &Chart, view: CanonicalView, x: u32, y: u32) -> Result<usize, EditorError> {
     let (width, height) = source.dimensions();
     if x >= width || y >= height {
         return Err(EditorError::PixelOutOfBounds { view, x, y });

@@ -1,14 +1,13 @@
-use depthsprite_format::DepthSpriteModel;
 use editor_core::{ActiveLayer, DepthValue, EditorDocument, EditorError, ReliefValue};
-use relief_core::{Bounds, CanonicalView, Chart};
+use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart, ModelError};
 
 const VIEW: CanonicalView = CanonicalView::Front;
 
 fn document(width: u32, height: u32, pixels: Vec<[u8; 4]>) -> EditorDocument {
-    let bounds = Bounds::new(width, height, 1).unwrap();
+    let bounds = Bounds::new(width, height, 63).unwrap();
     let chart = Chart::from_rgba(VIEW, width, height, pixels).unwrap();
-    let model = DepthSpriteModel::new(bounds, vec![chart]).unwrap();
-    EditorDocument::from_model(model, None).unwrap()
+    let model = AuthoredModel::new(bounds, vec![chart]).unwrap();
+    EditorDocument::from_model(model, None)
 }
 
 fn pixels(document: &EditorDocument) -> Vec<[u8; 4]> {
@@ -186,7 +185,7 @@ fn depth_fill_cannot_paint_the_explicit_empty_selection() {
 
 #[test]
 fn eyedropper_selects_color_relief_and_explicit_empty_depth() {
-    let mut document = document(3, 1, vec![[7, 8, 9, 200], [1, 2, 3, 0], [4, 5, 6, 1]]);
+    let mut document = document(3, 1, vec![[7, 8, 9, 200], [1, 2, 3, 0], [4, 5, 6, 3]]);
 
     document.set_active_layer(ActiveLayer::Color);
     document.eyedrop(VIEW, 0, 0).unwrap();
@@ -198,7 +197,7 @@ fn eyedropper_selects_color_relief_and_explicit_empty_depth() {
     document.eyedrop(VIEW, 1, 0).unwrap();
     assert_eq!(document.current_depth(), DepthValue::Empty);
     document.eyedrop(VIEW, 2, 0).unwrap();
-    assert_eq!(document.current_depth(), relief(254));
+    assert_eq!(document.current_depth(), relief(252));
 }
 
 #[test]
@@ -238,7 +237,9 @@ fn pixel_commands_reject_missing_sources_out_of_bounds_and_invalid_stroke_lifecy
     ));
     assert!(matches!(
         document.pencil_pixel(CanonicalView::Back, 0, 0),
-        Err(EditorError::SourceNotFound(CanonicalView::Back))
+        Err(EditorError::Model(ModelError::MissingView(
+            CanonicalView::Back
+        )))
     ));
     assert!(matches!(
         document.pencil_pixel(VIEW, 1, 0),

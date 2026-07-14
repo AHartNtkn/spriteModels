@@ -18,9 +18,7 @@ fn bowl_asset() -> PathBuf {
 
 fn source_pixel(document: &EditorDocument, view: CanonicalView, (x, y): (u32, u32)) -> [u8; 4] {
     let source = document.source(view).expect("authored bowl source");
-    let pixel = source.pixel(x, y).expect("pixel inside bowl source");
-    let rgb = pixel.rgb();
-    [rgb[0], rgb[1], rgb[2], pixel.alpha()]
+    source.rgba_at(x, y).expect("pixel inside bowl source")
 }
 
 fn paint_color(
@@ -45,9 +43,9 @@ fn paint_relief(document: &mut EditorDocument, view: CanonicalView, pixel: (u32,
 }
 
 fn render(document: &EditorDocument) -> FrameBuffer {
+    let resolved = document.model().resolve();
     render_model(
-        document.bounds(),
-        &document.resolved_charts().unwrap(),
+        &resolved,
         &RenderRequest::new(96, 96, TargetView::bowl_acceptance()),
     )
     .unwrap()
@@ -124,10 +122,10 @@ fn complete_bowl_authoring_workflow_preserves_exact_sources_and_recessed_render(
         [HIDDEN_RGB[0], HIDDEN_RGB[1], HIDDEN_RGB[2], 255]
     );
 
-    paint_relief(&mut document, TOP, BASIN_PIXEL, 96);
+    paint_relief(&mut document, TOP, BASIN_PIXEL, 56);
     assert_eq!(
         source_pixel(&document, TOP, BASIN_PIXEL),
-        [TOP_RGB[0], TOP_RGB[1], TOP_RGB[2], 159]
+        [TOP_RGB[0], TOP_RGB[1], TOP_RGB[2], 199]
     );
     let after = render(&document);
     assert_ne!(after, with_geometry, "basin relief changes the render");
@@ -159,7 +157,7 @@ fn complete_bowl_authoring_workflow_preserves_exact_sources_and_recessed_render(
     assert!(document.redo(), "redo basin relief");
     assert_eq!(
         source_pixel(&document, TOP, BASIN_PIXEL),
-        [TOP_RGB[0], TOP_RGB[1], TOP_RGB[2], 159]
+        [TOP_RGB[0], TOP_RGB[1], TOP_RGB[2], 199]
     );
     assert_eq!(render(&document), after);
 
@@ -188,7 +186,7 @@ fn complete_bowl_authoring_workflow_preserves_exact_sources_and_recessed_render(
     );
     assert_eq!(
         source_pixel(&reopened, TOP, BASIN_PIXEL),
-        [216, 156, 85, 159]
+        [216, 156, 85, 199]
     );
 
     let reopened_frame = render(&reopened);

@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
-use depthsprite_format::DepthSpriteModel;
-use editor_core::{EditorDocument, EditorError, SourceSprite};
-use relief_core::{Bounds, CanonicalView, Chart};
+use editor_core::{EditorDocument, EditorError};
+use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart, EMPTY_RGBA, ModelError};
 
 fn bounds() -> Bounds {
     Bounds::new(2, 3, 4).unwrap()
@@ -16,7 +15,8 @@ fn new_document_owns_one_empty_source_and_is_clean() {
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].view(), CanonicalView::Front);
     assert_eq!(sources[0].dimensions(), (2, 3));
-    assert_eq!(sources[0].rgba(), &[[0, 0, 0, 0]; 6]);
+    assert_eq!(sources[0].rgba(), &[EMPTY_RGBA; 6]);
+    assert_eq!(document.model(), &document.to_model());
     assert_eq!(document.selected_view(), CanonicalView::Front);
     assert!(!document.is_dirty());
 }
@@ -35,7 +35,7 @@ fn sources_stay_in_canonical_order_and_a_seventh_is_refused() {
         document.add_source(view).unwrap();
     }
 
-    let views: Vec<_> = document.sources().map(SourceSprite::view).collect();
+    let views: Vec<_> = document.sources().map(Chart::view).collect();
     assert_eq!(
         views,
         [
@@ -49,25 +49,24 @@ fn sources_stay_in_canonical_order_and_a_seventh_is_refused() {
     );
     assert!(matches!(
         document.add_source(CanonicalView::Front),
-        Err(EditorError::SourceLimit)
+        Err(EditorError::Model(ModelError::ChartCount(7)))
     ));
 }
 
 #[test]
 fn replacing_a_source_rejects_dimensions_that_do_not_match_model_bounds() {
     let mut document = EditorDocument::new(bounds(), CanonicalView::Front);
-    let wrong_size =
-        SourceSprite::from_rgba(CanonicalView::Front, 1, 3, vec![[1, 2, 3, 4]; 3]).unwrap();
+    let wrong_size = Chart::from_rgba(CanonicalView::Front, 1, 3, vec![[1, 2, 3, 255]; 3]).unwrap();
 
     let error = document.replace_source(wrong_size).unwrap_err();
 
     assert!(matches!(
         error,
-        EditorError::DimensionMismatch {
+        EditorError::Model(ModelError::DimensionMismatch {
             view: CanonicalView::Front,
             expected: (2, 3),
             actual: (1, 3),
-        }
+        })
     ));
 }
 
@@ -80,7 +79,7 @@ fn removing_the_only_source_returns_last_source_without_changing_the_document() 
 
     let error = document.remove_source(CanonicalView::Front).unwrap_err();
 
-    assert!(matches!(error, EditorError::LastSource));
+    assert!(matches!(error, EditorError::Model(ModelError::LastChart)));
     assert_eq!(
         document.sources().cloned().collect::<Vec<_>>(),
         before_sources
@@ -94,16 +93,16 @@ fn removing_the_only_source_returns_last_source_without_changing_the_document() 
 
 #[test]
 fn model_conversion_preserves_authored_rgba_order_and_clean_baseline() {
-    let top_pixels = vec![[20, 21, 22, 23]; 8];
+    let top_pixels = vec![[20, 21, 22, 243]; 8];
     let front_pixels = vec![
         [7, 8, 9, 0],
         [10, 11, 12, 255],
-        [13, 14, 15, 1],
-        [16, 17, 18, 19],
-        [20, 21, 22, 23],
-        [24, 25, 26, 27],
+        [13, 14, 15, 251],
+        [16, 17, 18, 250],
+        [20, 21, 22, 249],
+        [24, 25, 26, 248],
     ];
-    let model = DepthSpriteModel::new(
+    let model = AuthoredModel::new(
         bounds(),
         vec![
             Chart::from_rgba(CanonicalView::Top, 2, 4, top_pixels.clone()).unwrap(),
@@ -113,11 +112,12 @@ fn model_conversion_preserves_authored_rgba_order_and_clean_baseline() {
     .unwrap();
     let path = PathBuf::from("model.depthsprite");
 
-    let document = EditorDocument::from_model(model, Some(path.clone())).unwrap();
-    let round_trip = document.to_model().unwrap();
+    let document = EditorDocument::from_model(model.clone(), Some(path.clone()));
+    let round_trip = document.to_model();
 
     assert_eq!(document.path(), Some(path.as_path()));
     assert!(!document.is_dirty());
+    assert_eq!(document.model(), &model);
     assert_eq!(round_trip.charts().len(), 2);
     assert_eq!(round_trip.charts()[0].view(), CanonicalView::Front);
     assert_eq!(round_trip.charts()[0].rgba(), front_pixels);

@@ -1,8 +1,8 @@
 use std::{fs::File, path::Path};
 
-use editor_core::EditorDocument;
+use editor_core::{EditorDocument, EditorError};
 use png::{BitDepth, ColorType, Encoder};
-use relief_core::{Bounds, CanonicalView};
+use relief_core::{Bounds, CanonicalView, ModelError};
 use tempfile::tempdir;
 
 const VIEW: CanonicalView = CanonicalView::Front;
@@ -41,6 +41,44 @@ fn wrong_source_dimensions_leave_the_installed_document_unchanged() {
     assert_eq!(document.revision(), before_revision);
     assert!(!document.is_dirty());
     assert!(!document.can_undo());
+    assert!(!document.can_redo());
+}
+
+#[test]
+fn excessive_relief_import_leaves_model_and_history_unchanged() {
+    let directory = tempdir().unwrap();
+    let source_path = directory.path().join("too-deep.png");
+    write_rgba_png(&source_path, 1, 1, &[[9, 8, 7, 250]]);
+    let mut document = EditorDocument::new(Bounds::new(1, 1, 1).unwrap(), VIEW);
+    document.add_source(CanonicalView::Back).unwrap();
+    assert!(document.undo());
+    let before_model = document.to_model();
+    let before_bounds = document.bounds();
+    let before_rgba = pixels(&document);
+    let before_revision = document.revision();
+    let before_dirty = document.is_dirty();
+    let before_can_undo = document.can_undo();
+    let before_can_redo = document.can_redo();
+
+    let error = document.import_source_png(VIEW, &source_path).unwrap_err();
+
+    assert!(matches!(
+        error,
+        EditorError::Model(ModelError::ReliefBeyondMaximum {
+            view: CanonicalView::Front,
+            x: 0,
+            y: 0,
+            actual: 5,
+            maximum: 4,
+        })
+    ));
+    assert_eq!(document.to_model(), before_model);
+    assert_eq!(document.bounds(), before_bounds);
+    assert_eq!(pixels(&document), before_rgba);
+    assert_eq!(document.revision(), before_revision);
+    assert_eq!(document.is_dirty(), before_dirty);
+    assert_eq!(document.can_undo(), before_can_undo);
+    assert_eq!(document.can_redo(), before_can_redo);
 }
 
 #[test]
@@ -67,7 +105,7 @@ fn save_and_reopen_preserve_exact_authored_bytes_and_mark_the_document_clean() {
     let package_path = directory.path().join("sprite.depthsprite");
     let authored = [[17, 31, 47, 0], [99, 88, 77, 193]];
     write_rgba_png(&source_path, 2, 1, &authored);
-    let mut document = EditorDocument::new(Bounds::new(2, 1, 1).unwrap(), VIEW);
+    let mut document = EditorDocument::new(Bounds::new(2, 1, 63).unwrap(), VIEW);
 
     document.import_source_png(VIEW, &source_path).unwrap();
     assert!(document.is_dirty());
@@ -87,8 +125,8 @@ fn failed_save_as_preserves_the_previous_path_and_saved_state() {
     let first_source = directory.path().join("first.png");
     let second_source = directory.path().join("second.png");
     let installed_path = directory.path().join("installed.depthsprite");
-    write_rgba_png(&first_source, 1, 1, &[[1, 2, 3, 4]]);
-    write_rgba_png(&second_source, 1, 1, &[[5, 6, 7, 8]]);
+    write_rgba_png(&first_source, 1, 1, &[[1, 2, 3, 251]]);
+    write_rgba_png(&second_source, 1, 1, &[[5, 6, 7, 252]]);
     let mut document = EditorDocument::new(Bounds::new(1, 1, 1).unwrap(), VIEW);
     document.import_source_png(VIEW, &first_source).unwrap();
     document.save_as(&installed_path).unwrap();
@@ -100,12 +138,12 @@ fn failed_save_as_preserves_the_previous_path_and_saved_state() {
 
     assert_eq!(document.path(), Some(installed_path.as_path()));
     assert!(document.is_dirty());
-    assert_eq!(pixels(&document), [[5, 6, 7, 8]]);
+    assert_eq!(pixels(&document), [[5, 6, 7, 252]]);
     document.save().unwrap();
     assert!(!document.is_dirty());
     assert_eq!(
         pixels(&EditorDocument::open(&installed_path).unwrap()),
-        [[5, 6, 7, 8]]
+        [[5, 6, 7, 252]]
     );
 }
 

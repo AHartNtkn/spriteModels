@@ -6,13 +6,13 @@ use std::{
 };
 
 use png::{BitDepth, ColorType, Compression, Encoder, Filter};
-use relief_core::Chart;
+use relief_core::{AuthoredModel, Chart};
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
-use crate::{CanonicalViewName, DepthSpriteModel, ManifestV1, PackageError};
+use crate::{CanonicalViewName, ManifestV1, PackageError};
 
 pub fn save_writer<W: Write + Seek>(
-    model: &DepthSpriteModel,
+    model: &AuthoredModel,
     writer: &mut W,
 ) -> Result<(), PackageError> {
     let mut archive = ZipWriter::new(writer);
@@ -45,7 +45,7 @@ pub fn save_writer<W: Write + Seek>(
 }
 
 pub fn save_path_atomic(
-    model: &DepthSpriteModel,
+    model: &AuthoredModel,
     destination: impl AsRef<Path>,
 ) -> Result<(), PackageError> {
     let destination = destination.as_ref();

@@ -187,7 +187,7 @@ mod tests {
         let context = egui::Context::default();
         let mut document = EditorDocument::new(Bounds::new(3, 1, 1).unwrap(), CanonicalView::Front);
         document.set_active_layer(ActiveLayer::Depth);
-        document.set_current_depth(DepthValue::Relief(ReliefValue::new(8).unwrap()));
+        document.set_current_depth(DepthValue::Relief(ReliefValue::new(4).unwrap()));
         let mut model_view = ModelView::default();
         run_frame(&context, &mut model_view, &document);
         let generation_before_edits = model_view.preview.generation();

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use editor_core::{EditorDocument, EditorError};
 use eframe::egui;
-use relief_core::CanonicalView;
+use relief_core::{CanonicalView, ModelError};
 
 use crate::{
     canvas::CanvasPairState,
@@ -15,7 +15,7 @@ pub fn add_next_source(document: &mut EditorDocument) -> Result<CanonicalView, E
     let view = CANONICAL_SOURCE_ORDER
         .into_iter()
         .find(|view| document.source(*view).is_none())
-        .ok_or(EditorError::SourceLimit)?;
+        .ok_or(ModelError::ChartCount(7))?;
     document.add_source(view)?;
     Ok(view)
 }
@@ -42,7 +42,7 @@ pub struct CardHeader {
 
 pub fn card_header(document: &EditorDocument, view: CanonicalView) -> Option<CardHeader> {
     document.source(view)?;
-    let label = if document.source(editor_core::opposite(view)).is_none() {
+    let label = if document.source(view.opposite()).is_none() {
         match view {
             CanonicalView::Front => "Front → Back",
             CanonicalView::Right => "Right → Left",

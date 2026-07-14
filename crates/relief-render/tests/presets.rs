@@ -1,14 +1,6 @@
 use num_rational::Ratio;
 use relief_core::{Bounds, CanonicalView, SourcePoint};
-use relief_render::{CameraBasis, TargetView};
-
-fn integer_vector(x: i64, y: i64, z: i64) -> [Ratio<i64>; 3] {
-    [
-        Ratio::from_integer(x),
-        Ratio::from_integer(y),
-        Ratio::from_integer(z),
-    ]
-}
+use relief_render::TargetView;
 
 #[test]
 fn front_is_identity_for_front_and_culls_edge_on_and_back_facing_charts() {
@@ -126,43 +118,31 @@ fn bowl_acceptance_depth_is_the_cross_product_of_its_projection_rows() {
 }
 
 #[test]
-fn rational_camera_factory_derives_back_left_and_bottom_mirroring() {
+fn back_left_and_bottom_presets_have_the_expected_mirroring() {
     let bounds = Bounds::new(2, 3, 4).unwrap();
     let source = SourcePoint::new(Ratio::from_integer(1), Ratio::from_integer(2));
     let relief = Ratio::from_integer(8);
 
-    let back = TargetView::from_camera(CameraBasis::new(
-        integer_vector(-1, 0, 0),
-        integer_vector(0, 1, 0),
-        integer_vector(0, 0, -1),
-    ))
-    .warp_coefficients(CanonicalView::Back, bounds)
-    .unwrap()
-    .apply(source.clone(), relief);
+    let back = TargetView::back()
+        .warp_coefficients(CanonicalView::Back, bounds)
+        .unwrap()
+        .apply(source.clone(), relief);
     assert_eq!(back.screen_x, Ratio::from_integer(-1));
     assert_eq!(back.screen_y, Ratio::from_integer(2));
     assert_eq!(back.depth, Ratio::from_integer(-3));
 
-    let left = TargetView::from_camera(CameraBasis::new(
-        integer_vector(0, 0, 1),
-        integer_vector(0, 1, 0),
-        integer_vector(1, 0, 0),
-    ))
-    .warp_coefficients(CanonicalView::Left, bounds)
-    .unwrap()
-    .apply(source.clone(), relief);
+    let left = TargetView::left()
+        .warp_coefficients(CanonicalView::Left, bounds)
+        .unwrap()
+        .apply(source.clone(), relief);
     assert_eq!(left.screen_x, Ratio::from_integer(1));
     assert_eq!(left.screen_y, Ratio::from_integer(2));
     assert_eq!(left.depth, Ratio::from_integer(1));
 
-    let bottom = TargetView::from_camera(CameraBasis::new(
-        integer_vector(1, 0, 0),
-        integer_vector(0, 0, -1),
-        integer_vector(0, -1, 0),
-    ))
-    .warp_coefficients(CanonicalView::Bottom, bounds)
-    .unwrap()
-    .apply(source, relief);
+    let bottom = TargetView::bottom()
+        .warp_coefficients(CanonicalView::Bottom, bounds)
+        .unwrap()
+        .apply(source, relief);
     assert_eq!(bottom.screen_x, Ratio::from_integer(1));
     assert_eq!(bottom.screen_y, Ratio::from_integer(-2));
     assert_eq!(bottom.depth, Ratio::from_integer(-2));

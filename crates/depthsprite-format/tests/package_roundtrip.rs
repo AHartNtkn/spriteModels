@@ -1,17 +1,17 @@
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 
-use depthsprite_format::{
-    DepthSpriteModel, PackageError, load_path, load_reader, save_path_atomic, save_writer,
-};
-use relief_core::{Bounds, CanonicalView, Chart, DecodedTexel};
+use depthsprite_format::{PackageError, load_path, load_reader, save_path_atomic, save_writer};
+use png::{BitDepth, ColorType, Encoder};
+use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart, DecodedTexel, ModelError};
 use tempfile::tempdir;
+use zip::{ZipWriter, write::SimpleFileOptions};
 
 fn chart(bounds: Bounds, view: CanonicalView, pixels: Vec<[u8; 4]>) -> Chart {
     let (width, height) = view.dimensions(bounds);
     Chart::from_rgba(view, width, height, pixels).unwrap()
 }
 
-fn saved(model: &DepthSpriteModel) -> Vec<u8> {
+fn saved(model: &AuthoredModel) -> Vec<u8> {
     let mut output = Cursor::new(Vec::new());
     save_writer(model, &mut output).unwrap();
     output.into_inner()
@@ -20,10 +20,10 @@ fn saved(model: &DepthSpriteModel) -> Vec<u8> {
 #[test]
 fn save_and_load_preserve_model_semantics() {
     let bounds = Bounds::new(1, 1, 1).unwrap();
-    let model = DepthSpriteModel::new(
+    let model = AuthoredModel::new(
         bounds,
         vec![
-            chart(bounds, CanonicalView::Top, vec![[0, 0, 255, 1]]),
+            chart(bounds, CanonicalView::Top, vec![[0, 0, 255, 251]]),
             chart(bounds, CanonicalView::Front, vec![[99, 88, 77, 0]]),
         ],
     )
@@ -40,15 +40,15 @@ fn save_and_load_preserve_model_semantics() {
         loaded.charts()[1].texel_at(0, 0),
         Some(DecodedTexel::Relief {
             rgb: [0, 0, 255],
-            eighths: 254,
+            eighths: 4,
         })
     );
 }
 
 #[test]
-fn model_is_a_sorted_unique_shared_bounds_bundle() {
+fn authored_model_is_a_sorted_unique_shared_bounds_bundle() {
     let bounds = Bounds::new(1, 1, 1).unwrap();
-    let model = DepthSpriteModel::new(
+    let model = AuthoredModel::new(
         bounds,
         vec![
             chart(bounds, CanonicalView::Bottom, vec![[1, 2, 3, 254]]),
@@ -68,18 +68,18 @@ fn model_is_a_sorted_unique_shared_bounds_bundle() {
         ]
     );
     assert!(matches!(
-        DepthSpriteModel::new(bounds, vec![]),
-        Err(PackageError::EmptyModel)
+        AuthoredModel::new(bounds, vec![]),
+        Err(ModelError::ChartCount(0))
     ));
     assert!(matches!(
-        DepthSpriteModel::new(
+        AuthoredModel::new(
             bounds,
             vec![
                 chart(bounds, CanonicalView::Front, vec![[1, 2, 3, 255]]),
                 chart(bounds, CanonicalView::Front, vec![[4, 5, 6, 255]]),
             ]
         ),
-        Err(PackageError::DuplicateView(_))
+        Err(ModelError::DuplicateView(CanonicalView::Front))
     ));
 }
 
@@ -89,8 +89,8 @@ fn model_bounds_validate_each_chart_view_dimensions() {
     let chart = Chart::from_rgba(CanonicalView::Top, 2, 2, vec![[0, 0, 0, 0]; 4]).unwrap();
 
     assert!(matches!(
-        DepthSpriteModel::new(bounds, vec![chart]),
-        Err(PackageError::DimensionMismatch {
+        AuthoredModel::new(bounds, vec![chart]),
+        Err(ModelError::DimensionMismatch {
             view: CanonicalView::Top,
             expected: (2, 3),
             actual: (2, 2),
@@ -104,7 +104,7 @@ fn atomic_save_replaces_existing_destination_and_round_trips() {
     let destination = directory.path().join("sprite.depthsprite");
     std::fs::write(&destination, b"old complete package").unwrap();
     let bounds = Bounds::new(1, 1, 1).unwrap();
-    let model = DepthSpriteModel::new(
+    let model = AuthoredModel::new(
         bounds,
         vec![chart(bounds, CanonicalView::Front, vec![[7, 8, 9, 255]])],
     )
@@ -124,7 +124,7 @@ fn pre_replace_failure_preserves_destination_and_existing_temp() {
     std::fs::write(&destination, b"old complete package").unwrap();
     std::fs::create_dir(&temporary).unwrap();
     let bounds = Bounds::new(1, 1, 1).unwrap();
-    let model = DepthSpriteModel::new(
+    let model = AuthoredModel::new(
         bounds,
         vec![chart(bounds, CanonicalView::Front, vec![[7, 8, 9, 255]])],
     )
@@ -139,4 +139,45 @@ fn pre_replace_failure_preserves_destination_and_existing_temp() {
         b"old complete package"
     );
     assert!(temporary.is_dir());
+}
+
+#[test]
+fn loading_rejects_relief_beyond_the_models_view_specific_maximum() {
+    let mut png = Cursor::new(Vec::new());
+    {
+        let mut encoder = Encoder::new(&mut png, 1, 1);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[1, 2, 3, 250]).unwrap();
+    }
+
+    let mut package = Cursor::new(Vec::new());
+    {
+        let mut archive = ZipWriter::new(&mut package);
+        let options = SimpleFileOptions::default();
+        archive.start_file("manifest.json", options).unwrap();
+        archive
+            .write_all(
+                br#"{"format":"depthsprite","version":1,"bounds_pixels":[1,1,1],"views":["front"]}"#,
+            )
+            .unwrap();
+        archive.start_file("views/front.png", options).unwrap();
+        archive.write_all(png.get_ref()).unwrap();
+        archive.finish().unwrap();
+    }
+    package.set_position(0);
+
+    let error = load_reader(package).unwrap_err();
+
+    assert!(matches!(
+        error,
+        PackageError::Model(ModelError::ReliefBeyondMaximum {
+            view: CanonicalView::Front,
+            x: 0,
+            y: 0,
+            actual: 5,
+            maximum: 4,
+        })
+    ));
 }

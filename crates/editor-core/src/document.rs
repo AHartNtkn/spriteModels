@@ -3,10 +3,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use depthsprite_format::DepthSpriteModel;
-use relief_core::{Bounds, CanonicalView, Chart};
+use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart};
 
-use crate::{DepthValue, EditorError, ReliefValue, SourceSprite, fallback::resolve_charts};
+use crate::{DepthValue, EditorError, ReliefValue};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActiveLayer {
@@ -30,8 +29,7 @@ impl Tool {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DocumentState {
-    pub(crate) bounds: Bounds,
-    pub(crate) sources: Vec<SourceSprite>,
+    pub(crate) model: AuthoredModel,
     pub(crate) selection: CanonicalView,
     pub(crate) active_layer: ActiveLayer,
     pub(crate) tool: Tool,
@@ -41,11 +39,11 @@ pub(crate) struct DocumentState {
 
 impl DocumentState {
     pub(crate) fn has_same_persistent_content(&self, other: &Self) -> bool {
-        self.bounds == other.bounds && self.has_same_authored_sources(other)
+        self.model == other.model
     }
 
     pub(crate) fn has_same_authored_sources(&self, other: &Self) -> bool {
-        self.sources == other.sources
+        self.model.charts() == other.model.charts()
     }
 }
 
@@ -64,9 +62,10 @@ static NEXT_RENDER_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 impl EditorDocument {
     pub fn new(bounds: Bounds, initial: CanonicalView) -> Self {
+        let model = AuthoredModel::with_empty_chart(bounds, initial)
+            .expect("validated bounds always produce a valid empty chart");
         let state = DocumentState {
-            bounds,
-            sources: vec![SourceSprite::empty(initial, bounds)],
+            model,
             selection: initial,
             active_layer: ActiveLayer::Color,
             tool: Tool::Pencil,
@@ -78,20 +77,10 @@ impl EditorDocument {
         Self::from_clean_state(state, None)
     }
 
-    pub fn from_model(model: DepthSpriteModel, path: Option<PathBuf>) -> Result<Self, EditorError> {
-        let bounds = model.bounds();
-        let sources: Vec<_> = model
-            .charts()
-            .iter()
-            .map(SourceSprite::from_chart)
-            .collect();
-        for source in &sources {
-            Self::validate_source(bounds, source)?;
-        }
-        let selection = sources[0].view();
+    pub fn from_model(model: AuthoredModel, path: Option<PathBuf>) -> Self {
+        let selection = model.charts()[0].view();
         let state = DocumentState {
-            bounds,
-            sources,
+            model,
             selection,
             active_layer: ActiveLayer::Color,
             tool: Tool::Pencil,
@@ -100,99 +89,57 @@ impl EditorDocument {
                 ReliefValue::new(0).expect("zero relief is always valid"),
             ),
         };
-        Ok(Self::from_clean_state(state, path))
+        Self::from_clean_state(state, path)
     }
 
-    pub fn to_model(&self) -> Result<DepthSpriteModel, EditorError> {
-        let charts = self
-            .state
-            .sources
-            .iter()
-            .map(SourceSprite::to_chart)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(DepthSpriteModel::new(self.state.bounds, charts)?)
+    pub fn model(&self) -> &AuthoredModel {
+        &self.state.model
     }
 
-    pub fn sources(&self) -> impl ExactSizeIterator<Item = &SourceSprite> {
-        self.state.sources.iter()
+    pub fn to_model(&self) -> AuthoredModel {
+        self.state.model.clone()
     }
 
-    pub fn source(&self, view: CanonicalView) -> Option<&SourceSprite> {
-        self.state
-            .sources
-            .iter()
-            .find(|source| source.view() == view)
+    pub fn sources(&self) -> impl ExactSizeIterator<Item = &Chart> {
+        self.state.model.charts().iter()
+    }
+
+    pub fn source(&self, view: CanonicalView) -> Option<&Chart> {
+        self.state.model.chart(view)
     }
 
     pub fn add_source(&mut self, view: CanonicalView) -> Result<(), EditorError> {
         self.ensure_no_active_stroke()?;
-        if self.state.sources.len() == 6 {
-            return Err(EditorError::SourceLimit);
-        }
-        if self.source(view).is_some() {
-            return Err(EditorError::SourceAlreadyExists(view));
-        }
-
         let before = self.state.clone();
-        self.state
-            .sources
-            .push(SourceSprite::empty(view, self.state.bounds));
-        self.state
-            .sources
-            .sort_by_key(|source| source.view().rank());
+        self.state.model.add_empty_chart(view)?;
         self.state.selection = view;
         self.finish_command(before);
         Ok(())
     }
 
-    pub fn replace_source(&mut self, source: SourceSprite) -> Result<(), EditorError> {
+    pub fn replace_source(&mut self, source: Chart) -> Result<(), EditorError> {
         self.ensure_no_active_stroke()?;
-        Self::validate_source(self.state.bounds, &source)?;
-        let Some(index) = self
-            .state
-            .sources
-            .iter()
-            .position(|current| current.view() == source.view())
-        else {
-            return Err(EditorError::SourceNotFound(source.view()));
-        };
-
         let before = self.state.clone();
-        self.state.selection = source.view();
-        self.state.sources[index] = source;
+        let view = source.view();
+        self.state.model.replace_chart(source)?;
+        self.state.selection = view;
         self.finish_command(before);
         Ok(())
     }
 
     pub fn remove_source(&mut self, view: CanonicalView) -> Result<(), EditorError> {
         self.ensure_no_active_stroke()?;
-        let Some(index) = self
-            .state
-            .sources
-            .iter()
-            .position(|source| source.view() == view)
-        else {
-            return Err(EditorError::SourceNotFound(view));
-        };
-        if self.state.sources.len() == 1 {
-            return Err(EditorError::LastSource);
-        }
-
         let before = self.state.clone();
-        self.state.sources.remove(index);
+        self.state.model.remove_chart(view)?;
         if self.state.selection == view {
-            self.state.selection = self.state.sources[0].view();
+            self.state.selection = self.state.model.charts()[0].view();
         }
         self.finish_command(before);
         Ok(())
     }
 
-    pub fn resolved_charts(&self) -> Result<Vec<Chart>, EditorError> {
-        resolve_charts(&self.state.sources)
-    }
-
     pub fn bounds(&self) -> Bounds {
-        self.state.bounds
+        self.state.model.bounds()
     }
 
     pub fn selected_view(&self) -> CanonicalView {
@@ -254,18 +201,5 @@ impl EditorDocument {
             revision: 0,
             render_identity: NEXT_RENDER_IDENTITY.fetch_add(1, Ordering::Relaxed),
         }
-    }
-
-    fn validate_source(bounds: Bounds, source: &SourceSprite) -> Result<(), EditorError> {
-        let expected = source.view().dimensions(bounds);
-        let actual = source.dimensions();
-        if actual != expected {
-            return Err(EditorError::DimensionMismatch {
-                view: source.view(),
-                expected,
-                actual,
-            });
-        }
-        Ok(())
     }
 }

@@ -1,12 +1,13 @@
 use num_rational::Ratio;
-use relief_core::{Bounds, Chart, DecodedTexel, InverseWarpLine, ReliefField, SourcePoint};
+use relief_core::{
+    Bounds, DecodedTexel, InverseWarpLine, ReliefField, ResolvedCharts, SourcePoint,
+};
 use thiserror::Error;
 
 use crate::{
     FragmentKey, FrameBuffer, TargetView, framebuffer::commit_fragment, presets::TargetExtents,
 };
 
-const MAX_RELIEF: f64 = 254.0;
 const ROOT_SCALE: i64 = 1 << 24;
 const COORDINATE_EPSILON: f64 = 1.0e-9;
 const POLYNOMIAL_EPSILON: f64 = 1.0e-10;
@@ -134,10 +135,10 @@ impl PreparedRelief {
 }
 
 pub fn render_model(
-    bounds: Bounds,
-    charts: &[Chart],
+    charts: &ResolvedCharts,
     request: &RenderRequest,
 ) -> Result<FrameBuffer, RenderError> {
+    let bounds = charts.bounds();
     (request.width as usize)
         .checked_mul(request.height as usize)
         .ok_or(RenderError::FrameBufferTooLarge)?;
@@ -158,6 +159,7 @@ pub fn render_model(
     let offset_x = Ratio::new(i64::from(request.width), 2) - (min_x + max_x) / 2;
     let offset_y = Ratio::new(i64::from(request.height), 2) - (min_y + max_y) / 2;
     let prepared: Vec<_> = charts
+        .charts()
         .iter()
         .filter_map(|chart| {
             request
@@ -165,7 +167,8 @@ pub fn render_model(
                 .warp_coefficients(chart.view(), bounds)
                 .map(|warp| {
                     let field = ReliefField::new(chart);
-                    (chart, PreparedRelief::new(&field), warp)
+                    let maximum_relief = f64::from(chart.view().maximum_inward_depth(bounds));
+                    (chart, PreparedRelief::new(&field), warp, maximum_relief)
                 })
         })
         .collect();
@@ -175,12 +178,12 @@ pub fn render_model(
             let screen_x = Ratio::new(2 * i64::from(x) + 1, 2) - offset_x;
             let screen_y = Ratio::new(2 * i64::from(y) + 1, 2) - offset_y;
 
-            for (chart, relief, warp) in &prepared {
+            for (chart, relief, warp, maximum_relief) in &prepared {
                 let Some(line) = warp.inverse_line(screen_x, screen_y) else {
                     continue;
                 };
 
-                for preimage in solve_preimages(relief, &line) {
+                for preimage in solve_preimages(relief, &line, *maximum_relief) {
                     let Some(DecodedTexel::Relief { rgb, .. }) =
                         chart.texel_at(preimage.source_x, preimage.source_y)
                     else {
@@ -208,22 +211,29 @@ pub fn render_model(
 
 fn projected_extents(
     bounds: Bounds,
-    charts: &[Chart],
+    charts: &ResolvedCharts,
     target: &TargetView,
 ) -> Option<TargetExtents> {
-    charts.first().map(|_| target.framing_extents(bounds))
+    charts
+        .charts()
+        .first()
+        .map(|_| target.framing_extents(bounds))
 }
 
-fn solve_preimages(field: &PreparedRelief, line: &InverseWarpLine) -> Vec<Preimage> {
+fn solve_preimages(
+    field: &PreparedRelief,
+    line: &InverseWarpLine,
+    maximum_relief: f64,
+) -> Vec<Preimage> {
     let [[x_offset, x_slope], [y_offset, y_slope]] = line.source_coefficients();
     let x_offset = ratio_to_f64(x_offset);
     let x_slope = ratio_to_f64(x_slope);
     let y_offset = ratio_to_f64(y_offset);
     let y_slope = ratio_to_f64(y_slope);
     let (width, height) = (field.width, field.height);
-    let mut boundaries = vec![0.0, MAX_RELIEF];
-    add_grid_crossings(&mut boundaries, x_offset, x_slope, width);
-    add_grid_crossings(&mut boundaries, y_offset, y_slope, height);
+    let mut boundaries = vec![0.0, maximum_relief];
+    add_grid_crossings(&mut boundaries, x_offset, x_slope, width, maximum_relief);
+    add_grid_crossings(&mut boundaries, y_offset, y_slope, height, maximum_relief);
     boundaries.sort_by(f64::total_cmp);
     boundaries.dedup_by(|left, right| (*left - *right).abs() <= COORDINATE_EPSILON);
 
@@ -283,14 +293,20 @@ fn solve_preimages(field: &PreparedRelief, line: &InverseWarpLine) -> Vec<Preima
     preimages
 }
 
-fn add_grid_crossings(boundaries: &mut Vec<f64>, offset: f64, slope: f64, extent: u32) {
+fn add_grid_crossings(
+    boundaries: &mut Vec<f64>,
+    offset: f64,
+    slope: f64,
+    extent: u32,
+    maximum_relief: f64,
+) {
     if slope.abs() <= COORDINATE_EPSILON {
         return;
     }
     for half_step in 0..=extent * 2 {
         let coordinate = f64::from(half_step) * 0.5;
         let relief = (coordinate - offset) / slope;
-        if relief > 0.0 && relief < MAX_RELIEF {
+        if relief > 0.0 && relief < maximum_relief {
             boundaries.push(relief);
         }
     }
@@ -501,7 +517,7 @@ mod tests {
             .inverse_line(Ratio::new(3, 4), Ratio::new(1, 2))
             .unwrap();
 
-        let preimages = solve_preimages(&prepared, &line);
+        let preimages = solve_preimages(&prepared, &line, 16.0);
         let locations: Vec<_> = preimages
             .iter()
             .map(|preimage| {

@@ -205,9 +205,9 @@ fn generated_block_is_three_flat_canonical_charts() {
 #[test]
 fn two_chart_bowl_has_front_near_rim_and_top_recessed_visible_basin() {
     let model = load_path(asset("bowl.depthsprite")).unwrap();
+    let resolved = model.resolve();
     let frame = render_model(
-        model.bounds(),
-        model.charts(),
+        &resolved,
         &RenderRequest::new(96, 96, TargetView::bowl_acceptance()),
     )
     .unwrap();

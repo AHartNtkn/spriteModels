@@ -53,10 +53,10 @@ impl PreviewCache {
             orientation: camera.orientation(),
         };
         if self.key != Some(key) {
-            let charts = document.resolved_charts()?;
-            let side = native_cell_side(document.bounds(), &charts);
+            let charts = document.model().resolve();
+            let side = native_cell_side(document.bounds(), charts.charts());
             let request = RenderRequest::new(side, side, camera.target_view());
-            let framebuffer = render_model(document.bounds(), &charts, &request)?;
+            let framebuffer = render_model(&charts, &request)?;
             self.generation = self
                 .generation
                 .checked_add(1)
@@ -116,23 +116,22 @@ fn native_cell_side(bounds: Bounds, charts: &[Chart]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use depthsprite_format::DepthSpriteModel;
-    use relief_core::{Bounds, CanonicalView, Chart};
+    use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart};
 
     use super::PreviewCache;
-    use crate::{EditorDocument, OrbitCamera, SourceSprite};
+    use crate::{EditorDocument, OrbitCamera};
 
     fn document() -> EditorDocument {
         let bounds = Bounds::new(1, 1, 1).unwrap();
         let chart = Chart::from_rgba(CanonicalView::Front, 1, 1, vec![[11, 22, 33, 255]]).unwrap();
-        let model = DepthSpriteModel::new(bounds, vec![chart]).unwrap();
-        EditorDocument::from_model(model, None).unwrap()
+        let model = AuthoredModel::new(bounds, vec![chart]).unwrap();
+        EditorDocument::from_model(model, None)
     }
 
     fn recolor(document: &mut EditorDocument, rgb: [u8; 3]) {
         document
             .replace_source(
-                SourceSprite::from_rgba(
+                Chart::from_rgba(
                     CanonicalView::Front,
                     1,
                     1,

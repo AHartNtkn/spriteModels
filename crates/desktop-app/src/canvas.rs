@@ -140,12 +140,12 @@ pub fn display_pixels(
     (0..height)
         .flat_map(|y| (0..width).map(move |x| (x, y)))
         .map(|(x, y)| {
-            let pixel = source
-                .pixel(x, y)
+            let [red, green, blue, alpha] = source
+                .rgba_at(x, y)
                 .expect("coordinates come from source dimensions");
             match kind {
-                CanvasKind::Color => color_display(pixel.rgb()),
-                CanvasKind::Depth => depth_display_alpha(pixel.alpha()),
+                CanvasKind::Color => color_display([red, green, blue]),
+                CanvasKind::Depth => depth_display_alpha(alpha),
             }
         })
         .collect()
@@ -429,12 +429,12 @@ fn paint_canvas(
     let dimensions = source.dimensions();
     for y in 0..dimensions.1 {
         for x in 0..dimensions.0 {
-            let sample = source
-                .pixel(x, y)
+            let [red, green, blue, alpha] = source
+                .rgba_at(x, y)
                 .expect("coordinates come from source dimensions");
             let color = match kind {
-                CanvasKind::Color => color_display(sample.rgb()),
-                CanvasKind::Depth => depth_display_alpha(sample.alpha()),
+                CanvasKind::Color => color_display([red, green, blue]),
+                CanvasKind::Depth => depth_display_alpha(alpha),
             };
             if let Some(pixel_rect) = transform.pixel_rect(rect, dimensions, PixelCoord::new(x, y))
             {

@@ -1,24 +1,24 @@
 use std::{io::Cursor, path::PathBuf};
 
-use depthsprite_format::{DepthSpriteModel, load_path, load_reader, save_writer};
+use depthsprite_format::{load_path, load_reader, save_writer};
 use editor_core::{
-    ActiveLayer, DepthValue, EditorDocument, OrbitCamera, PreviewCache, ReliefValue, SourceSprite,
+    ActiveLayer, DepthValue, EditorDocument, OrbitCamera, PreviewCache, ReliefValue,
 };
-use relief_core::{Bounds, CanonicalView, Chart};
+use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart};
 use relief_render::FrameBuffer;
 
 fn one_pixel_document() -> EditorDocument {
     let bounds = Bounds::new(1, 1, 1).unwrap();
     let chart = Chart::from_rgba(CanonicalView::Front, 1, 1, vec![[11, 22, 33, 255]]).unwrap();
-    let model = DepthSpriteModel::new(bounds, vec![chart]).unwrap();
-    EditorDocument::from_model(model, None).unwrap()
+    let model = AuthoredModel::new(bounds, vec![chart]).unwrap();
+    EditorDocument::from_model(model, None)
 }
 
 fn maximum_relief_shallow_document() -> EditorDocument {
     let bounds = Bounds::new(1, 1, 1).unwrap();
-    let chart = Chart::from_rgba(CanonicalView::Front, 1, 1, vec![[11, 22, 33, 1]]).unwrap();
-    let model = DepthSpriteModel::new(bounds, vec![chart]).unwrap();
-    EditorDocument::from_model(model, None).unwrap()
+    let chart = Chart::from_rgba(CanonicalView::Front, 1, 1, vec![[11, 22, 33, 251]]).unwrap();
+    let model = AuthoredModel::new(bounds, vec![chart]).unwrap();
+    EditorDocument::from_model(model, None)
 }
 
 fn assert_occupied_with_breathing_room(frame: &FrameBuffer) {
@@ -39,7 +39,7 @@ fn bowl_document() -> EditorDocument {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("assets/examples/bowl.depthsprite");
-    EditorDocument::from_model(load_path(path).unwrap(), None).unwrap()
+    EditorDocument::from_model(load_path(path).unwrap(), None)
 }
 
 fn recolor(document: &mut EditorDocument, view: CanonicalView, rgb: [u8; 3]) {
@@ -57,14 +57,14 @@ fn recolor(document: &mut EditorDocument, view: CanonicalView, rgb: [u8; 3]) {
         })
         .collect();
     document
-        .replace_source(SourceSprite::from_rgba(view, width, height, rgba).unwrap())
+        .replace_source(Chart::from_rgba(view, width, height, rgba).unwrap())
         .unwrap();
 }
 
 fn document_with_one_undo() -> EditorDocument {
     let mut document = one_pixel_document();
     document.set_active_layer(ActiveLayer::Depth);
-    document.set_current_depth(DepthValue::Relief(ReliefValue::new(8).unwrap()));
+    document.set_current_depth(DepthValue::Relief(ReliefValue::new(4).unwrap()));
     document.begin_stroke().unwrap();
     document.pencil_pixel(CanonicalView::Front, 0, 0).unwrap();
     document.finish_stroke().unwrap();
@@ -73,11 +73,11 @@ fn document_with_one_undo() -> EditorDocument {
 
 fn assert_document_unchanged_by_drag(
     document: &mut EditorDocument,
-    content: DepthSpriteModel,
+    content: AuthoredModel,
     dirty: bool,
     revision: u64,
 ) {
-    assert_eq!(document.to_model().unwrap(), content);
+    assert_eq!(document.to_model(), content);
     assert_eq!(document.is_dirty(), dirty);
     assert_eq!(document.revision(), revision);
     assert!(document.undo(), "the one authored undo entry remains");
@@ -87,7 +87,7 @@ fn assert_document_unchanged_by_drag(
 #[test]
 fn horizontal_drag_changes_yaw_without_document_mutation() {
     let mut document = document_with_one_undo();
-    let content = document.to_model().unwrap();
+    let content = document.to_model();
     let dirty = document.is_dirty();
     let revision = document.revision();
     let mut camera = OrbitCamera::default();
@@ -106,7 +106,7 @@ fn horizontal_drag_changes_yaw_without_document_mutation() {
 #[test]
 fn vertical_drag_changes_pitch_without_document_mutation() {
     let mut document = document_with_one_undo();
-    let content = document.to_model().unwrap();
+    let content = document.to_model();
     let dirty = document.is_dirty();
     let revision = document.revision();
     let mut camera = OrbitCamera::default();
@@ -259,13 +259,13 @@ fn both_bowl_sources_update_preview_and_reopen_with_a_visible_recessed_basin() {
         .clone();
     assert_ne!(both_edited, front_edited);
 
-    let saved_model = document.to_model().unwrap();
+    let saved_model = document.to_model();
     let mut package = Cursor::new(Vec::new());
     save_writer(&saved_model, &mut package).unwrap();
     package.set_position(0);
     let reopened_model = load_reader(package).unwrap();
     assert_eq!(reopened_model, saved_model);
-    let reopened = EditorDocument::from_model(reopened_model, None).unwrap();
+    let reopened = EditorDocument::from_model(reopened_model, None);
     let mut reopened_preview = PreviewCache::default();
     let reopened_frame = reopened_preview.frame(&reopened, camera).unwrap();
     let reopened_frame = reopened_frame.framebuffer();
@@ -328,10 +328,12 @@ fn native_preview_cell_depends_only_on_registered_bounds_and_legal_relief() {
 fn shallow_bounds_contain_maximum_legal_relief_with_frame_breathing_room() {
     let document = maximum_relief_shallow_document();
     let mut preview = PreviewCache::default();
-    let preview_frame = preview.frame(&document, OrbitCamera::default()).unwrap();
+    let mut camera = OrbitCamera::default();
+    camera.drag(-180.0, -141.056);
+    let preview_frame = preview.frame(&document, camera).unwrap();
     let frame = preview_frame.framebuffer();
 
-    assert_eq!((frame.width(), frame.height()), (67, 67));
+    assert_eq!((frame.width(), frame.height()), (6, 6));
     assert_occupied_with_breathing_room(frame);
 }
 
@@ -340,7 +342,7 @@ fn replacing_a_document_with_equal_revision_cannot_reuse_its_preview() {
     let first = one_pixel_document();
     let mut edited = one_pixel_document();
     recolor(&mut edited, CanonicalView::Front, [201, 17, 83]);
-    let second = EditorDocument::from_model(edited.to_model().unwrap(), None).unwrap();
+    let second = EditorDocument::from_model(edited.to_model(), None);
     assert_eq!(first.revision(), second.revision());
 
     let camera = OrbitCamera::default();

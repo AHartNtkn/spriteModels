@@ -1,7 +1,7 @@
 use std::{error::Error, path::Path};
 
-use depthsprite_format::{DepthSpriteModel, save_path_atomic};
-use relief_core::{Bounds, CanonicalView, Chart};
+use depthsprite_format::save_path_atomic;
+use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart};
 
 const TOP_RGB: [u8; 3] = [216, 156, 85];
 const FRONT_RGB: [u8; 3] = [144, 76, 52];
@@ -14,11 +14,11 @@ pub fn generate_examples(output: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn bowl_model() -> Result<DepthSpriteModel, Box<dyn Error>> {
+fn bowl_model() -> Result<AuthoredModel, Box<dyn Error>> {
     let bounds = Bounds::new(32, 16, 32)?;
     let front = Chart::from_rgba(CanonicalView::Front, 32, 16, bowl_front_pixels())?;
     let top = Chart::from_rgba(CanonicalView::Top, 32, 32, bowl_top_pixels())?;
-    Ok(DepthSpriteModel::new(bounds, vec![front, top])?)
+    Ok(AuthoredModel::new(bounds, vec![front, top])?)
 }
 
 fn top_is_foreground(x: i32, y: i32) -> bool {
@@ -102,7 +102,7 @@ fn bowl_front_pixels() -> Vec<[u8; 4]> {
     pixels
 }
 
-fn block_model() -> Result<DepthSpriteModel, Box<dyn Error>> {
+fn block_model() -> Result<AuthoredModel, Box<dyn Error>> {
     let bounds = Bounds::new(16, 16, 16)?;
     let charts = [
         (CanonicalView::Front, [220, 70, 70]),
@@ -120,7 +120,7 @@ fn block_model() -> Result<DepthSpriteModel, Box<dyn Error>> {
         )
     })
     .collect::<Result<Vec<_>, _>>()?;
-    Ok(DepthSpriteModel::new(bounds, charts)?)
+    Ok(AuthoredModel::new(bounds, charts)?)
 }
 
 fn rgba(rgb: [u8; 3], relief_eighths: u8) -> [u8; 4] {

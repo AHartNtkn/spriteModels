@@ -25,7 +25,8 @@ fn bowl_open_render_save_reopen_preserves_model_and_relief() {
     );
 
     let request = RenderRequest::new(96, 96, TargetView::bowl_acceptance());
-    let frame = render_model(model.bounds(), model.charts(), &request).unwrap();
+    let resolved = model.resolve();
+    let frame = render_model(&resolved, &request).unwrap();
     let rim = frame.owner_at(48, 67).expect("rounded front rim");
     let basin = frame.owner_at(48, 48).expect("recessed top basin");
 
@@ -60,8 +61,5 @@ fn bowl_open_render_save_reopen_preserves_model_and_relief() {
     save_path_atomic(&model, &copy).unwrap();
     let reopened = load_path(copy).unwrap();
     assert_eq!(reopened, model);
-    assert_eq!(
-        render_model(reopened.bounds(), reopened.charts(), &request).unwrap(),
-        frame
-    );
+    assert_eq!(render_model(&reopened.resolve(), &request).unwrap(), frame);
 }

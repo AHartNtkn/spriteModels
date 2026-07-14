@@ -1,5 +1,7 @@
 use num_rational::Ratio;
-use relief_core::{Bounds, CanonicalView, RELIEF_UNITS_PER_PIXEL, WarpCoefficients};
+use relief_core::{
+    Bounds, CanonicalFrame, CanonicalView, RELIEF_UNITS_PER_PIXEL, WarpCoefficients,
+};
 
 type Vector = [Ratio<i64>; 3];
 
@@ -21,14 +23,8 @@ impl CameraBasis {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum ProjectionSource {
-    Camera(CameraBasis),
-    IdentityAllCharts,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetView {
-    source: ProjectionSource,
+    camera: CameraBasis,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -41,9 +37,7 @@ pub(crate) struct TargetExtents {
 
 impl TargetView {
     pub fn from_camera(camera: CameraBasis) -> Self {
-        Self {
-            source: ProjectionSource::Camera(camera),
-        }
+        Self { camera }
     }
 
     pub fn front() -> Self {
@@ -62,11 +56,35 @@ impl TargetView {
         ))
     }
 
+    pub fn back() -> Self {
+        Self::from_camera(CameraBasis::new(
+            integer_vector(-1, 0, 0),
+            integer_vector(0, 1, 0),
+            integer_vector(0, 0, -1),
+        ))
+    }
+
+    pub fn left() -> Self {
+        Self::from_camera(CameraBasis::new(
+            integer_vector(0, 0, 1),
+            integer_vector(0, 1, 0),
+            integer_vector(1, 0, 0),
+        ))
+    }
+
     pub fn top() -> Self {
         Self::from_camera(CameraBasis::new(
             integer_vector(1, 0, 0),
             integer_vector(0, 0, 1),
             integer_vector(0, 1, 0),
+        ))
+    }
+
+    pub fn bottom() -> Self {
+        Self::from_camera(CameraBasis::new(
+            integer_vector(1, 0, 0),
+            integer_vector(0, 0, -1),
+            integer_vector(0, -1, 0),
         ))
     }
 
@@ -91,12 +109,9 @@ impl TargetView {
     }
 
     pub fn is_front_facing(&self, view: CanonicalView) -> bool {
-        match &self.source {
-            ProjectionSource::Camera(camera) => {
-                dot(&camera.depth, &inward_axis(view)) > ratio_zero()
-            }
-            ProjectionSource::IdentityAllCharts => true,
-        }
+        let unit_bounds = Bounds::new(1, 1, 1).expect("unit bounds are valid");
+        let inward = rational_vector(view.frame(unit_bounds).inward);
+        dot(&self.camera.depth, &inward) > ratio_zero()
     }
 
     pub fn warp_coefficients(
@@ -104,140 +119,48 @@ impl TargetView {
         view: CanonicalView,
         bounds: Bounds,
     ) -> Option<WarpCoefficients> {
-        match &self.source {
-            ProjectionSource::Camera(camera) => {
-                let frame = chart_frame(view, bounds);
-                if dot(&camera.depth, &frame.inward) <= ratio_zero() {
-                    return None;
-                }
-                Some(compose(camera, &frame))
-            }
-            ProjectionSource::IdentityAllCharts => Some(WarpCoefficients::new(
-                [[1, 0, 0], [0, 1, 0]],
-                [0, 0],
-                [0, 0, 0],
-                0,
-            )),
+        let frame = view.frame(bounds);
+        let inward = rational_vector(frame.inward);
+        if dot(&self.camera.depth, &inward) <= ratio_zero() {
+            return None;
         }
-    }
-
-    pub fn front_for_test() -> Self {
-        Self {
-            source: ProjectionSource::IdentityAllCharts,
-        }
-    }
-
-    pub fn back_of_front_for_test() -> Self {
-        Self::from_camera(CameraBasis::new(
-            integer_vector(1, 0, 0),
-            integer_vector(0, 1, 0),
-            integer_vector(0, 0, -1),
-        ))
+        Some(compose(&self.camera, frame))
     }
 
     pub(crate) fn framing_extents(&self, bounds: Bounds) -> TargetExtents {
-        match &self.source {
-            ProjectionSource::Camera(camera) => camera_extents(camera, bounds),
-            ProjectionSource::IdentityAllCharts => TargetExtents {
-                min_x: ratio_zero(),
-                max_x: Ratio::from_integer(i64::from(bounds.width())),
-                min_y: ratio_zero(),
-                max_y: Ratio::from_integer(i64::from(bounds.height())),
-            },
-        }
+        camera_extents(&self.camera, bounds)
     }
 }
 
-#[derive(Clone, Debug)]
-struct ChartFrame {
-    origin: Vector,
-    source_x: Vector,
-    source_y: Vector,
-    inward: Vector,
-}
-
-fn chart_frame(view: CanonicalView, bounds: Bounds) -> ChartFrame {
-    let width = Ratio::from_integer(i64::from(bounds.width()));
-    let height = Ratio::from_integer(i64::from(bounds.height()));
-    let depth = Ratio::from_integer(i64::from(bounds.depth()));
-    let zero = ratio_zero();
-
-    match view {
-        CanonicalView::Front => ChartFrame {
-            origin: [zero, zero, zero],
-            source_x: integer_vector(1, 0, 0),
-            source_y: integer_vector(0, 1, 0),
-            inward: inward_axis(view),
-        },
-        CanonicalView::Back => ChartFrame {
-            origin: [width, zero, depth],
-            source_x: integer_vector(-1, 0, 0),
-            source_y: integer_vector(0, 1, 0),
-            inward: inward_axis(view),
-        },
-        CanonicalView::Left => ChartFrame {
-            origin: [zero, zero, zero],
-            source_x: integer_vector(0, 0, 1),
-            source_y: integer_vector(0, 1, 0),
-            inward: inward_axis(view),
-        },
-        CanonicalView::Right => ChartFrame {
-            origin: [width, zero, depth],
-            source_x: integer_vector(0, 0, -1),
-            source_y: integer_vector(0, 1, 0),
-            inward: inward_axis(view),
-        },
-        CanonicalView::Top => ChartFrame {
-            origin: [zero, zero, zero],
-            source_x: integer_vector(1, 0, 0),
-            source_y: integer_vector(0, 0, 1),
-            inward: inward_axis(view),
-        },
-        CanonicalView::Bottom => ChartFrame {
-            origin: [zero, height, depth],
-            source_x: integer_vector(1, 0, 0),
-            source_y: integer_vector(0, 0, -1),
-            inward: inward_axis(view),
-        },
-    }
-}
-
-fn inward_axis(view: CanonicalView) -> Vector {
-    match view {
-        CanonicalView::Front => integer_vector(0, 0, 1),
-        CanonicalView::Back => integer_vector(0, 0, -1),
-        CanonicalView::Left => integer_vector(1, 0, 0),
-        CanonicalView::Right => integer_vector(-1, 0, 0),
-        CanonicalView::Top => integer_vector(0, 1, 0),
-        CanonicalView::Bottom => integer_vector(0, -1, 0),
-    }
-}
-
-fn compose(camera: &CameraBasis, frame: &ChartFrame) -> WarpCoefficients {
+fn compose(camera: &CameraBasis, frame: CanonicalFrame) -> WarpCoefficients {
+    let origin = rational_vector(frame.origin);
+    let source_x = rational_vector(frame.source_u);
+    let source_y = rational_vector(frame.source_v);
+    let inward = rational_vector(frame.inward);
     let relief_unit = Ratio::new(1, RELIEF_UNITS_PER_PIXEL);
     WarpCoefficients::from_rational(
         [
             [
-                dot(&camera.screen_right, &frame.source_x),
-                dot(&camera.screen_right, &frame.source_y),
-                dot(&camera.screen_right, &frame.origin),
+                dot(&camera.screen_right, &source_x),
+                dot(&camera.screen_right, &source_y),
+                dot(&camera.screen_right, &origin),
             ],
             [
-                dot(&camera.screen_down, &frame.source_x),
-                dot(&camera.screen_down, &frame.source_y),
-                dot(&camera.screen_down, &frame.origin),
+                dot(&camera.screen_down, &source_x),
+                dot(&camera.screen_down, &source_y),
+                dot(&camera.screen_down, &origin),
             ],
         ],
         [
-            dot(&camera.screen_right, &frame.inward) * relief_unit,
-            dot(&camera.screen_down, &frame.inward) * relief_unit,
+            dot(&camera.screen_right, &inward) * relief_unit,
+            dot(&camera.screen_down, &inward) * relief_unit,
         ],
         [
-            dot(&camera.depth, &frame.source_x),
-            dot(&camera.depth, &frame.source_y),
-            dot(&camera.depth, &frame.origin),
+            dot(&camera.depth, &source_x),
+            dot(&camera.depth, &source_y),
+            dot(&camera.depth, &origin),
         ],
-        dot(&camera.depth, &frame.inward) * relief_unit,
+        dot(&camera.depth, &inward) * relief_unit,
     )
 }
 
@@ -290,6 +213,10 @@ fn integer_vector(x: i64, y: i64, z: i64) -> Vector {
         Ratio::from_integer(y),
         Ratio::from_integer(z),
     ]
+}
+
+fn rational_vector(vector: [i64; 3]) -> Vector {
+    vector.map(Ratio::from_integer)
 }
 
 fn ratio_zero() -> Ratio<i64> {

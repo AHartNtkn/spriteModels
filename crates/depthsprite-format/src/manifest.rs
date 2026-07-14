@@ -1,4 +1,4 @@
-use relief_core::{Bounds, CanonicalView};
+use relief_core::{Bounds, CanonicalView, ModelError};
 use serde::{Deserialize, Serialize};
 
 use crate::PackageError;
@@ -71,19 +71,6 @@ impl ManifestV1 {
             return Err(PackageError::UnsupportedVersion(self.version));
         }
         let [width, height, depth] = self.bounds_pixels;
-        if width == 0 || height == 0 || depth == 0 {
-            return Err(PackageError::InvalidBounds(self.bounds_pixels));
-        }
-        if !(1..=6).contains(&self.views.len()) {
-            return Err(PackageError::ViewCount(self.views.len()));
-        }
-        let mut unique = std::collections::HashSet::with_capacity(self.views.len());
-        for view in &self.views {
-            if !unique.insert(*view) {
-                return Err(PackageError::DuplicateView(*view));
-            }
-        }
-        Bounds::new(width, height, depth)
-            .map_err(|_| PackageError::InvalidBounds(self.bounds_pixels))
+        Ok(Bounds::new(width, height, depth).map_err(ModelError::from)?)
     }
 }

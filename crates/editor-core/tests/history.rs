@@ -1,22 +1,21 @@
-use depthsprite_format::DepthSpriteModel;
-use editor_core::{ActiveLayer, DepthValue, EditorDocument, ReliefValue, SourceSprite};
-use relief_core::{Bounds, CanonicalView, Chart};
+use editor_core::{ActiveLayer, DepthValue, EditorDocument, ReliefValue};
+use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart};
 
 const FRONT: CanonicalView = CanonicalView::Front;
 
 fn document(width: u32, height: u32, pixels: Vec<[u8; 4]>) -> EditorDocument {
-    let bounds = Bounds::new(width, height, 1).unwrap();
+    let bounds = Bounds::new(width, height, 63).unwrap();
     let chart = Chart::from_rgba(FRONT, width, height, pixels).unwrap();
-    let model = DepthSpriteModel::new(bounds, vec![chart]).unwrap();
-    EditorDocument::from_model(model, None).unwrap()
+    let model = AuthoredModel::new(bounds, vec![chart]).unwrap();
+    EditorDocument::from_model(model, None)
 }
 
 fn two_source_document() -> EditorDocument {
-    let bounds = Bounds::new(2, 1, 1).unwrap();
+    let bounds = Bounds::new(2, 1, 63).unwrap();
     let front = Chart::from_rgba(FRONT, 2, 1, vec![[1, 2, 3, 4]; 2]).unwrap();
     let back = Chart::from_rgba(CanonicalView::Back, 2, 1, vec![[5, 6, 7, 8]; 2]).unwrap();
-    let model = DepthSpriteModel::new(bounds, vec![front, back]).unwrap();
-    EditorDocument::from_model(model, None).unwrap()
+    let model = AuthoredModel::new(bounds, vec![front, back]).unwrap();
+    EditorDocument::from_model(model, None)
 }
 
 fn pixels(document: &EditorDocument, view: CanonicalView) -> Vec<[u8; 4]> {
@@ -89,7 +88,7 @@ fn add_replace_and_remove_are_each_one_undo_step() {
     let original = vec![[1, 2, 3, 4]; 2];
     let mut replaced = document(2, 1, original.clone());
     replaced
-        .replace_source(SourceSprite::from_rgba(FRONT, 2, 1, vec![[9, 8, 7, 6]; 2]).unwrap())
+        .replace_source(Chart::from_rgba(FRONT, 2, 1, vec![[9, 8, 7, 6]; 2]).unwrap())
         .unwrap();
     assert!(replaced.undo());
     assert_eq!(pixels(&replaced, FRONT), original);
@@ -169,7 +168,7 @@ fn source_commands_and_fill_each_advance_revision_once() {
 
     let before_replace = document.revision();
     document
-        .replace_source(SourceSprite::from_rgba(FRONT, 2, 1, vec![[2, 3, 4, 5]; 2]).unwrap())
+        .replace_source(Chart::from_rgba(FRONT, 2, 1, vec![[2, 3, 4, 5]; 2]).unwrap())
         .unwrap();
     assert_eq!(document.revision(), before_replace + 1);
 
