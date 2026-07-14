@@ -13,6 +13,7 @@ relief-core = { path = "../relief-core" }
 rfd.workspace = true
 
 [dev-dependencies]
+png.workspace = true
 tempfile.workspace = true
 
 [[bin]]

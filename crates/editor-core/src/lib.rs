@@ -12,7 +12,7 @@ pub use document::{ActiveLayer, EditorDocument, Tool};
 pub use edit::{DepthValue, ReliefValue};
 pub use fallback::opposite;
 pub use preview::PreviewCache;
-pub use source::SourceSprite;
+pub use source::{SourcePixel, SourceSprite};
 
 use depthsprite_format::PackageError;
 use relief_core::{CanonicalView, ChartError};

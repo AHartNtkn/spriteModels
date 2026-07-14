@@ -1,6 +1,6 @@
 use relief_core::CanonicalView;
 
-use crate::{ActiveLayer, EditorDocument, EditorError, SourceSprite};
+use crate::{ActiveLayer, EditorDocument, EditorError, SourceSprite, Tool};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DepthValue {
@@ -40,6 +40,10 @@ impl From<ReliefValue> for u8 {
 }
 
 impl EditorDocument {
+    pub fn set_tool(&mut self, tool: Tool) {
+        self.state.tool = tool;
+    }
+
     pub fn set_active_layer(&mut self, layer: ActiveLayer) {
         self.state.active_layer = layer;
     }

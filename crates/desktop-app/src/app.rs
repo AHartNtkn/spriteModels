@@ -7,6 +7,8 @@ use relief_core::{Bounds, CanonicalView};
 use crate::{
     layout::{self, Rect, Size, WorkspaceLayout},
     menu::{MenuAction, PendingDestructiveAction, UnsavedChoice, show_menu_bar},
+    palette::PaletteState,
+    source_grid::SourceGridState,
 };
 
 const MODEL_FILTER: &[&str] = &["depthsprite"];
@@ -136,12 +138,18 @@ impl ShellState {
 
 pub struct DepthSpriteApp {
     shell: ShellState,
+    palette: PaletteState,
+    source_grid: SourceGridState,
 }
 
 impl DepthSpriteApp {
     pub fn from_startup_path(path: Option<PathBuf>) -> Self {
+        let shell = ShellState::from_startup_path(path);
+        let palette = PaletteState::new(shell.document());
         Self {
-            shell: ShellState::from_startup_path(path),
+            shell,
+            palette,
+            source_grid: SourceGridState::default(),
         }
     }
 
@@ -262,7 +270,17 @@ impl eframe::App for DepthSpriteApp {
         egui::CentralPanel::default().show(root, |ui| {
             let layout = layout::calculate_layout(Size::new(root_rect.width(), root_rect.height()))
                 .expect("native window must respect the derived minimum size");
-            paint_shell_placeholders(ui, &layout, root_rect.min);
+            paint_model_placeholder(ui, &layout, root_rect.min);
+            let tools_rect = to_egui(layout.tools, root_rect.min);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(tools_rect), |ui| {
+                self.palette.show(ui, &mut self.shell.document);
+            });
+            self.source_grid.show(
+                ui,
+                &mut self.shell.document,
+                &layout.source_cards,
+                root_rect.min,
+            );
         });
 
         if self.shell.file_error().is_some() {
@@ -294,20 +312,8 @@ fn pick_save_path() -> Option<PathBuf> {
         .save_file()
 }
 
-fn paint_shell_placeholders(ui: &mut egui::Ui, layout: &WorkspaceLayout, origin: egui::Pos2) {
+fn paint_model_placeholder(ui: &mut egui::Ui, layout: &WorkspaceLayout, origin: egui::Pos2) {
     let painter = ui.painter();
-    painter.rect_filled(
-        to_egui(layout.tools, origin),
-        4.0,
-        egui::Color32::from_gray(36),
-    );
-    painter.text(
-        to_egui(layout.tools, origin).center_top() + egui::vec2(0.0, 8.0),
-        egui::Align2::CENTER_TOP,
-        "TOOLS",
-        egui::FontId::monospace(10.0),
-        egui::Color32::LIGHT_GRAY,
-    );
     painter.rect_filled(
         to_egui(layout.model, origin),
         4.0,
@@ -320,31 +326,6 @@ fn paint_shell_placeholders(ui: &mut egui::Ui, layout: &WorkspaceLayout, origin:
         egui::FontId::monospace(12.0),
         egui::Color32::LIGHT_GRAY,
     );
-
-    for card in &layout.source_cards {
-        painter.rect_filled(
-            to_egui(card.card, origin),
-            4.0,
-            egui::Color32::from_gray(36),
-        );
-        painter.rect_filled(
-            to_egui(card.color, origin),
-            0.0,
-            egui::Color32::from_gray(54),
-        );
-        painter.rect_filled(
-            to_egui(card.depth, origin),
-            0.0,
-            egui::Color32::from_rgb(64, 32, 64),
-        );
-        painter.text(
-            to_egui(card.card, origin).left_top() + egui::vec2(6.0, 5.0),
-            egui::Align2::LEFT_TOP,
-            view_label(card.view),
-            egui::FontId::monospace(10.0),
-            egui::Color32::LIGHT_GRAY,
-        );
-    }
 }
 
 fn to_egui(rect: Rect, origin: egui::Pos2) -> egui::Rect {
@@ -352,15 +333,4 @@ fn to_egui(rect: Rect, origin: egui::Pos2) -> egui::Rect {
         origin + egui::vec2(rect.left(), rect.top()),
         origin + egui::vec2(rect.right(), rect.bottom()),
     )
-}
-
-fn view_label(view: CanonicalView) -> &'static str {
-    match view {
-        CanonicalView::Front => "Front",
-        CanonicalView::Right => "Right",
-        CanonicalView::Top => "Top",
-        CanonicalView::Back => "Back",
-        CanonicalView::Left => "Left",
-        CanonicalView::Bottom => "Bottom",
-    }
 }

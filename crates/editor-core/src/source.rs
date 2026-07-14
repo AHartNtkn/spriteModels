@@ -10,6 +10,22 @@ pub struct SourceSprite {
     rgba: Vec<[u8; 4]>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourcePixel {
+    rgb: [u8; 3],
+    alpha: u8,
+}
+
+impl SourcePixel {
+    pub const fn rgb(self) -> [u8; 3] {
+        self.rgb
+    }
+
+    pub const fn alpha(self) -> u8 {
+        self.alpha
+    }
+}
+
 impl SourceSprite {
     pub fn from_rgba(
         view: CanonicalView,
@@ -36,6 +52,17 @@ impl SourceSprite {
 
     pub fn rgba(&self) -> &[[u8; 4]] {
         &self.rgba
+    }
+
+    pub fn pixel(&self, x: u32, y: u32) -> Option<SourcePixel> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let raw = self.rgba[(y as usize) * (self.width as usize) + (x as usize)];
+        Some(SourcePixel {
+            rgb: [raw[0], raw[1], raw[2]],
+            alpha: raw[3],
+        })
     }
 
     pub(crate) fn empty(view: CanonicalView, bounds: Bounds) -> Self {
