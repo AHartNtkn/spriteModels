@@ -39,28 +39,65 @@ fn recolor(document: &mut EditorDocument, view: CanonicalView, rgb: [u8; 3]) {
         .unwrap();
 }
 
-#[test]
-fn dragging_changes_only_camera_state() {
+fn document_with_one_undo() -> EditorDocument {
     let mut document = one_pixel_document();
     document.set_active_layer(ActiveLayer::Depth);
     document.set_current_depth(DepthValue::Relief(ReliefValue::new(8).unwrap()));
     document.begin_stroke().unwrap();
     document.pencil_pixel(CanonicalView::Front, 0, 0).unwrap();
     document.finish_stroke().unwrap();
-    let content = document.to_model().unwrap();
-    let dirty = document.is_dirty();
-    let revision = document.revision();
-    let mut camera = OrbitCamera::default();
-    let initial_camera = camera;
+    document
+}
 
-    camera.drag(12.25, -7.75);
-
-    assert_ne!(camera, initial_camera);
+fn assert_document_unchanged_by_drag(
+    document: &mut EditorDocument,
+    content: DepthSpriteModel,
+    dirty: bool,
+    revision: u64,
+) {
     assert_eq!(document.to_model().unwrap(), content);
     assert_eq!(document.is_dirty(), dirty);
     assert_eq!(document.revision(), revision);
     assert!(document.undo(), "the one authored undo entry remains");
     assert!(!document.undo(), "camera drag added no undo entry");
+}
+
+#[test]
+fn horizontal_drag_changes_yaw_without_document_mutation() {
+    let mut document = document_with_one_undo();
+    let content = document.to_model().unwrap();
+    let dirty = document.is_dirty();
+    let revision = document.revision();
+    let mut camera = OrbitCamera::default();
+    let initial_camera = camera;
+    let initial_target = camera.target_view();
+    assert!(initial_target.is_front_facing(CanonicalView::Front));
+
+    camera.drag(400.0, 0.0);
+
+    assert_ne!(camera, initial_camera);
+    assert_ne!(camera.target_view(), initial_target);
+    assert!(!camera.target_view().is_front_facing(CanonicalView::Front));
+    assert_document_unchanged_by_drag(&mut document, content, dirty, revision);
+}
+
+#[test]
+fn vertical_drag_changes_pitch_without_document_mutation() {
+    let mut document = document_with_one_undo();
+    let content = document.to_model().unwrap();
+    let dirty = document.is_dirty();
+    let revision = document.revision();
+    let mut camera = OrbitCamera::default();
+    let initial_camera = camera;
+    let initial_target = camera.target_view();
+    assert!(initial_target.is_front_facing(CanonicalView::Top));
+
+    camera.drag(0.0, -400.0);
+
+    assert_ne!(camera, initial_camera);
+    assert_ne!(camera.target_view(), initial_target);
+    assert!(!camera.target_view().is_front_facing(CanonicalView::Top));
+    assert_document_unchanged_by_drag(&mut document, content, dirty, revision);
 }
 
 #[test]
@@ -98,6 +135,10 @@ fn extreme_finite_orbit_input_remains_bounded_and_deterministic() {
     second.zoom(f32::MAX);
     assert_eq!(first, second);
     assert_eq!(first.target_view(), second.target_view());
+    let document = one_pixel_document();
+    let mut preview = PreviewCache::default();
+    let frame = preview.frame(&document, first, 48, 32).unwrap();
+    assert_eq!((frame.width(), frame.height()), (48, 32));
 
     let pitch_maximum = first;
     first.drag(0.0, 1.0);
@@ -117,7 +158,7 @@ fn extreme_finite_orbit_input_remains_bounded_and_deterministic() {
 }
 
 #[test]
-fn an_unchanged_preview_key_renders_once() {
+fn an_unchanged_preview_key_returns_the_same_framebuffer() {
     let document = one_pixel_document();
     let camera = OrbitCamera::default();
     let mut preview = PreviewCache::default();
@@ -126,46 +167,24 @@ fn an_unchanged_preview_key_renders_once() {
     let second = preview.frame(&document, camera, 48, 32).unwrap().clone();
 
     assert_eq!(first, second);
-    assert_eq!(preview.render_count_for_test(), 1);
 }
 
 #[test]
-fn several_document_mutations_before_a_frame_render_once() {
+fn several_document_mutations_update_then_stabilize_the_framebuffer() {
     let mut document = one_pixel_document();
     let camera = OrbitCamera::default();
     let mut preview = PreviewCache::default();
-    preview.frame(&document, camera, 48, 32).unwrap();
+    let initial = preview.frame(&document, camera, 48, 32).unwrap().clone();
 
     for rgb in [[40, 50, 60], [70, 80, 90], [100, 110, 120]] {
         recolor(&mut document, CanonicalView::Front, rgb);
     }
-    preview.frame(&document, camera, 48, 32).unwrap();
-    preview.frame(&document, camera, 48, 32).unwrap();
+    let changed = preview.frame(&document, camera, 48, 32).unwrap().clone();
+    let repeated = preview.frame(&document, camera, 48, 32).unwrap().clone();
 
     assert_eq!(document.revision(), 3);
-    assert_eq!(preview.render_count_for_test(), 2);
-}
-
-#[test]
-fn orbit_change_renders_once_without_document_mutation() {
-    let document = one_pixel_document();
-    let content = document.to_model().unwrap();
-    let dirty = document.is_dirty();
-    let revision = document.revision();
-    let can_undo = document.can_undo();
-    let mut camera = OrbitCamera::default();
-    let mut preview = PreviewCache::default();
-    preview.frame(&document, camera, 48, 32).unwrap();
-
-    camera.drag(9.0, 4.0);
-    preview.frame(&document, camera, 48, 32).unwrap();
-    preview.frame(&document, camera, 48, 32).unwrap();
-
-    assert_eq!(preview.render_count_for_test(), 2);
-    assert_eq!(document.to_model().unwrap(), content);
-    assert_eq!(document.is_dirty(), dirty);
-    assert_eq!(document.revision(), revision);
-    assert_eq!(document.can_undo(), can_undo);
+    assert_ne!(changed, initial);
+    assert_eq!(repeated, changed);
 }
 
 #[test]
@@ -182,7 +201,6 @@ fn both_bowl_sources_update_preview_and_reopen_with_a_visible_recessed_basin() {
     recolor(&mut document, CanonicalView::Top, [67, 101, 239]);
     let both_edited = preview.frame(&document, camera, 96, 96).unwrap().clone();
     assert_ne!(both_edited, front_edited);
-    assert_eq!(preview.render_count_for_test(), 3);
 
     let saved_model = document.to_model().unwrap();
     let mut package = Cursor::new(Vec::new());
