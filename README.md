@@ -5,27 +5,63 @@ DepthSprite is a Rust model-authoring project inspired by
 PNG sprites. RGB supplies color and inverted alpha supplies relief. The renderer
 transforms and composites the sprites into an orbitable pseudo-3D image.
 
-## Current implementation
+## Run the editor
 
-- `.depthsprite` model packages with a manifest and one to six canonical RGBA PNG
-  charts
-- one program-wide relief scale of eight alpha steps per model pixel
-- exact image warping, relief displacement, depth compositing, and stable overlap
-  ownership
-- semantic model open, save, and reopen
-- a two-chart bowl with a rounded outer profile and recessed basin
-
-Generate the example models with:
+Start with a new model or open an existing model directly:
 
 ```sh
-cargo run -p fixture-gen -- assets/examples
+cargo run -p desktop-app
+cargo run -p desktop-app -- path/to/model.depthsprite
 ```
 
-Run the validation suite with:
+## Model files
 
-```sh
-cargo test --workspace
-```
+A `.depthsprite` is one model file containing one to six canonical RGBA PNG
+sources: Front, Right, Top, Back, Left, and Bottom. RGB stores color. Inverted
+alpha stores inward relief at eight units per model pixel: alpha 255 is zero
+relief, decreasing nonzero alpha moves inward, and alpha zero means the pixel is
+empty. RGB remains stored beneath an empty pixel so geometry can be removed and
+restored without losing its color.
 
-See [the application specification](docs/specs/depthsprite-app.md) and
-[the image-relief model](docs/specs/oriented-relief-model.md).
+One source also supplies its missing opposite side. For example, Front supplies
+Back until a distinct Back source is added; adding the opposite replaces that
+fallback.
+
+## Authoring workflow
+
+Use **File → New** to start a model, **File → Open** to open a `.depthsprite`, and
+**File → Save** or **Save As** to write the complete model back to one file. New,
+Open, and Quit ask whether to save, discard, or cancel when there are unsaved
+changes.
+
+Source cards fill the canonical three-by-two grid. Use **Add Sprite** to create the
+next source. A source card's menu can **Import PNG…** to replace it with a
+same-sized RGBA image or **Remove** it; removing an authored opposite restores the
+remaining source's fallback.
+
+Each source card places its color canvas above its depth canvas. Both canvases use
+the same pixel coordinates, zoom, and pan. The color canvas shows stored RGB even
+where depth is empty. The depth canvas shows empty pixels as magenta, zero relief
+as black, and greater inward relief as brighter gray. Click a canvas to make its
+layer active.
+
+The vertical palette provides:
+
+- **Pencil:** paints RGB on the color canvas or the selected nonempty relief on
+  the depth canvas while preserving the other data.
+- **Eraser:** empties depth while preserving RGB; it is disabled for color.
+- **Fill:** flood-fills contiguous equal color or equal depth on the active layer.
+- **Eyedropper:** selects the stored RGB, relief, or empty-depth value under the
+  cursor.
+
+The color control supports hue and saturation/value selection plus direct RGB and
+six-digit hexadecimal entry. The relief control uses eighth-pixel units and also
+shows the value in model pixels. Use **Edit → Undo** and **Redo** to move through
+completed strokes, fills, and source changes.
+
+Drag the model viewport to orbit and use the mouse wheel to zoom. These controls
+change only the view, not the model. Use **View → Reset Model View** to restore the
+default camera.
+
+See [the application specification](docs/specs/depthsprite-app.md) for the complete
+behavior contract.

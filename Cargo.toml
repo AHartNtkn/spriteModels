@@ -35,6 +35,7 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 depthsprite-format = { path = "crates/depthsprite-format" }
+editor-core = { path = "crates/editor-core" }
 relief-core = { path = "crates/relief-core" }
 relief-render = { path = "crates/relief-render" }
 tempfile.workspace = true

@@ -2524,6 +2524,7 @@ name = "sprite-models"
 version = "0.1.0"
 dependencies = [
  "depthsprite-format",
+ "editor-core",
  "relief-core",
  "relief-render",
  "tempfile",
