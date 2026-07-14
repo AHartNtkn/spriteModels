@@ -11,3 +11,7 @@ num-rational.workspace = true
 relief-core = { path = "../relief-core" }
 relief-render = { path = "../relief-render" }
 thiserror.workspace = true
+
+[dev-dependencies]
+png.workspace = true
+tempfile.workspace = true

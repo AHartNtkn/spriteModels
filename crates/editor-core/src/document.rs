@@ -46,7 +46,7 @@ pub struct EditorDocument {
     pub(crate) undo: Vec<DocumentState>,
     pub(crate) redo: Vec<DocumentState>,
     pub(crate) stroke_before: Option<DocumentState>,
-    path: Option<PathBuf>,
+    pub(crate) path: Option<PathBuf>,
     pub(crate) revision: u64,
 }
 

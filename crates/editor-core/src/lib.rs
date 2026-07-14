@@ -3,6 +3,7 @@ mod document;
 mod edit;
 mod fallback;
 mod history;
+mod io;
 mod preview;
 mod source;
 
@@ -46,6 +47,8 @@ pub enum EditorError {
     StrokeAlreadyActive,
     #[error("no stroke is active")]
     NoActiveStroke,
+    #[error("document has no package path; use save_as first")]
+    MissingPath,
     #[error("pixel ({x}, {y}) is outside source {view:?}")]
     PixelOutOfBounds { view: CanonicalView, x: u32, y: u32 },
 }

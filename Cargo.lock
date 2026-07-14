@@ -60,8 +60,10 @@ version = "0.1.0"
 dependencies = [
  "depthsprite-format",
  "num-rational",
+ "png",
  "relief-core",
  "relief-render",
+ "tempfile",
  "thiserror",
 ]
 
