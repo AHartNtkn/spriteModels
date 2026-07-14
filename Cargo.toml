@@ -1,3 +1,11 @@
+[package]
+name = "sprite-models"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
 [workspace]
 resolver = "3"
 members = [
@@ -26,3 +34,10 @@ tempfile = "=3.27.0"
 thiserror = "=2.0.18"
 zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 windows-sys = "=0.61.2"
+
+[dev-dependencies]
+desktop-app = { path = "crates/desktop-app" }
+relief-core = { path = "crates/relief-core" }
+relief-render = { path = "crates/relief-render" }
+tempfile.workspace = true
+zip.workspace = true

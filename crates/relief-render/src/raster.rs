@@ -38,7 +38,6 @@ pub enum RenderError {
 
 #[derive(Clone, Debug)]
 struct Vertex {
-    source: SourcePoint,
     warped: WarpedSample,
     flat_screen: [Ratio<i64>; 2],
 }
@@ -172,7 +171,6 @@ pub fn render_model(charts: &[Chart], request: &RenderRequest) -> Result<FrameBu
                                 flat.screen_x += offset_x;
                                 flat.screen_y += offset_y;
                                 Vertex {
-                                    source,
                                     warped,
                                     flat_screen: [flat.screen_x, flat.screen_y],
                                 }
@@ -278,6 +276,10 @@ fn rasterize_triangle(
     state: &mut RasterState<'_>,
     source_cell: (u32, u32),
 ) {
+    let rgb = match chart.texel(source_cell.0, source_cell.1) {
+        Some(DecodedTexel::Relief { rgb, .. }) => rgb,
+        _ => unreachable!("only an owning foreground cell reaches rasterization"),
+    };
     let [first, second, third] = vertices;
     let flat_area = flat_edge(first, second, third.flat_screen[0], third.flat_screen[1]);
     let mut area = edge(
@@ -329,26 +331,12 @@ fn rasterize_triangle(
                         sum + *weight * *value
                     })
             };
-            let source = SourcePoint::new(
-                interpolate([
-                    &vertices[0].source.x,
-                    &vertices[1].source.x,
-                    &vertices[2].source.x,
-                ]),
-                interpolate([
-                    &vertices[0].source.y,
-                    &vertices[1].source.y,
-                    &vertices[2].source.y,
-                ]),
-            );
             let depth = interpolate([
                 &vertices[0].warped.depth,
                 &vertices[1].warped.depth,
                 &vertices[2].warped.depth,
             ]);
-            let Some((source_x, source_y, rgb)) = nearest_source_texel(chart, &source) else {
-                continue;
-            };
+            let (source_x, source_y) = source_cell;
             let index = (y * state.frame.width() + x) as usize;
             state.candidate_views[index].insert(chart.view());
             for &(other_view, other_rgb) in
@@ -458,40 +446,17 @@ fn is_top_left(first: &Vertex, second: &Vertex) -> bool {
     dy < Ratio::from_integer(0) || (dy == Ratio::from_integer(0) && dx > Ratio::from_integer(0))
 }
 
-fn nearest_source_texel(chart: &Chart, point: &SourcePoint) -> Option<(u32, u32, [u8; 3])> {
-    let (width, height) = chart.dimensions();
-    let mut nearest: Option<(Ratio<i64>, u32, u32, [u8; 3])> = None;
-
-    for y in 0..height {
-        for x in 0..width {
-            let Some(DecodedTexel::Relief { rgb, .. }) = chart.texel(x, y) else {
-                continue;
-            };
-            let dx = point.x - Ratio::new(2 * i64::from(x) + 1, 2);
-            let dy = point.y - Ratio::new(2 * i64::from(y) + 1, 2);
-            let distance = dx * dx + dy * dy;
-            let candidate = (distance, y, x, rgb);
-            if nearest.as_ref().is_none_or(|current| candidate < *current) {
-                nearest = Some(candidate);
-            }
-        }
-    }
-
-    nearest.map(|(_, y, x, rgb)| (x, y, rgb))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
     use num_rational::Ratio;
-    use relief_core::{SourcePoint, WarpedSample};
+    use relief_core::WarpedSample;
 
     use super::{PixelBounds, Vertex, covered_by_top_left_rule, edge, triangle_pixel_bounds};
 
     fn vertex(x: Ratio<i64>, y: Ratio<i64>) -> Vertex {
         Vertex {
-            source: SourcePoint::new(Ratio::from_integer(0), Ratio::from_integer(0)),
             warped: WarpedSample {
                 screen_x: x,
                 screen_y: y,

@@ -240,7 +240,7 @@ fn chart_with_mask(view: CanonicalView, width: u32, occupied: &[u32]) -> Chart {
 }
 
 #[test]
-fn nearest_texel_half_tie_uses_lowest_source_coordinates_without_blending() {
+fn exact_shared_source_edge_keeps_the_top_left_microcell_owner_and_color() {
     let chart = Chart::from_rgba(
         Bounds::new(2, 1, 1).unwrap(),
         CanonicalView::Front,
@@ -256,7 +256,9 @@ fn nearest_texel_half_tie_uses_lowest_source_coordinates_without_blending() {
     )
     .unwrap();
 
-    assert_eq!(frame.rgba_at(0, 0), [200, 10, 20, 255]);
+    assert_eq!(frame.rgba_at(0, 0), [10, 20, 200, 255]);
+    let owner = frame.owner_at(0, 0).unwrap();
+    assert_eq!((owner.source_x, owner.source_y), (1, 0));
 }
 
 #[test]
@@ -294,6 +296,8 @@ fn every_fold_preimage_competes_by_exact_transient_depth() {
     let frame = render_model(&[chart], &RenderRequest::new(11, 1, target)).unwrap();
 
     assert_eq!(frame.rgba_at(8, 0), [220, 20, 20, 255]);
+    let owner = frame.owner_at(8, 0).unwrap();
+    assert_eq!((owner.source_x, owner.source_y), (0, 0));
 }
 
 #[test]
@@ -348,6 +352,8 @@ fn different_exact_depth_planes_select_different_overlapping_preimages() {
 
     assert_eq!(flat.rgba_at(8, 0), [220, 20, 20, 255]);
     assert_eq!(displaced.rgba_at(8, 0), [20, 20, 220, 255]);
+    assert_eq!(flat.owner_at(8, 0).unwrap().source_x, 0);
+    assert_eq!(displaced.owner_at(8, 0).unwrap().source_x, 2);
 }
 
 #[test]
@@ -384,6 +390,7 @@ fn folded_same_view_colors_at_equal_depth_are_diagnostic_and_stably_owned() {
     let frame = render_model(&[chart], &RenderRequest::new(11, 1, target)).unwrap();
 
     assert_eq!(frame.rgba_at(7, 0), [220, 20, 20, 255]);
+    assert_eq!(frame.owner_at(7, 0).unwrap().source_x, 0);
     assert!(
         frame
             .diagnostics()

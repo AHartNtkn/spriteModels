@@ -2,7 +2,7 @@
 
 Date: 2026-07-13
 
-Status: Approved mathematical direction; written specification awaiting user review
+Status: Implemented and validated reference design
 
 ## Outcome
 
@@ -123,7 +123,7 @@ The denominator is positive everywhere in that domain because every point lies w
 
 The numerator, denominator, and division use specified fixed-point/rational arithmetic in authoritative exports. This is a normative image-resampling rule. It is not stored as a mesh, and it does not create a backside, thickness, closed volume, or connector between separate sprites.
 
-Source RGB is not interpolated with relief. Once the warp selects a source location, the color comes from its nearest source texel. Exact half-texel ties use the lowest `(source_y, source_x)` pair. Pixel-art colors therefore remain authored values.
+Source RGB is not interpolated with relief. Each transient microcell has the immutable source texel containing its strictly interior center. Both triangles carry that texel's RGB and owner; barycentric interpolation is used only for transient depth. Exact output-edge ownership follows the top-left coverage rule, never a second nearest-color search. Pixel-art colors therefore remain authored values.
 
 An artist who needs an actual discontinuity must separate the regions with alpha-zero pixels or place them in separate charts. Adjacent nonzero-alpha pixels intentionally mean continuous relief.
 
@@ -163,9 +163,11 @@ For an elevated oblique target view:
 
 The acceptance claim is deliberately limited to the supported viewing sector. Two images do not determine the bottom, rear exterior, or every possible orbit angle, and the renderer does not invent them.
 
+The bundled `bowl.depthsprite` proves this claim with one coherent camera basis rather than unrelated chart snapshots. The acceptance camera uses screen-right `(1/2, 0, 1/2)`, screen-down `(1, 1/2, -1)`, and transient depth `(-1, 4, 1)`. At 96 by 96 output pixels, the front-frame sample at `(48, 67)` is owned by front texel `(27, 2)` with relief 40 and RGB `[144, 76, 52]`; the top-frame sample at `(48, 48)` is owned by top texel `(16, 16)` with relief 64 and RGB `[216, 156, 85]`. The corner remains transparent, directly demonstrating that unsupported space is not completed.
+
 ## Model Package
 
-The model extension is `.depthsprite`. Its contents are a deterministic ZIP profile:
+The model extension is `.depthsprite`. Its contents are a comment-free canonical ZIP32 profile:
 
 ```text
 manifest.json
@@ -177,7 +179,7 @@ views/top.png
 views/bottom.png
 ```
 
-Only entries declared by the manifest may be present. Absent views are omitted.
+Only entries declared by the manifest may be present. Absent views are omitted. Version 1 accepts one through six charts, dimensions no larger than 512 pixels on either axis, a package no larger than 65 MiB, and aggregate compressed and expanded payloads no larger than 64 MiB each.
 
 The version 1 manifest contains:
 
@@ -221,7 +223,7 @@ Owns fixed target-view presets, deterministic reference rendering, output framin
 
 Owns the native window, menu commands, file dialogs, document dirty state, viewport controls, diagnostics, background work, and framebuffer presentation. The GPU may accelerate preview, but it consumes the same chart/warp contract and is never authoritative for exported pixels.
 
-Long work runs against immutable document snapshots. Results carry a generation identifier so a stale background render cannot replace a newer document state.
+Long work runs against immutable document snapshots. Preview requests replace any queued intermediate request, and only the latest generation may install its result. Export requests reject concurrent work and propagate render diagnostics with the finished sheet.
 
 ## User Experience
 
@@ -259,7 +261,7 @@ Authoritative export uses:
 - Versioned rational camera bases for directional presets.
 - Fixed pixel-center and half-open coverage rules.
 - Fixed-point transient depth and stable lexicographic ties.
-- Nearest-source-texel RGB.
+- Immutable microcell-center source RGB and ownership.
 - A CPU reference compositor.
 - Fixed frame order, bounds, padding, and sheet packing.
 - Canonical PNG encoding without time-dependent metadata.
@@ -285,6 +287,7 @@ Free-orbit preview may use floating-point camera input and GPU rasterization. It
 
 - Valid packages round-trip to byte-identical canonical archives.
 - Entry order and input ZIP metadata do not change canonical output.
+- Canonical output has the exact manifest/view allowlist, ordinary ZIP32 records, no archive or entry comments, no extra fields, fixed timestamps and permissions, and no trailing data.
 - Traversal, duplicate entries, undeclared entries, compression bombs, malformed JSON, oversized images, and dimension mismatches are rejected.
 - Saving through interruption cannot replace a valid package with a partial file.
 - No derived mesh, volume, or renderer cache appears in the saved schema.
@@ -293,7 +296,7 @@ Free-orbit preview may use floating-point camera input and GPU rasterization. It
 
 - Golden outputs for flat, stepped, recessed, overlapping, and disoccluded charts.
 - Repeated directional exports are pixel-identical and byte-identical.
-- The two-chart bowl shows a continuous recessed basin, visible near rim, and rounded exterior over several supported oblique directions.
+- The two-chart bowl's exact acceptance pixels prove a continuous recessed basin, visible near rim, and rounded exterior under one coherent oblique camera.
 - The bowl exposes transparent unsupported regions rather than fabricated bottom or rear surfaces.
 - A nonconcave fixture verifies ordinary transformed-sprite behavior was not regressed.
 - Native scripted use opens one model file, orbits it, selects isometric view, saves and reopens it, exports one sheet, and verifies the resulting pixels.
