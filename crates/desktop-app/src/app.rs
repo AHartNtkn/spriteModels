@@ -456,13 +456,17 @@ mod tests {
             assert!(card.card.contains_rect(card.color));
             assert!(card.card.contains_rect(card.depth));
             assert!(card.color.bottom() < card.depth.top());
-            assert_eq!(card.color.size(), card.depth.size());
+            assert!((card.color.width() - card.depth.width()).abs() <= 0.05);
             assert!(
-                composition.model.rect.width()
+                (card.color.height() - card.depth.height()).abs() <= 0.05,
+                "egui may snap independently derived canvas edges by one subpixel"
+            );
+            assert!(
+                composition.model.rect.width() + 0.1
                     >= card.color.width() * layout::MODEL_TO_CANVAS_RATIO
             );
             assert!(
-                composition.model.rect.height()
+                composition.model.rect.height() + 0.1
                     >= card.color.height() * layout::MODEL_TO_CANVAS_RATIO
             );
         }

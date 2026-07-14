@@ -4,8 +4,8 @@ pub const MENU_HEIGHT: f32 = 28.0;
 pub const WORKSPACE_PADDING: f32 = 10.0;
 pub const PANEL_GAP: f32 = 10.0;
 pub const TOOL_COLUMN_WIDTH: f32 = 100.0;
-pub const SOURCE_COLUMNS: usize = 3;
-pub const SOURCE_ROWS: usize = 2;
+pub const SOURCE_COLUMNS: usize = 2;
+pub const SOURCE_ROWS: usize = 3;
 pub const SOURCE_SLOT_COUNT: usize = SOURCE_COLUMNS * SOURCE_ROWS;
 pub const CANVASES_PER_SOURCE: usize = 2;
 pub const SOURCE_CARD_GAP: f32 = 10.0;
@@ -14,16 +14,14 @@ pub const SOURCE_HEADER_HEIGHT: f32 = 18.0;
 pub const SOURCE_ACTION_HEIGHT: f32 = 28.0;
 pub const SOURCE_ACTION_GAP: f32 = 6.0;
 pub const ADD_BUTTON_WIDTH: f32 = 100.0;
-pub const CANVAS_WIDTH: f32 = 138.0;
-pub const CANVAS_HEIGHT: f32 = 90.0;
+pub const MIN_CANVAS_WIDTH: f32 = 138.0;
+pub const MIN_CANVAS_HEIGHT: f32 = 90.0;
 pub const CANVAS_GAP: f32 = 6.0;
 pub const MODEL_TO_CANVAS_RATIO: f32 = 3.0;
 
-pub const SOURCE_CARD_WIDTH: f32 = CANVAS_WIDTH + SOURCE_CARD_PADDING * 2.0;
-pub const SOURCE_CARD_HEIGHT: f32 = SOURCE_CARD_PADDING * 2.0
-    + SOURCE_HEADER_HEIGHT
-    + CANVAS_HEIGHT * CANVASES_PER_SOURCE as f32
-    + CANVAS_GAP;
+const SOURCE_CARD_WIDTH_CHROME: f32 = SOURCE_CARD_PADDING * 2.0;
+const SOURCE_CARD_HEIGHT_CHROME: f32 =
+    SOURCE_CARD_PADDING * 2.0 + SOURCE_HEADER_HEIGHT + CANVAS_GAP;
 
 pub const CANONICAL_SOURCE_ORDER: [CanonicalView; SOURCE_SLOT_COUNT] = [
     CanonicalView::Front,
@@ -142,7 +140,7 @@ pub enum LayoutError {
     WindowTooSmall { requested: Size, minimum: Size },
 }
 
-pub const fn source_grid_size(authored_count: usize) -> Size {
+pub const fn minimum_source_grid_size(authored_count: usize) -> Size {
     let columns = minimum(authored_count, SOURCE_COLUMNS);
     let rows = authored_count.div_ceil(SOURCE_COLUMNS);
     let action = if authored_count < SOURCE_SLOT_COUNT {
@@ -150,21 +148,29 @@ pub const fn source_grid_size(authored_count: usize) -> Size {
     } else {
         0.0
     };
+    let card = minimum_source_card_size();
     Size::new(
-        repeated_extent(columns, SOURCE_CARD_WIDTH, SOURCE_CARD_GAP),
-        action + repeated_extent(rows, SOURCE_CARD_HEIGHT, SOURCE_CARD_GAP),
+        repeated_extent(columns, card.width, SOURCE_CARD_GAP),
+        action + repeated_extent(rows, card.height, SOURCE_CARD_GAP),
+    )
+}
+
+pub const fn minimum_source_card_size() -> Size {
+    Size::new(
+        MIN_CANVAS_WIDTH + SOURCE_CARD_WIDTH_CHROME,
+        MIN_CANVAS_HEIGHT * CANVASES_PER_SOURCE as f32 + SOURCE_CARD_HEIGHT_CHROME,
     )
 }
 
 pub const fn minimum_model_size() -> Size {
     Size::new(
-        CANVAS_WIDTH * MODEL_TO_CANVAS_RATIO,
-        CANVAS_HEIGHT * MODEL_TO_CANVAS_RATIO,
+        MIN_CANVAS_WIDTH * MODEL_TO_CANVAS_RATIO,
+        MIN_CANVAS_HEIGHT * MODEL_TO_CANVAS_RATIO,
     )
 }
 
 pub const fn minimum_window_size() -> Size {
-    let sources = source_grid_size(SOURCE_SLOT_COUNT);
+    let sources = minimum_source_grid_size(SOURCE_SLOT_COUNT);
     let model = minimum_model_size();
     Size::new(
         WORKSPACE_PADDING * 2.0 + TOOL_COLUMN_WIDTH + PANEL_GAP * 2.0 + model.width + sources.width,
@@ -177,11 +183,11 @@ pub fn calculate_layout(
     authored_count: usize,
 ) -> Result<WorkspaceLayout, LayoutError> {
     assert!((1..=SOURCE_SLOT_COUNT).contains(&authored_count));
-    let minimum = minimum_window_size();
-    if !(window_size.width >= minimum.width && window_size.height >= minimum.height) {
+    let minimum_size = minimum_window_size();
+    if !(window_size.width >= minimum_size.width && window_size.height >= minimum_size.height) {
         return Err(LayoutError::WindowTooSmall {
             requested: window_size,
-            minimum,
+            minimum: minimum_size,
         });
     }
 
@@ -200,7 +206,35 @@ pub fn calculate_layout(
         Size::new(TOOL_COLUMN_WIDTH, content_height),
     );
 
-    let sources_size = source_grid_size(authored_count);
+    let columns = minimum(authored_count, SOURCE_COLUMNS);
+    let rows = authored_count.div_ceil(SOURCE_COLUMNS);
+    let action_height = if authored_count < SOURCE_SLOT_COUNT {
+        SOURCE_ACTION_HEIGHT + SOURCE_ACTION_GAP
+    } else {
+        0.0
+    };
+    let available_width =
+        window_size.width - WORKSPACE_PADDING * 2.0 - TOOL_COLUMN_WIDTH - PANEL_GAP * 2.0;
+    let fixed_source_width =
+        columns as f32 * SOURCE_CARD_WIDTH_CHROME + (columns - 1) as f32 * SOURCE_CARD_GAP;
+    let canvas_width = ((available_width - fixed_source_width)
+        / (columns as f32 + MODEL_TO_CANVAS_RATIO))
+        .max(MIN_CANVAS_WIDTH);
+    let card_width = canvas_width + SOURCE_CARD_WIDTH_CHROME;
+    let sources_width = repeated_extent(columns, card_width, SOURCE_CARD_GAP);
+    let model_width = available_width - sources_width;
+
+    let grid_height = content_height - action_height;
+    let fixed_grid_height =
+        rows as f32 * SOURCE_CARD_HEIGHT_CHROME + (rows - 1) as f32 * SOURCE_CARD_GAP;
+    let canvas_height_for_rows =
+        (grid_height - fixed_grid_height) / (rows * CANVASES_PER_SOURCE) as f32;
+    let canvas_height = canvas_height_for_rows
+        .min(content_height / MODEL_TO_CANVAS_RATIO)
+        .max(MIN_CANVAS_HEIGHT);
+    let card_height = canvas_height * CANVASES_PER_SOURCE as f32 + SOURCE_CARD_HEIGHT_CHROME;
+    let sources_height = action_height + repeated_extent(rows, card_height, SOURCE_CARD_GAP);
+    let sources_size = Size::new(sources_width, sources_height);
     let sources = Rect::from_min_size(
         window.right() - WORKSPACE_PADDING - sources_size.width,
         content_top,
@@ -210,7 +244,7 @@ pub fn calculate_layout(
     let model = Rect::from_min_size(
         model_left,
         content_top,
-        Size::new(sources.left() - PANEL_GAP - model_left, content_height),
+        Size::new(model_width, content_height),
     );
 
     let card_top = sources.top()
@@ -224,11 +258,11 @@ pub fn calculate_layout(
             let column = index % SOURCE_COLUMNS;
             let row = index / SOURCE_COLUMNS;
             let card = Rect::from_min_size(
-                sources.left() + column as f32 * (SOURCE_CARD_WIDTH + SOURCE_CARD_GAP),
-                card_top + row as f32 * (SOURCE_CARD_HEIGHT + SOURCE_CARD_GAP),
-                Size::new(SOURCE_CARD_WIDTH, SOURCE_CARD_HEIGHT),
+                sources.left() + column as f32 * (card_width + SOURCE_CARD_GAP),
+                card_top + row as f32 * (card_height + SOURCE_CARD_GAP),
+                Size::new(card_width, card_height),
             );
-            let canvas_size = Size::new(CANVAS_WIDTH, CANVAS_HEIGHT);
+            let canvas_size = Size::new(canvas_width, canvas_height);
             let color = Rect::from_min_size(
                 card.left() + SOURCE_CARD_PADDING,
                 card.top() + SOURCE_CARD_PADDING + SOURCE_HEADER_HEIGHT,
