@@ -55,6 +55,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "editor-core"
+version = "0.1.0"
+dependencies = [
+ "depthsprite-format",
+ "relief-core",
+ "thiserror",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

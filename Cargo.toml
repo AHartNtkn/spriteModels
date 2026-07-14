@@ -10,6 +10,7 @@ publish = false
 resolver = "3"
 members = [
     "crates/depthsprite-format",
+    "crates/editor-core",
     "crates/fixture-gen",
     "crates/relief-core",
     "crates/relief-render",
