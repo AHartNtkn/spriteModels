@@ -260,7 +260,8 @@ impl eframe::App for DepthSpriteApp {
 
         let root_rect = root.max_rect();
         egui::CentralPanel::default().show(root, |ui| {
-            let layout = layout::calculate_layout(Size::new(root_rect.width(), root_rect.height()));
+            let layout = layout::calculate_layout(Size::new(root_rect.width(), root_rect.height()))
+                .expect("native window must respect the derived minimum size");
             paint_shell_placeholders(ui, &layout, root_rect.min);
         });
 

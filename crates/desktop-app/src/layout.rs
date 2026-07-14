@@ -1,20 +1,28 @@
 use relief_core::CanonicalView;
 
-pub const MIN_WINDOW_WIDTH: f32 = 1600.0;
-pub const MIN_WINDOW_HEIGHT: f32 = 1000.0;
 pub const MENU_HEIGHT: f32 = 28.0;
 pub const WORKSPACE_PADDING: f32 = 10.0;
 pub const PANEL_GAP: f32 = 10.0;
 pub const TOOL_COLUMN_WIDTH: f32 = 42.0;
-pub const SOURCE_CARD_WIDTH: f32 = 150.0;
-pub const SOURCE_CARD_HEIGHT: f32 = 216.0;
+pub const SOURCE_COLUMNS: usize = 3;
+pub const SOURCE_ROWS: usize = 2;
+pub const SOURCE_SLOT_COUNT: usize = SOURCE_COLUMNS * SOURCE_ROWS;
+pub const CANVASES_PER_SOURCE: usize = 2;
 pub const SOURCE_CARD_GAP: f32 = 10.0;
 pub const SOURCE_CARD_PADDING: f32 = 6.0;
 pub const SOURCE_HEADER_HEIGHT: f32 = 18.0;
+pub const CANVAS_WIDTH: f32 = 138.0;
 pub const CANVAS_HEIGHT: f32 = 90.0;
 pub const CANVAS_GAP: f32 = 6.0;
+pub const MODEL_TO_CANVAS_RATIO: f32 = 3.0;
 
-pub const CANONICAL_SOURCE_ORDER: [CanonicalView; 6] = [
+pub const SOURCE_CARD_WIDTH: f32 = CANVAS_WIDTH + SOURCE_CARD_PADDING * 2.0;
+pub const SOURCE_CARD_HEIGHT: f32 = SOURCE_CARD_PADDING * 2.0
+    + SOURCE_HEADER_HEIGHT
+    + CANVAS_HEIGHT * CANVASES_PER_SOURCE as f32
+    + CANVAS_GAP;
+
+pub const CANONICAL_SOURCE_ORDER: [CanonicalView; SOURCE_SLOT_COUNT] = [
     CanonicalView::Front,
     CanonicalView::Right,
     CanonicalView::Top,
@@ -116,17 +124,45 @@ pub struct WorkspaceLayout {
     pub tools: Rect,
     pub model: Rect,
     pub sources: Rect,
-    pub source_cards: [SourceCardLayout; 6],
+    pub source_cards: [SourceCardLayout; SOURCE_SLOT_COUNT],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LayoutError {
+    WindowTooSmall { requested: Size, minimum: Size },
+}
+
+pub const fn source_grid_size() -> Size {
+    Size::new(
+        repeated_extent(SOURCE_COLUMNS, SOURCE_CARD_WIDTH, SOURCE_CARD_GAP),
+        repeated_extent(SOURCE_ROWS, SOURCE_CARD_HEIGHT, SOURCE_CARD_GAP),
+    )
+}
+
+pub const fn minimum_model_size() -> Size {
+    Size::new(
+        CANVAS_WIDTH * MODEL_TO_CANVAS_RATIO,
+        CANVAS_HEIGHT * MODEL_TO_CANVAS_RATIO,
+    )
 }
 
 pub const fn minimum_window_size() -> Size {
-    Size::new(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+    let sources = source_grid_size();
+    let model = minimum_model_size();
+    Size::new(
+        WORKSPACE_PADDING * 2.0 + TOOL_COLUMN_WIDTH + PANEL_GAP * 2.0 + model.width + sources.width,
+        MENU_HEIGHT + WORKSPACE_PADDING * 2.0 + maximum(model.height, sources.height),
+    )
 }
 
-pub fn calculate_layout(window_size: Size) -> WorkspaceLayout {
+pub fn calculate_layout(window_size: Size) -> Result<WorkspaceLayout, LayoutError> {
     let minimum = minimum_window_size();
-    assert!(window_size.width >= minimum.width);
-    assert!(window_size.height >= minimum.height);
+    if !(window_size.width >= minimum.width && window_size.height >= minimum.height) {
+        return Err(LayoutError::WindowTooSmall {
+            requested: window_size,
+            minimum,
+        });
+    }
 
     let window = Rect::from_min_size(0.0, 0.0, window_size);
     let menu = Rect::from_min_size(0.0, 0.0, Size::new(window_size.width, MENU_HEIGHT));
@@ -143,10 +179,7 @@ pub fn calculate_layout(window_size: Size) -> WorkspaceLayout {
         Size::new(TOOL_COLUMN_WIDTH, content_height),
     );
 
-    let sources_size = Size::new(
-        SOURCE_CARD_WIDTH * 3.0 + SOURCE_CARD_GAP * 2.0,
-        SOURCE_CARD_HEIGHT * 2.0 + SOURCE_CARD_GAP,
-    );
+    let sources_size = source_grid_size();
     let sources = Rect::from_min_size(
         window.right() - WORKSPACE_PADDING - sources_size.width,
         content_top,
@@ -160,14 +193,14 @@ pub fn calculate_layout(window_size: Size) -> WorkspaceLayout {
     );
 
     let source_cards = std::array::from_fn(|index| {
-        let column = index % 3;
-        let row = index / 3;
+        let column = index % SOURCE_COLUMNS;
+        let row = index / SOURCE_COLUMNS;
         let card = Rect::from_min_size(
             sources.left() + column as f32 * (SOURCE_CARD_WIDTH + SOURCE_CARD_GAP),
             sources.top() + row as f32 * (SOURCE_CARD_HEIGHT + SOURCE_CARD_GAP),
             Size::new(SOURCE_CARD_WIDTH, SOURCE_CARD_HEIGHT),
         );
-        let canvas_size = Size::new(SOURCE_CARD_WIDTH - SOURCE_CARD_PADDING * 2.0, CANVAS_HEIGHT);
+        let canvas_size = Size::new(CANVAS_WIDTH, CANVAS_HEIGHT);
         let color = Rect::from_min_size(
             card.left() + SOURCE_CARD_PADDING,
             card.top() + SOURCE_CARD_PADDING + SOURCE_HEADER_HEIGHT,
@@ -184,7 +217,7 @@ pub fn calculate_layout(window_size: Size) -> WorkspaceLayout {
         }
     });
 
-    WorkspaceLayout {
+    Ok(WorkspaceLayout {
         window,
         menu,
         workspace,
@@ -192,5 +225,13 @@ pub fn calculate_layout(window_size: Size) -> WorkspaceLayout {
         model,
         sources,
         source_cards,
-    }
+    })
+}
+
+const fn repeated_extent(count: usize, item_extent: f32, gap: f32) -> f32 {
+    count as f32 * item_extent + (count - 1) as f32 * gap
+}
+
+const fn maximum(left: f32, right: f32) -> f32 {
+    if left >= right { left } else { right }
 }

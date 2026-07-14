@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use desktop_app::{
     ShellState,
     menu::{MenuAction, MenuGroup, PendingDestructiveAction, UnsavedChoice, menu_items},
@@ -95,10 +93,12 @@ fn save_completes_the_pending_action_only_after_the_save_succeeds() {
 
 #[test]
 fn failed_open_retains_the_current_document_and_reports_a_dismissible_error() {
+    let directory = tempfile::tempdir().unwrap();
     let mut shell = ShellState::new(dirty_document());
     let before_bounds = shell.document().bounds();
     let before_sources = shell.document().sources().count();
-    let missing = PathBuf::from("definitely-missing.depthsprite");
+    let missing = directory.path().join("missing.depthsprite");
+    assert!(!missing.exists());
 
     shell.request_destructive(PendingDestructiveAction::Open(missing));
     shell.resolve_unsaved(UnsavedChoice::Discard, None);
