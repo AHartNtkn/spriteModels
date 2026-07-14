@@ -1,16 +1,21 @@
+mod camera;
 mod document;
 mod edit;
 mod fallback;
 mod history;
+mod preview;
 mod source;
 
+pub use camera::OrbitCamera;
 pub use document::{ActiveLayer, EditorDocument, Tool};
 pub use edit::{DepthValue, ReliefValue};
 pub use fallback::opposite;
+pub use preview::PreviewCache;
 pub use source::SourceSprite;
 
 use depthsprite_format::PackageError;
 use relief_core::{CanonicalView, ChartError};
+use relief_render::RenderError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -19,6 +24,8 @@ pub enum EditorError {
     Chart(#[from] ChartError),
     #[error(transparent)]
     Package(#[from] PackageError),
+    #[error(transparent)]
+    Render(#[from] RenderError),
     #[error("document already contains a source for {0:?}")]
     SourceAlreadyExists(CanonicalView),
     #[error("document already contains all six canonical sources")]

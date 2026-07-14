@@ -59,7 +59,9 @@ name = "editor-core"
 version = "0.1.0"
 dependencies = [
  "depthsprite-format",
+ "num-rational",
  "relief-core",
+ "relief-render",
  "thiserror",
 ]
 
