@@ -138,6 +138,16 @@ pub struct PaletteOutput {
 pub(crate) struct PaletteObservation {
     pub rect: egui::Rect,
     pub controls: Vec<egui::Rect>,
+    pub color_popover: Option<ColorPopoverObservation>,
+}
+
+#[cfg(test)]
+pub(crate) struct ColorPopoverObservation {
+    pub rect: egui::Rect,
+    pub picker: egui::Rect,
+    pub rgb_rows: [egui::Rect; 3],
+    pub rgb_labels: [egui::Rect; 3],
+    pub hex: egui::Rect,
 }
 
 impl PaletteState {
@@ -153,6 +163,8 @@ impl PaletteState {
     pub fn show(&mut self, ui: &mut egui::Ui, document: &mut EditorDocument) -> PaletteOutput {
         #[cfg(test)]
         let mut controls = Vec::new();
+        #[cfg(test)]
+        let mut color_popover = None;
         let palette = ui.vertical(|ui| {
             for entry in tool_entries() {
                 let selected = document.tool() == entry.tool;
@@ -177,20 +189,31 @@ impl PaletteState {
                 ui.set_min_width(170.0);
                 let rgb = document.current_rgb();
                 let mut color = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-                if egui::color_picker::color_picker_color32(
-                    ui,
-                    &mut color,
-                    egui::color_picker::Alpha::Opaque,
-                ) {
+                let picker = ui.scope(|ui| {
+                    egui::color_picker::color_picker_color32(
+                        ui,
+                        &mut color,
+                        egui::color_picker::Alpha::Opaque,
+                    )
+                });
+                if picker.inner {
                     let [red, green, blue, _] = color.to_array();
                     document.set_current_rgb([red, green, blue]);
                 }
 
                 let rgb = document.current_rgb();
+                #[cfg(test)]
+                let mut rgb_rows = [egui::Rect::NOTHING; 3];
+                #[cfg(test)]
+                let mut rgb_labels = [egui::Rect::NOTHING; 3];
                 for (channel, label) in ["R", "G", "B"].into_iter().enumerate() {
                     let mut value = rgb[channel];
-                    ui.horizontal(|ui| {
-                        ui.label(label);
+                    let _row = ui.horizontal(|ui| {
+                        let _label_response = ui.label(label);
+                        #[cfg(test)]
+                        {
+                            rgb_labels[channel] = _label_response.rect;
+                        }
                         if ui
                             .add(egui::DragValue::new(&mut value).range(0..=255))
                             .changed()
@@ -199,6 +222,10 @@ impl PaletteState {
                                 .expect("palette RGB controls enumerate exactly three channels");
                         }
                     });
+                    #[cfg(test)]
+                    {
+                        rgb_rows[channel] = _row.response.rect;
+                    }
                 }
 
                 if document.current_rgb() != self.synced_rgb
@@ -225,6 +252,16 @@ impl PaletteState {
                 }
                 if self.hex_error {
                     ui.colored_label(egui::Color32::LIGHT_RED, "Use six hex digits");
+                }
+                #[cfg(test)]
+                {
+                    color_popover = Some(ColorPopoverObservation {
+                        rect: ui.min_rect(),
+                        picker: picker.response.rect,
+                        rgb_rows,
+                        rgb_labels,
+                        hex: response.rect,
+                    });
                 }
             });
             #[cfg(test)]
@@ -280,6 +317,7 @@ impl PaletteState {
             observation: PaletteObservation {
                 rect: palette.response.rect,
                 controls,
+                color_popover,
             },
         }
     }
@@ -287,5 +325,101 @@ impl PaletteState {
     fn sync_hex(&mut self, rgb: [u8; 3]) {
         self.hex_input = format_rgb_hex(rgb);
         self.synced_rgb = rgb;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{self, Event, Modifiers, PointerButton, Pos2, Rect, pos2};
+    use relief_core::{Bounds, CanonicalView};
+
+    use super::*;
+
+    fn run_frame(
+        context: &egui::Context,
+        palette: &mut PaletteState,
+        document: &mut EditorDocument,
+        events: Vec<Event>,
+    ) -> (egui::FullOutput, PaletteObservation) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_max(Pos2::ZERO, pos2(360.0, 500.0))),
+            events,
+            ..Default::default()
+        };
+        let mut observation = None;
+        let output = context.run_ui(input, |ui| {
+            ui.set_width(crate::layout::TOOL_COLUMN_WIDTH);
+            observation = Some(palette.show(ui, document).observation);
+        });
+        (output, observation.unwrap())
+    }
+
+    fn pointer_button(position: Pos2, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos: position,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    fn painted_text_rect(output: &egui::FullOutput, text: &str) -> Rect {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape) if shape.galley.text() == text => {
+                    Some(shape.visual_bounding_rect())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("palette did not paint {text:?}"))
+    }
+
+    #[test]
+    fn color_button_opens_embedded_picker_rgb_and_hex_controls_with_contained_labels() {
+        let context = egui::Context::default();
+        let mut document = EditorDocument::new(Bounds::new(1, 1, 1).unwrap(), CanonicalView::Front);
+        let mut palette = PaletteState::new(&document);
+
+        let (initial, initial_observation) =
+            run_frame(&context, &mut palette, &mut document, Vec::new());
+        let color_button = initial_observation.controls[4];
+        assert!(
+            color_button.contains_rect(painted_text_rect(&initial, "Color")),
+            "the visible Color label remains inside its button"
+        );
+
+        let center = color_button.center();
+        run_frame(
+            &context,
+            &mut palette,
+            &mut document,
+            vec![Event::PointerMoved(center), pointer_button(center, true)],
+        );
+        let (_opened, opened_observation) = run_frame(
+            &context,
+            &mut palette,
+            &mut document,
+            vec![pointer_button(center, false)],
+        );
+        let popover = opened_observation
+            .color_popover
+            .expect("clicking Color opens its real egui popover");
+
+        assert!(popover.rect.is_positive());
+        assert!(popover.picker.is_positive());
+        assert!(popover.rect.contains_rect(popover.picker));
+        assert!(popover.rect.contains_rect(popover.hex));
+        assert_eq!(palette.hex_input, "000000");
+        for (index, label) in ["R", "G", "B"].into_iter().enumerate() {
+            assert!(popover.rgb_rows[index].is_positive());
+            assert!(popover.rect.contains_rect(popover.rgb_rows[index]));
+            assert!(popover.rgb_rows[index].contains_rect(popover.rgb_labels[index]));
+            assert!(
+                popover.rgb_labels[index].is_positive(),
+                "the {label} label is rendered"
+            );
+        }
     }
 }

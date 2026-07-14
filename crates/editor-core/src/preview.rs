@@ -2,6 +2,10 @@ use relief_render::{FrameBuffer, RenderRequest, render_model};
 
 use crate::{EditorDocument, EditorError, OrbitCamera, camera::OrbitOrientation};
 
+const MAX_RELIEF_EIGHTHS: u32 = 254;
+const RELIEF_EIGHTHS_PER_MODEL_PIXEL: u32 = 8;
+const RASTER_BREATHING_ROOM: u32 = 2;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PreviewKey {
     document_identity: u64,
@@ -80,11 +84,13 @@ impl PreviewCache {
 }
 
 fn native_cell_side(bounds: relief_core::Bounds) -> u32 {
+    let maximum_relief_pixels = MAX_RELIEF_EIGHTHS.div_ceil(RELIEF_EIGHTHS_PER_MODEL_PIXEL);
     bounds
         .width()
         .saturating_add(bounds.height())
         .saturating_add(bounds.depth())
-        .saturating_add(4)
+        .saturating_add(maximum_relief_pixels.saturating_mul(2))
+        .saturating_add(RASTER_BREATHING_ROOM.saturating_mul(2))
 }
 
 #[cfg(test)]

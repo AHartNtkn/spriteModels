@@ -102,6 +102,20 @@ pub(crate) struct SourceCardObservation {
     pub card: egui::Rect,
     pub color: egui::Rect,
     pub depth: egui::Rect,
+    pub header: egui::Rect,
+    pub label: egui::Rect,
+    pub menu: egui::Rect,
+}
+
+struct AuthoredCardOutput {
+    #[cfg(test)]
+    canvas: crate::canvas::CanvasPairOutput,
+    #[cfg(test)]
+    header: egui::Rect,
+    #[cfg(test)]
+    label: egui::Rect,
+    #[cfg(test)]
+    menu: egui::Rect,
 }
 
 impl Default for SourceGridState {
@@ -128,7 +142,7 @@ impl SourceGridState {
             let card_rect = to_egui(layout.card, origin);
             match modes[index] {
                 SlotMode::Authored => {
-                    let canvas =
+                    let authored =
                         self.show_authored_card(ui, document, index, layout, card_rect, origin);
                     #[cfg(test)]
                     observed_cards.push(SourceCardObservation {
@@ -136,11 +150,14 @@ impl SourceGridState {
                         column: layout.column,
                         row: layout.row,
                         card: card_rect,
-                        color: canvas.observation.color,
-                        depth: canvas.observation.depth,
+                        color: authored.canvas.observation.color,
+                        depth: authored.canvas.observation.depth,
+                        header: authored.header,
+                        label: authored.label,
+                        menu: authored.menu,
                     });
                     #[cfg(not(test))]
-                    let _ = canvas;
+                    let _ = authored;
                 }
                 SlotMode::AddSprite => {
                     ui.painter()
@@ -180,7 +197,7 @@ impl SourceGridState {
         layout: &SourceCardLayout,
         card_rect: egui::Rect,
         origin: egui::Pos2,
-    ) -> crate::canvas::CanvasPairOutput {
+    ) -> AuthoredCardOutput {
         ui.painter()
             .rect_filled(card_rect, 4.0, egui::Color32::from_gray(36));
         let header = card_header(document, layout.view)
@@ -189,36 +206,52 @@ impl SourceGridState {
             card_rect.min + egui::vec2(6.0, 2.0),
             egui::pos2(card_rect.right() - 4.0, to_egui(layout.color, origin).top()),
         );
-        ui.painter().text(
-            header_rect.left_center(),
+        let menu_rect = egui::Rect::from_min_size(
+            egui::pos2(header_rect.right() - 24.0, header_rect.top()),
+            egui::vec2(24.0, header_rect.height()),
+        );
+        let label_area = egui::Rect::from_min_max(
+            header_rect.min,
+            egui::pos2(menu_rect.left() - 4.0, header_rect.bottom()),
+        );
+        let _label_rect = ui.painter().text(
+            label_area.left_center(),
             egui::Align2::LEFT_CENTER,
             header.label,
             egui::FontId::monospace(9.0),
             egui::Color32::LIGHT_GRAY,
         );
-
-        let menu_rect = egui::Rect::from_min_size(
-            egui::pos2(header_rect.right() - 16.0, header_rect.top()),
-            egui::vec2(16.0, header_rect.height()),
-        );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(menu_rect), |ui| {
-            ui.menu_button("⋮", |ui| {
-                if ui.button("Import PNG…").clicked() {
-                    ui.close();
-                    if let Some(path) = pick_source_png() {
-                        self.capture(replace_source_from_png(document, layout.view, path));
+        let _menu = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(menu_rect), |ui| {
+                ui.menu_button("⋮", |ui| {
+                    if ui.button("Import PNG…").clicked() {
+                        ui.close();
+                        if let Some(path) = pick_source_png() {
+                            self.capture(replace_source_from_png(document, layout.view, path));
+                        }
                     }
-                }
-                if ui.button("Remove").clicked() {
-                    ui.close();
-                    self.capture(remove_source(document, layout.view));
-                }
-            });
-        });
+                    if ui.button("Remove").clicked() {
+                        ui.close();
+                        self.capture(remove_source(document, layout.view));
+                    }
+                })
+            })
+            .inner;
 
         let color_rect = to_egui(layout.color, origin);
         let depth_rect = to_egui(layout.depth, origin);
-        self.cards[index].show_pair(ui, document, layout.view, color_rect, depth_rect)
+        let _canvas =
+            self.cards[index].show_pair(ui, document, layout.view, color_rect, depth_rect);
+        AuthoredCardOutput {
+            #[cfg(test)]
+            canvas: _canvas,
+            #[cfg(test)]
+            header: header_rect,
+            #[cfg(test)]
+            label: _label_rect,
+            #[cfg(test)]
+            menu: _menu.response.rect,
+        }
     }
 
     fn capture(&mut self, result: Result<(), EditorError>) {
@@ -250,5 +283,53 @@ pub const fn view_label(view: CanonicalView) -> &'static str {
         CanonicalView::Back => "Back",
         CanonicalView::Left => "Left",
         CanonicalView::Bottom => "Bottom",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use editor_core::EditorDocument;
+    use relief_core::Bounds;
+
+    use super::*;
+    use crate::layout::{Size, calculate_layout};
+
+    #[test]
+    fn every_fallback_header_renders_inside_its_card_without_touching_the_menu() {
+        for view in CANONICAL_SOURCE_ORDER {
+            let context = egui::Context::default();
+            let mut document = EditorDocument::new(Bounds::new(32, 32, 32).unwrap(), view);
+            let layout = calculate_layout(Size::new(1600.0, 1000.0)).unwrap();
+            let mut grid = SourceGridState::default();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 1000.0),
+                )),
+                ..Default::default()
+            };
+            let mut observation = None;
+            let _ = context.run_ui(input, |ui| {
+                observation = Some(
+                    grid.show(ui, &mut document, &layout.source_cards, egui::Pos2::ZERO)
+                        .observation,
+                );
+            });
+            let observation = observation.unwrap();
+            let card = observation
+                .cards
+                .iter()
+                .find(|card| card.view == view)
+                .expect("the authored card is rendered");
+            assert!(card.card.contains_rect(card.header));
+            assert!(card.header.contains_rect(card.label));
+            assert!(
+                card.header.contains_rect(card.menu),
+                "header {:?} does not contain menu {:?}",
+                card.header,
+                card.menu
+            );
+            assert!(!card.label.intersects(card.menu));
+        }
     }
 }

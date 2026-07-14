@@ -5,13 +5,9 @@ use relief_render::{CameraBasis, TargetView};
 
 const DEFAULT_YAW_MILLIDEGREES: i32 = 45_000;
 const DEFAULT_PITCH_MILLIDEGREES: i32 = 35_264;
-const DEFAULT_ZOOM_MILLI: u32 = 1_000;
 const DRAG_MILLIDEGREES_PER_POINT: f64 = 250.0;
-const ZOOM_MILLI_PER_UNIT: f64 = 100.0;
 const MIN_PITCH_MILLIDEGREES: i32 = -80_000;
 const MAX_PITCH_MILLIDEGREES: i32 = 80_000;
-const MIN_ZOOM_MILLI: u32 = 250;
-const MAX_ZOOM_MILLI: u32 = 4_000;
 const BASIS_DENOMINATOR: i64 = 1_024;
 const FULL_TURN_MILLIDEGREES: i128 = 360_000;
 const HALF_TURN_MILLIDEGREES: i128 = 180_000;
@@ -20,7 +16,6 @@ const HALF_TURN_MILLIDEGREES: i128 = 180_000;
 pub struct OrbitCamera {
     yaw_millidegrees: i32,
     pitch_millidegrees: i32,
-    zoom_milli: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -40,19 +35,8 @@ impl OrbitCamera {
         ) as i32;
     }
 
-    pub fn zoom(&mut self, wheel_delta: f32) {
-        let delta = quantized_delta(wheel_delta, ZOOM_MILLI_PER_UNIT);
-        self.zoom_milli = (i128::from(self.zoom_milli) + delta)
-            .clamp(i128::from(MIN_ZOOM_MILLI), i128::from(MAX_ZOOM_MILLI))
-            as u32;
-    }
-
     pub fn reset(&mut self) {
         *self = Self::default();
-    }
-
-    pub fn presentation_zoom_milli(self) -> u32 {
-        self.zoom_milli
     }
 
     pub(crate) fn orientation(self) -> OrbitOrientation {
@@ -82,7 +66,6 @@ impl Default for OrbitCamera {
         Self {
             yaw_millidegrees: DEFAULT_YAW_MILLIDEGREES,
             pitch_millidegrees: DEFAULT_PITCH_MILLIDEGREES,
-            zoom_milli: DEFAULT_ZOOM_MILLI,
         }
     }
 }

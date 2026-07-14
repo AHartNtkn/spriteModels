@@ -3,15 +3,33 @@ use eframe::egui;
 use relief_render::FrameBuffer;
 
 const FIT_FRACTION: f32 = 0.9;
+const DEFAULT_ZOOM_MILLI: u32 = 1_000;
+const ZOOM_MILLI_PER_UNIT: f64 = 100.0;
+const MIN_ZOOM_MILLI: u32 = 250;
+const MAX_ZOOM_MILLI: u32 = 4_000;
 
-#[derive(Default)]
 pub struct ModelView {
     camera: OrbitCamera,
+    zoom_milli: u32,
     preview: PreviewCache,
     texture: Option<egui::TextureHandle>,
     uploaded_generation: Option<u64>,
     #[cfg(test)]
     texture_upload_calls: u64,
+}
+
+impl Default for ModelView {
+    fn default() -> Self {
+        Self {
+            camera: OrbitCamera::default(),
+            zoom_milli: DEFAULT_ZOOM_MILLI,
+            preview: PreviewCache::default(),
+            texture: None,
+            uploaded_generation: None,
+            #[cfg(test)]
+            texture_upload_calls: 0,
+        }
+    }
 }
 
 pub struct ModelViewOutput {
@@ -33,6 +51,7 @@ impl ModelView {
 
     pub fn reset(&mut self) {
         self.camera.reset();
+        self.zoom_milli = DEFAULT_ZOOM_MILLI;
     }
 
     pub fn show(
@@ -52,7 +71,7 @@ impl ModelView {
                 input.smooth_scroll_delta.y = 0.0;
                 delta
             });
-            self.camera.zoom(wheel_delta);
+            self.zoom(wheel_delta);
         }
 
         let preview = self.preview.frame(document, self.camera)?;
@@ -92,11 +111,7 @@ impl ModelView {
 
         ui.painter()
             .rect_filled(rect, 4.0, egui::Color32::from_gray(24));
-        let scale = presentation_scale(
-            native_size,
-            rect.size(),
-            self.camera.presentation_zoom_milli(),
-        );
+        let scale = presentation_scale(native_size, rect.size(), self.zoom_milli);
         let image_rect = egui::Rect::from_center_size(rect.center(), native_size * scale as f32);
         if let Some(texture) = &self.texture {
             ui.painter().with_clip_rect(rect).image(
@@ -114,6 +129,16 @@ impl ModelView {
             },
             response,
         })
+    }
+
+    fn zoom(&mut self, wheel_delta: f32) {
+        if !wheel_delta.is_finite() {
+            return;
+        }
+        let delta = (f64::from(wheel_delta) * ZOOM_MILLI_PER_UNIT).round() as i64;
+        self.zoom_milli = (i64::from(self.zoom_milli) + delta)
+            .clamp(i64::from(MIN_ZOOM_MILLI), i64::from(MAX_ZOOM_MILLI))
+            as u32;
     }
 }
 

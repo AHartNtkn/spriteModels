@@ -13,6 +13,13 @@ fn one_pixel_document() -> EditorDocument {
     EditorDocument::from_model(model, None).unwrap()
 }
 
+fn maximum_relief_shallow_document() -> EditorDocument {
+    let bounds = Bounds::new(1, 1, 1).unwrap();
+    let chart = Chart::from_rgba(CanonicalView::Front, 1, 1, vec![[11, 22, 33, 1]]).unwrap();
+    let model = DepthSpriteModel::new(bounds, vec![chart]).unwrap();
+    EditorDocument::from_model(model, None).unwrap()
+}
+
 fn bowl_document() -> EditorDocument {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -105,7 +112,6 @@ fn reset_restores_the_default_view() {
     let expected = OrbitCamera::default();
     let mut camera = expected;
     camera.drag(-81.5, 39.25);
-    camera.zoom(6.0);
     assert_ne!(camera, expected);
 
     camera.reset();
@@ -120,7 +126,6 @@ fn non_finite_orbit_input_is_ignored() {
     let mut camera = expected;
 
     camera.drag(f32::NAN, f32::INFINITY);
-    camera.zoom(f32::NEG_INFINITY);
 
     assert_eq!(camera, expected);
 }
@@ -129,33 +134,23 @@ fn non_finite_orbit_input_is_ignored() {
 fn extreme_finite_orbit_input_remains_bounded_and_deterministic() {
     let mut first = OrbitCamera::default();
     first.drag(f32::MAX, f32::MAX);
-    first.zoom(f32::MAX);
     let mut second = OrbitCamera::default();
     second.drag(f32::MAX, f32::MAX);
-    second.zoom(f32::MAX);
     assert_eq!(first, second);
     assert_eq!(first.target_view(), second.target_view());
     let document = one_pixel_document();
     let mut preview = PreviewCache::default();
     let frame = preview.frame(&document, first).unwrap();
     let frame = frame.framebuffer();
-    assert_eq!((frame.width(), frame.height()), (7, 7));
+    assert_eq!((frame.width(), frame.height()), (71, 71));
 
     let pitch_maximum = first;
     first.drag(0.0, 1.0);
     assert_eq!(first, pitch_maximum);
-    let zoom_maximum = first;
-    first.zoom(1.0);
-    assert_eq!(first, zoom_maximum);
-
     first.drag(0.0, f32::MIN);
     let pitch_minimum = first;
     first.drag(0.0, -1.0);
     assert_eq!(first, pitch_minimum);
-    first.zoom(f32::MIN);
-    let zoom_minimum = first;
-    first.zoom(-1.0);
-    assert_eq!(first, zoom_minimum);
 }
 
 #[test]
@@ -288,7 +283,7 @@ fn both_bowl_sources_update_preview_and_reopen_with_a_visible_recessed_basin() {
 }
 
 #[test]
-fn native_preview_cell_depends_only_on_registered_bounds() {
+fn native_preview_cell_depends_only_on_registered_bounds_and_legal_relief() {
     let document = bowl_document();
     let mut preview = PreviewCache::default();
     let mut camera = OrbitCamera::default();
@@ -296,17 +291,9 @@ fn native_preview_cell_depends_only_on_registered_bounds() {
     let first = preview.frame(&document, camera).unwrap();
     assert_eq!(
         (first.framebuffer().width(), first.framebuffer().height()),
-        (84, 84)
+        (148, 148)
     );
     let generation = first.generation();
-
-    camera.zoom(7.0);
-    let zoomed = preview.frame(&document, camera).unwrap();
-    assert_eq!(
-        (zoomed.framebuffer().width(), zoomed.framebuffer().height()),
-        (84, 84)
-    );
-    assert_eq!(zoomed.generation(), generation);
 
     camera.drag(24.0, -12.0);
     let orbited = preview.frame(&document, camera).unwrap();
@@ -315,9 +302,30 @@ fn native_preview_cell_depends_only_on_registered_bounds() {
             orbited.framebuffer().width(),
             orbited.framebuffer().height()
         ),
-        (84, 84)
+        (148, 148)
     );
     assert_eq!(orbited.generation(), generation + 1);
+}
+
+#[test]
+fn shallow_bounds_contain_maximum_legal_relief_with_raster_breathing_room() {
+    let document = maximum_relief_shallow_document();
+    let mut preview = PreviewCache::default();
+    let preview_frame = preview.frame(&document, OrbitCamera::default()).unwrap();
+    let frame = preview_frame.framebuffer();
+
+    assert_eq!((frame.width(), frame.height()), (71, 71));
+    let occupied = (0..frame.height())
+        .flat_map(|y| (0..frame.width()).map(move |x| (x, y)))
+        .filter(|&(x, y)| frame.owner_at(x, y).is_some())
+        .collect::<Vec<_>>();
+    assert!(!occupied.is_empty(), "maximum relief remains rendered");
+    assert!(
+        occupied
+            .iter()
+            .all(|&(x, y)| x >= 2 && y >= 2 && x + 2 < frame.width() && y + 2 < frame.height()),
+        "maximum relief remains inside the two-pixel raster breathing room"
+    );
 }
 
 #[test]

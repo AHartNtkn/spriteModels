@@ -94,16 +94,33 @@ fn add_import_replace_and_remove_are_undoable_document_commands() {
 
 #[test]
 fn headers_report_fallback_assignment_and_update_after_override() {
-    let mut document = document();
+    for (view, opposite, expected) in [
+        (CanonicalView::Front, CanonicalView::Back, "Front → Back"),
+        (CanonicalView::Right, CanonicalView::Left, "Right → Left"),
+        (CanonicalView::Top, CanonicalView::Bottom, "Top → Bottom"),
+        (CanonicalView::Back, CanonicalView::Front, "Back → Front"),
+        (CanonicalView::Left, CanonicalView::Right, "Left → Right"),
+        (CanonicalView::Bottom, CanonicalView::Top, "Bottom → Top"),
+    ] {
+        let mut document = EditorDocument::new(Bounds::new(2, 1, 1).unwrap(), view);
+        assert_eq!(card_header(&document, view).unwrap().label, expected);
 
-    let fallback = card_header(&document, FRONT).unwrap();
-    assert_eq!(fallback.label, "Front → Back");
+        document.add_source(opposite).unwrap();
+        assert_eq!(card_header(&document, view).unwrap().label, view_name(view));
+        assert_eq!(
+            card_header(&document, opposite).unwrap().label,
+            view_name(opposite)
+        );
+    }
+}
 
-    document.add_source(CanonicalView::Back).unwrap();
-    let overridden = card_header(&document, FRONT).unwrap();
-    assert_eq!(overridden.label, "Front");
-    assert_eq!(
-        card_header(&document, CanonicalView::Back).unwrap().label,
-        "Back"
-    );
+fn view_name(view: CanonicalView) -> &'static str {
+    match view {
+        CanonicalView::Front => "Front",
+        CanonicalView::Right => "Right",
+        CanonicalView::Top => "Top",
+        CanonicalView::Back => "Back",
+        CanonicalView::Left => "Left",
+        CanonicalView::Bottom => "Bottom",
+    }
 }
