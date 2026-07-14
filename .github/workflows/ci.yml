@@ -30,6 +30,8 @@ jobs:
         run: cargo run -p fixture-gen -- assets/examples
       - name: Verify fixtures are canonical
         run: git diff --exit-code -- assets/examples
+      - name: Reject untracked generated fixtures
+        run: test -z "$(git status --porcelain=v1 --untracked-files=all -- assets/examples)"
       - name: Test workspace
         run: cargo test --workspace
       - name: Build release workspace

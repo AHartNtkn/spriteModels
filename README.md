@@ -33,7 +33,7 @@ views/bottom.png
 
 Absent views are omitted and undeclared entries are rejected. Version 1 limits each image dimension to 512 pixels, the archive to 65 MiB, and aggregate compressed and expanded payloads to 64 MiB each. Saving normalizes JSON, PNGs, entry order, timestamps, permissions, and transparent RGB, so reopening and saving an unchanged model is byte-stable.
 
-The bundled bowl contains only `manifest.json`, `views/front.png`, and `views/top.png`. Under one coherent oblique camera, its front chart provides the rounded exterior while its top chart provides the near rim and recessed basin; unobserved corners remain transparent.
+The bundled bowl contains only `manifest.json`, `views/front.png`, and `views/top.png`. Across the adjacent Front-sector v1 directions, its front chart provides the rounded exterior while its top chart provides the near rim and recessed basin; unobserved regions remain transparent. Exhaustive fixture tests prove the symmetric/intermediate source relief profile, while render tests prove that broad evidence survives several directions with attached colors and an honest inner gap.
 
 ## Prerequisites
 
@@ -76,6 +76,14 @@ In the viewport:
 
 Preview jobs use immutable document snapshots. New interaction replaces queued intermediate work and only the latest generation may reach the viewport. Export rejects concurrent work rather than silently replacing it.
 
+Renderer diagnostics are nonfatal warnings about the evidence the authored charts provide:
+
+- `WarpFold` means one warped source microcell reverses orientation and may contribute multiple preimages.
+- `HeavyChartOverlap` means different charts compete over more than one fifth of covered output pixels.
+- `InsufficientCoverage` means authored charts cover fewer than seven tenths of the registered projected region.
+
+Related relief-bound and exact-depth color-conflict warnings are also observational. Diagnostics do not alter the model, fill gaps, or infer hidden surfaces, and export may proceed so incomplete or conflicting authored evidence remains visible.
+
 Regenerate the committed example packages from their authoritative fixture definitions with:
 
 ```sh
@@ -95,6 +103,8 @@ cargo test --workspace
 cargo build --workspace --release
 ```
 
-The root end-to-end test opens the bowl, verifies exact front and top ownership/color/relief evidence, confirms transparent unsupported coverage, saves and reopens a byte-identical package, and compares two independently produced 16-direction PNG sheets byte for byte.
+The root end-to-end tests open the bowl, verify the exact reference owners plus source-derived summaries across three adjacent v1 directions, prove a horizontally bracketed transparent gap strictly inside projected content, save and reopen a byte-identical package, and compare two independently produced 16-direction PNG sheets byte for byte.
+
+Automated native evidence covers the same document, viewport-state, worker, and export services used by the GUI, plus release-window liveness and title under software rendering. Pointer clicks, native file dialogs, and complete interactive orbit/save/export fidelity remain a manual release check; they are not represented as synthetic GUI automation.
 
 The detailed mathematical and serialization contract is in [the design specification](docs/superpowers/specs/2026-07-13-oriented-relief-sprite-design.md).

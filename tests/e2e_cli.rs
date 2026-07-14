@@ -1,4 +1,4 @@
-use std::{fs, io::Cursor, path::PathBuf};
+use std::{collections::BTreeSet, fs, io::Cursor, path::PathBuf};
 
 use desktop_app::document::Document;
 use relief_core::{Bounds, CanonicalView, DecodedTexel};
@@ -48,6 +48,150 @@ fn assert_critical_only_rgba8_png(bytes: &[u8]) {
     assert_eq!(u32::from_be_bytes(ihdr[4..8].try_into().unwrap()), 100);
     assert_eq!(ihdr[8], 8);
     assert_eq!(ihdr[9], 6);
+}
+
+#[derive(Debug)]
+struct FrameEvidence {
+    front_positions: BTreeSet<(u32, u32)>,
+    top_positions: BTreeSet<(u32, u32)>,
+    front_reliefs: BTreeSet<u8>,
+    top_reliefs: BTreeSet<u8>,
+    colors: BTreeSet<[u8; 3]>,
+    opaque_bounds: (u32, u32, u32, u32),
+}
+
+fn summarize_attached_evidence(
+    document: &Document,
+    frame: &relief_render::FrameBuffer,
+) -> FrameEvidence {
+    let mut front_positions = BTreeSet::new();
+    let mut top_positions = BTreeSet::new();
+    let mut front_reliefs = BTreeSet::new();
+    let mut top_reliefs = BTreeSet::new();
+    let mut colors = BTreeSet::new();
+    let mut covered = Vec::new();
+
+    for y in 0..frame.height() {
+        for x in 0..frame.width() {
+            let Some(owner) = frame.owner_at(x, y) else {
+                continue;
+            };
+            covered.push((x, y));
+            let chart = document
+                .model()
+                .charts()
+                .iter()
+                .find(|chart| chart.view() == owner.view)
+                .expect("every rendered owner names an authored chart");
+            let Some(DecodedTexel::Relief { rgb, eighths }) =
+                chart.texel(owner.source_x, owner.source_y)
+            else {
+                panic!("every rendered owner names an authored foreground texel");
+            };
+            assert_eq!(frame.rgba_at(x, y), [rgb[0], rgb[1], rgb[2], 255]);
+            colors.insert(rgb);
+            match owner.view {
+                CanonicalView::Front => {
+                    front_positions.insert((owner.source_x, owner.source_y));
+                    front_reliefs.insert(eighths);
+                }
+                CanonicalView::Top => {
+                    top_positions.insert((owner.source_x, owner.source_y));
+                    top_reliefs.insert(eighths);
+                }
+                other => panic!("the two-chart bowl cannot produce {other:?} ownership"),
+            }
+        }
+    }
+
+    FrameEvidence {
+        front_positions,
+        top_positions,
+        front_reliefs,
+        top_reliefs,
+        colors,
+        opaque_bounds: (
+            covered.iter().map(|(x, _)| *x).min().unwrap(),
+            covered.iter().map(|(_, y)| *y).min().unwrap(),
+            covered.iter().map(|(x, _)| *x).max().unwrap(),
+            covered.iter().map(|(_, y)| *y).max().unwrap(),
+        ),
+    }
+}
+
+#[test]
+fn bowl_v1_sector_preserves_rounded_evidence_and_an_honest_inner_gap() {
+    let document = Document::open(bowl_asset()).unwrap();
+    let sheet = SheetRequest::new(DirectionCount::Sixteen, 1, 0, 1).unwrap();
+    let mut evidence = Vec::new();
+
+    // These are the three adjacent public v1 directions centered on Front. The exhaustive
+    // fixture test proves every source radial/profile sample; this receipt proves that broad,
+    // symmetric evidence survives real rendering rather than inferring a bowl from one pixel.
+    for direction in [15, 0, 1] {
+        let request = RenderRequest::new(96, 96, sheet.target_view(direction).unwrap());
+        let first = render_model(document.model().charts(), &request).unwrap();
+        let second = render_model(document.model().charts(), &request).unwrap();
+        assert_eq!(
+            first, second,
+            "v1 direction {direction} must be deterministic"
+        );
+
+        let summary = summarize_attached_evidence(&document, &first);
+        assert!(summary.front_positions.len() >= 80, "direction {direction}");
+        assert!(summary.top_positions.len() >= 150, "direction {direction}");
+        assert!(summary.front_reliefs.len() >= 9, "direction {direction}");
+        assert!(
+            [0, 24, 48, 60, 72]
+                .into_iter()
+                .all(|relief| summary.front_reliefs.contains(&relief)),
+            "direction {direction}: {:?}",
+            summary.front_reliefs
+        );
+        assert!(
+            [0, 24, 40, 61]
+                .into_iter()
+                .all(|relief| summary.top_reliefs.contains(&relief)),
+            "direction {direction}: {:?}",
+            summary.top_reliefs
+        );
+        assert!(summary.top_reliefs.iter().copied().max().unwrap() >= 61);
+        assert_eq!(summary.colors, BTreeSet::from([FRONT_RGB, TOP_RGB]));
+        evidence.push((direction, first, summary));
+    }
+
+    let mirrored_front = evidence[0]
+        .2
+        .front_positions
+        .iter()
+        .map(|(x, y)| (31 - x, *y))
+        .collect::<BTreeSet<_>>();
+    let mirrored_top = evidence[0]
+        .2
+        .top_positions
+        .iter()
+        .map(|(x, y)| (31 - x, *y))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(mirrored_front, evidence[2].2.front_positions);
+    assert_eq!(mirrored_top, evidence[2].2.top_positions);
+
+    let (_, right_frame, right_evidence) = &evidence[2];
+    assert_eq!(right_evidence.opaque_bounds, (36, 39, 57, 55));
+    let gap = (37, 44);
+    let (min_x, min_y, max_x, max_y) = right_evidence.opaque_bounds;
+    assert!(gap.0 > min_x && gap.0 < max_x && gap.1 > min_y && gap.1 < max_y);
+    assert_eq!(right_frame.rgba_at(gap.0, gap.1), [0, 0, 0, 0]);
+    assert_eq!(right_frame.owner_at(gap.0, gap.1), None);
+    let left = right_frame.owner_at(gap.0 - 1, gap.1).unwrap();
+    let right = right_frame.owner_at(gap.0 + 1, gap.1).unwrap();
+    assert_eq!(
+        (left.view, left.source_x, left.source_y),
+        (CanonicalView::Front, 0, 2)
+    );
+    assert_eq!(
+        (right.view, right.source_x, right.source_y),
+        (CanonicalView::Top, 4, 9)
+    );
 }
 
 #[test]

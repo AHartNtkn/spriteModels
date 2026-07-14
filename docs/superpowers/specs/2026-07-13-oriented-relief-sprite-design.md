@@ -2,7 +2,7 @@
 
 Date: 2026-07-13
 
-Status: Implemented and validated reference design
+Status: Implementation complete. Package, document, worker, reference-render, and export behavior is automated; native window liveness and title are probed. Interactive pointer, dialog, orbit, save, and export fidelity remains a manual native release check, with the same state and service behavior covered below the GUI.
 
 ## Outcome
 
@@ -163,7 +163,9 @@ For an elevated oblique target view:
 
 The acceptance claim is deliberately limited to the supported viewing sector. Two images do not determine the bottom, rear exterior, or every possible orbit angle, and the renderer does not invent them.
 
-The bundled `bowl.depthsprite` proves this claim with one coherent camera basis rather than unrelated chart snapshots. The acceptance camera uses screen-right `(1/2, 0, 1/2)`, screen-down `(1, 1/2, -1)`, and transient depth `(-1, 4, 1)`. At 96 by 96 output pixels, the front-frame sample at `(48, 67)` is owned by front texel `(27, 2)` with relief 40 and RGB `[144, 76, 52]`; the top-frame sample at `(48, 48)` is owned by top texel `(16, 16)` with relief 64 and RGB `[216, 156, 85]`. The corner remains transparent, directly demonstrating that unsupported space is not completed.
+The bundled `bowl.depthsprite` has one exact reference camera in addition to the sector-wide receipt. The reference camera uses screen-right `(1/2, 0, 1/2)`, screen-down `(1, 1/2, -1)`, and transient depth `(-1, 4, 1)`. At 96 by 96 output pixels, the sample at `(48, 67)` is owned by front texel `(27, 2)` with relief 40 and RGB `[144, 76, 52]`; the sample at `(48, 48)` is owned by top texel `(16, 16)` with relief 64 and RGB `[216, 156, 85]`. This is a precise local reference, not the whole roundedness claim.
+
+The exhaustive fixture receipt proves the Top chart's radial symmetry, monotone intermediate relief values, and central relief-64 plateau, plus the Front chart's symmetric column heights and multiple rounded profile reliefs. A separate render receipt uses adjacent public v1 sheet directions 15, 0, and 1. Every direction retains at least 80 distinct Front and 150 distinct Top source owners, both authored colors remain attached to their owners, Front retains at least nine relief levels through 72, and visible Top basin relief reaches at least 61. Directions 15 and 1 retain exactly mirrored Front and Top source-position sets, so the evidence is sector-wide rather than three unrelated snapshots. In direction 1, transparent pixel `(37, 44)` lies strictly inside opaque bounds `(36, 39)..(57, 55)` and is immediately bracketed by a Front-owned pixel on its left and a Top-owned pixel on its right. That is an unsupported inner gap, not outer canvas padding; `(0, 0)` remains a separate basic transparency check.
 
 ## Model Package
 
@@ -296,13 +298,16 @@ Free-orbit preview may use floating-point camera input and GPU rasterization. It
 
 - Golden outputs for flat, stepped, recessed, overlapping, and disoccluded charts.
 - Repeated directional exports are pixel-identical and byte-identical.
-- The two-chart bowl's exact acceptance pixels prove a continuous recessed basin, visible near rim, and rounded exterior under one coherent oblique camera.
-- The bowl exposes transparent unsupported regions rather than fabricated bottom or rear surfaces.
+- The two-chart bowl shows a continuous recessed basin, visible near rim, and rounded exterior over several supported oblique directions.
+- Exhaustive source-fixture symmetry and intermediate-relief checks combine with three adjacent v1 render summaries; no single pixel is treated as proof of the whole shape.
+- The exact reference camera retains its documented Front relief-40 and Top relief-64 owners and colors.
+- The bowl exposes a transparent pixel strictly inside projected opaque bounds with immediate covered neighbors, rather than satisfying unsupported-gap validation with outer canvas.
 - A nonconcave fixture verifies ordinary transformed-sprite behavior was not regressed.
 - Native scripted use opens one model file, orbits it, selects isometric view, saves and reopens it, exports one sheet, and verifies the resulting pixels.
 - Formatting, linting, unit/integration tests, and release builds pass for every supported target available in CI.
 
 Validation is against rendered behavior and serialized authority, not source-code labels or screenshots alone.
+Current automation proves document/worker/service behavior and native release-window liveness/title; it does not claim synthetic pointer clicks or native file-dialog interaction. The full scripted native workflow remains a release requirement and an interactive manual check until that GUI automation exists.
 
 ## Design Consequences
 
