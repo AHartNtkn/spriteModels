@@ -1,6 +1,8 @@
 mod alpha;
 mod chart;
 mod component;
+mod frame;
+mod model;
 mod rational;
 mod relief;
 mod warp;
@@ -8,6 +10,8 @@ mod warp;
 pub use alpha::{DecodedTexel, decode_rgba};
 pub use chart::{Bounds, CanonicalView, Chart, ChartError};
 pub use component::{ComponentId, ComponentMap};
+pub use frame::CanonicalFrame;
+pub use model::{AuthoredModel, EMPTY_RGBA, ModelError, ResolvedCharts};
 pub use relief::{ForegroundCell, ReliefField};
 pub use warp::{InverseWarpLine, SourcePoint, WarpCoefficients, WarpedSample};
 

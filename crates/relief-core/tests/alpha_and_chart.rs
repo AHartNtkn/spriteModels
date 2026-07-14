@@ -32,11 +32,22 @@ fn bounds_exposes_validated_dimensions_read_only() {
 }
 
 #[test]
-fn bounds_rejects_zero_in_every_dimension() {
-    for dimensions in [(0, 1, 1), (1, 0, 1), (1, 1, 0)] {
+fn bounds_rejects_values_outside_the_fixed_scale_range() {
+    for dimensions in [
+        (0, 1, 1),
+        (64, 1, 1),
+        (1, 0, 1),
+        (1, 64, 1),
+        (1, 1, 0),
+        (1, 1, 64),
+    ] {
         assert_eq!(
             Bounds::new(dimensions.0, dimensions.1, dimensions.2),
-            Err(ChartError::ZeroBounds)
+            Err(ChartError::BoundsOutOfRange {
+                width: dimensions.0,
+                height: dimensions.1,
+                depth: dimensions.2,
+            })
         );
     }
 }

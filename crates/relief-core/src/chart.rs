@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use crate::{DecodedTexel, decode_rgba};
 
-/// Validated, nonzero model dimensions.
+/// Validated fixed-scale model dimensions.
 ///
 /// Callers cannot bypass validation with a struct literal:
 ///
@@ -24,8 +24,12 @@ pub struct Bounds {
 
 impl Bounds {
     pub fn new(width: u32, height: u32, depth: u32) -> Result<Self, ChartError> {
-        if width == 0 || height == 0 || depth == 0 {
-            return Err(ChartError::ZeroBounds);
+        if !(1..=63).contains(&width) || !(1..=63).contains(&height) || !(1..=63).contains(&depth) {
+            return Err(ChartError::BoundsOutOfRange {
+                width,
+                height,
+                depth,
+            });
         }
         Ok(Self {
             width,
@@ -143,8 +147,8 @@ impl Chart {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum ChartError {
-    #[error("model bounds must be nonzero")]
-    ZeroBounds,
+    #[error("model bounds must be in 1..=63, got ({width}, {height}, {depth})")]
+    BoundsOutOfRange { width: u32, height: u32, depth: u32 },
     #[error("RGBA pixel count does not match image dimensions")]
     PixelCount,
 }
