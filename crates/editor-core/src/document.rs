@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use depthsprite_format::DepthSpriteModel;
 use relief_core::{Bounds, CanonicalView, Chart};
 
-use crate::{EditorError, SourceSprite, fallback::resolve_charts};
+use crate::{DepthValue, EditorError, SourceSprite, fallback::resolve_charts};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActiveLayer {
@@ -20,24 +20,24 @@ pub enum Tool {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct DocumentState {
-    bounds: Bounds,
-    sources: Vec<SourceSprite>,
-    selection: CanonicalView,
-    active_layer: ActiveLayer,
-    tool: Tool,
-    current_rgb: [u8; 3],
-    current_relief: u8,
+pub(crate) struct DocumentState {
+    pub(crate) bounds: Bounds,
+    pub(crate) sources: Vec<SourceSprite>,
+    pub(crate) selection: CanonicalView,
+    pub(crate) active_layer: ActiveLayer,
+    pub(crate) tool: Tool,
+    pub(crate) current_rgb: [u8; 3],
+    pub(crate) current_depth: DepthValue,
 }
 
 pub struct EditorDocument {
-    state: DocumentState,
-    saved_state: DocumentState,
-    undo: Vec<DocumentState>,
-    redo: Vec<DocumentState>,
-    stroke_before: Option<DocumentState>,
+    pub(crate) state: DocumentState,
+    pub(crate) saved_state: DocumentState,
+    pub(crate) undo: Vec<DocumentState>,
+    pub(crate) redo: Vec<DocumentState>,
+    pub(crate) stroke_before: Option<DocumentState>,
     path: Option<PathBuf>,
-    revision: u64,
+    pub(crate) revision: u64,
 }
 
 impl EditorDocument {
@@ -49,7 +49,7 @@ impl EditorDocument {
             active_layer: ActiveLayer::Color,
             tool: Tool::Pencil,
             current_rgb: [0, 0, 0],
-            current_relief: 0,
+            current_depth: DepthValue::Relief(0),
         };
         Self::from_clean_state(state, None)
     }
@@ -72,7 +72,7 @@ impl EditorDocument {
             active_layer: ActiveLayer::Color,
             tool: Tool::Pencil,
             current_rgb: [0, 0, 0],
-            current_relief: 0,
+            current_depth: DepthValue::Relief(0),
         };
         Ok(Self::from_clean_state(state, path))
     }
@@ -99,6 +99,7 @@ impl EditorDocument {
     }
 
     pub fn add_source(&mut self, view: CanonicalView) -> Result<(), EditorError> {
+        self.ensure_no_active_stroke()?;
         if self.state.sources.len() == 6 {
             return Err(EditorError::SourceLimit);
         }
@@ -119,6 +120,7 @@ impl EditorDocument {
     }
 
     pub fn replace_source(&mut self, source: SourceSprite) -> Result<(), EditorError> {
+        self.ensure_no_active_stroke()?;
         Self::validate_source(self.state.bounds, &source)?;
         let Some(index) = self
             .state
@@ -137,6 +139,7 @@ impl EditorDocument {
     }
 
     pub fn remove_source(&mut self, view: CanonicalView) -> Result<(), EditorError> {
+        self.ensure_no_active_stroke()?;
         let Some(index) = self
             .state
             .sources
@@ -182,8 +185,8 @@ impl EditorDocument {
         self.state.current_rgb
     }
 
-    pub fn current_relief(&self) -> u8 {
-        self.state.current_relief
+    pub fn current_depth(&self) -> DepthValue {
+        self.state.current_depth
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -233,16 +236,5 @@ impl EditorDocument {
             });
         }
         Ok(())
-    }
-
-    fn finish_command(&mut self, before: DocumentState) {
-        if self.state != before {
-            self.undo.push(before);
-            self.redo.clear();
-            self.revision = self
-                .revision
-                .checked_add(1)
-                .expect("document revision must remain monotonically increasing");
-        }
     }
 }

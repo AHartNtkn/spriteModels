@@ -1,8 +1,11 @@
 mod document;
+mod edit;
 mod fallback;
+mod history;
 mod source;
 
 pub use document::{ActiveLayer, EditorDocument, Tool};
+pub use edit::DepthValue;
 pub use fallback::opposite;
 pub use source::SourceSprite;
 
@@ -30,4 +33,12 @@ pub enum EditorError {
         expected: (u32, u32),
         actual: (u32, u32),
     },
+    #[error("relief {0} is outside the paintable range 0..=254")]
+    InvalidRelief(u8),
+    #[error("a stroke is already active")]
+    StrokeAlreadyActive,
+    #[error("no stroke is active")]
+    NoActiveStroke,
+    #[error("pixel ({x}, {y}) is outside source {view:?}")]
+    PixelOutOfBounds { view: CanonicalView, x: u32, y: u32 },
 }
