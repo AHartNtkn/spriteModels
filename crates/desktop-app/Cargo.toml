@@ -1,0 +1,20 @@
+[package]
+name = "desktop-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+editor-core = { path = "../editor-core" }
+eframe.workspace = true
+relief-core = { path = "../relief-core" }
+rfd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "depthsprite"
+path = "src/main.rs"
