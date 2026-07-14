@@ -288,8 +288,12 @@ impl eframe::App for DepthSpriteApp {
         #[cfg(test)]
         let mut composition = None;
         egui::CentralPanel::default().show(root, |ui| {
-            let layout = layout::calculate_layout(Size::new(root_rect.width(), root_rect.height()))
-                .expect("native window must respect the derived minimum size");
+            let source_count = self.shell.document.sources().len();
+            let layout = layout::calculate_layout(
+                Size::new(root_rect.width(), root_rect.height()),
+                source_count,
+            )
+            .expect("native window must respect the derived minimum size");
             let tools_rect = to_egui(layout.tools, root_rect.min);
             let palette_output = ui
                 .scope_builder(egui::UiBuilder::new().max_rect(tools_rect), |ui| {
@@ -311,6 +315,7 @@ impl eframe::App for DepthSpriteApp {
                 ui,
                 &mut self.shell.document,
                 &layout.source_cards,
+                layout.add_button,
                 root_rect.min,
             );
             #[cfg(test)]
@@ -433,6 +438,7 @@ mod tests {
         assert!(composition.menu.rect.bottom() <= composition.model.rect.top());
         assert!(composition.palette.rect.right() < composition.model.rect.left());
         assert_eq!(composition.source_grid.cards.len(), 6);
+        assert!(composition.source_grid.add_button.is_none());
         assert_eq!(
             composition
                 .source_grid

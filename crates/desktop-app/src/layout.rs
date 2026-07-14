@@ -11,6 +11,9 @@ pub const CANVASES_PER_SOURCE: usize = 2;
 pub const SOURCE_CARD_GAP: f32 = 10.0;
 pub const SOURCE_CARD_PADDING: f32 = 6.0;
 pub const SOURCE_HEADER_HEIGHT: f32 = 18.0;
+pub const SOURCE_ACTION_HEIGHT: f32 = 28.0;
+pub const SOURCE_ACTION_GAP: f32 = 6.0;
+pub const ADD_BUTTON_WIDTH: f32 = 100.0;
 pub const CANVAS_WIDTH: f32 = 138.0;
 pub const CANVAS_HEIGHT: f32 = 90.0;
 pub const CANVAS_GAP: f32 = 6.0;
@@ -96,6 +99,13 @@ impl Rect {
             && self.bottom() >= other.bottom()
     }
 
+    pub fn intersects(self, other: Self) -> bool {
+        self.left() < other.right()
+            && self.right() > other.left()
+            && self.top() < other.bottom()
+            && self.bottom() > other.top()
+    }
+
     pub fn union(self, other: Self) -> Self {
         Self {
             min_x: self.left().min(other.left()),
@@ -108,7 +118,6 @@ impl Rect {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SourceCardLayout {
-    pub view: CanonicalView,
     pub column: usize,
     pub row: usize,
     pub card: Rect,
@@ -124,7 +133,8 @@ pub struct WorkspaceLayout {
     pub tools: Rect,
     pub model: Rect,
     pub sources: Rect,
-    pub source_cards: [SourceCardLayout; SOURCE_SLOT_COUNT],
+    pub source_cards: Vec<SourceCardLayout>,
+    pub add_button: Option<Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,10 +142,17 @@ pub enum LayoutError {
     WindowTooSmall { requested: Size, minimum: Size },
 }
 
-pub const fn source_grid_size() -> Size {
+pub const fn source_grid_size(authored_count: usize) -> Size {
+    let columns = minimum(authored_count, SOURCE_COLUMNS);
+    let rows = authored_count.div_ceil(SOURCE_COLUMNS);
+    let action = if authored_count < SOURCE_SLOT_COUNT {
+        SOURCE_ACTION_HEIGHT + SOURCE_ACTION_GAP
+    } else {
+        0.0
+    };
     Size::new(
-        repeated_extent(SOURCE_COLUMNS, SOURCE_CARD_WIDTH, SOURCE_CARD_GAP),
-        repeated_extent(SOURCE_ROWS, SOURCE_CARD_HEIGHT, SOURCE_CARD_GAP),
+        repeated_extent(columns, SOURCE_CARD_WIDTH, SOURCE_CARD_GAP),
+        action + repeated_extent(rows, SOURCE_CARD_HEIGHT, SOURCE_CARD_GAP),
     )
 }
 
@@ -147,7 +164,7 @@ pub const fn minimum_model_size() -> Size {
 }
 
 pub const fn minimum_window_size() -> Size {
-    let sources = source_grid_size();
+    let sources = source_grid_size(SOURCE_SLOT_COUNT);
     let model = minimum_model_size();
     Size::new(
         WORKSPACE_PADDING * 2.0 + TOOL_COLUMN_WIDTH + PANEL_GAP * 2.0 + model.width + sources.width,
@@ -155,7 +172,11 @@ pub const fn minimum_window_size() -> Size {
     )
 }
 
-pub fn calculate_layout(window_size: Size) -> Result<WorkspaceLayout, LayoutError> {
+pub fn calculate_layout(
+    window_size: Size,
+    authored_count: usize,
+) -> Result<WorkspaceLayout, LayoutError> {
+    assert!((1..=SOURCE_SLOT_COUNT).contains(&authored_count));
     let minimum = minimum_window_size();
     if !(window_size.width >= minimum.width && window_size.height >= minimum.height) {
         return Err(LayoutError::WindowTooSmall {
@@ -179,7 +200,7 @@ pub fn calculate_layout(window_size: Size) -> Result<WorkspaceLayout, LayoutErro
         Size::new(TOOL_COLUMN_WIDTH, content_height),
     );
 
-    let sources_size = source_grid_size();
+    let sources_size = source_grid_size(authored_count);
     let sources = Rect::from_min_size(
         window.right() - WORKSPACE_PADDING - sources_size.width,
         content_top,
@@ -192,29 +213,43 @@ pub fn calculate_layout(window_size: Size) -> Result<WorkspaceLayout, LayoutErro
         Size::new(sources.left() - PANEL_GAP - model_left, content_height),
     );
 
-    let source_cards = std::array::from_fn(|index| {
-        let column = index % SOURCE_COLUMNS;
-        let row = index / SOURCE_COLUMNS;
-        let card = Rect::from_min_size(
-            sources.left() + column as f32 * (SOURCE_CARD_WIDTH + SOURCE_CARD_GAP),
-            sources.top() + row as f32 * (SOURCE_CARD_HEIGHT + SOURCE_CARD_GAP),
-            Size::new(SOURCE_CARD_WIDTH, SOURCE_CARD_HEIGHT),
-        );
-        let canvas_size = Size::new(CANVAS_WIDTH, CANVAS_HEIGHT);
-        let color = Rect::from_min_size(
-            card.left() + SOURCE_CARD_PADDING,
-            card.top() + SOURCE_CARD_PADDING + SOURCE_HEADER_HEIGHT,
-            canvas_size,
-        );
-        let depth = Rect::from_min_size(color.left(), color.bottom() + CANVAS_GAP, canvas_size);
-        SourceCardLayout {
-            view: CANONICAL_SOURCE_ORDER[index],
-            column,
-            row,
-            card,
-            color,
-            depth,
-        }
+    let card_top = sources.top()
+        + if authored_count < SOURCE_SLOT_COUNT {
+            SOURCE_ACTION_HEIGHT + SOURCE_ACTION_GAP
+        } else {
+            0.0
+        };
+    let source_cards = (0..authored_count)
+        .map(|index| {
+            let column = index % SOURCE_COLUMNS;
+            let row = index / SOURCE_COLUMNS;
+            let card = Rect::from_min_size(
+                sources.left() + column as f32 * (SOURCE_CARD_WIDTH + SOURCE_CARD_GAP),
+                card_top + row as f32 * (SOURCE_CARD_HEIGHT + SOURCE_CARD_GAP),
+                Size::new(SOURCE_CARD_WIDTH, SOURCE_CARD_HEIGHT),
+            );
+            let canvas_size = Size::new(CANVAS_WIDTH, CANVAS_HEIGHT);
+            let color = Rect::from_min_size(
+                card.left() + SOURCE_CARD_PADDING,
+                card.top() + SOURCE_CARD_PADDING + SOURCE_HEADER_HEIGHT,
+                canvas_size,
+            );
+            let depth = Rect::from_min_size(color.left(), color.bottom() + CANVAS_GAP, canvas_size);
+            SourceCardLayout {
+                column,
+                row,
+                card,
+                color,
+                depth,
+            }
+        })
+        .collect();
+    let add_button = (authored_count < SOURCE_SLOT_COUNT).then(|| {
+        Rect::from_min_size(
+            sources.right() - ADD_BUTTON_WIDTH,
+            sources.top(),
+            Size::new(ADD_BUTTON_WIDTH, SOURCE_ACTION_HEIGHT),
+        )
     });
 
     Ok(WorkspaceLayout {
@@ -225,6 +260,7 @@ pub fn calculate_layout(window_size: Size) -> Result<WorkspaceLayout, LayoutErro
         model,
         sources,
         source_cards,
+        add_button,
     })
 }
 
@@ -234,4 +270,8 @@ const fn repeated_extent(count: usize, item_extent: f32, gap: f32) -> f32 {
 
 const fn maximum(left: f32, right: f32) -> f32 {
     if left >= right { left } else { right }
+}
+
+const fn minimum(left: usize, right: usize) -> usize {
+    if left <= right { left } else { right }
 }

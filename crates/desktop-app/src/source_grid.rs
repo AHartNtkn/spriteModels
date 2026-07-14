@@ -11,28 +11,6 @@ use crate::{
 
 const PNG_FILTER: &[&str] = &["png"];
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SlotMode {
-    Authored,
-    AddSprite,
-    Hidden,
-}
-
-pub fn slot_modes(document: &EditorDocument) -> [SlotMode; 6] {
-    let next_empty = CANONICAL_SOURCE_ORDER
-        .into_iter()
-        .find(|view| document.source(*view).is_none());
-    CANONICAL_SOURCE_ORDER.map(|view| {
-        if document.source(view).is_some() {
-            SlotMode::Authored
-        } else if Some(view) == next_empty {
-            SlotMode::AddSprite
-        } else {
-            SlotMode::Hidden
-        }
-    })
-}
-
 pub fn add_next_source(document: &mut EditorDocument) -> Result<CanonicalView, EditorError> {
     let view = CANONICAL_SOURCE_ORDER
         .into_iter()
@@ -92,6 +70,7 @@ pub(crate) struct SourceGridOutput {
 #[cfg(test)]
 pub(crate) struct SourceGridObservation {
     pub cards: Vec<SourceCardObservation>,
+    pub add_button: Option<egui::Rect>,
 }
 
 #[cfg(test)]
@@ -132,44 +111,47 @@ impl SourceGridState {
         &mut self,
         ui: &mut egui::Ui,
         document: &mut EditorDocument,
-        layouts: &[SourceCardLayout; 6],
+        layouts: &[SourceCardLayout],
+        add_button: Option<crate::layout::Rect>,
         origin: egui::Pos2,
     ) -> SourceGridOutput {
         #[cfg(test)]
         let mut observed_cards = Vec::new();
-        let modes = slot_modes(document);
-        for (index, layout) in layouts.iter().enumerate() {
-            let card_rect = to_egui(layout.card, origin);
-            match modes[index] {
-                SlotMode::Authored => {
-                    let authored =
-                        self.show_authored_card(ui, document, index, layout, card_rect, origin);
-                    #[cfg(test)]
-                    observed_cards.push(SourceCardObservation {
-                        view: layout.view,
-                        column: layout.column,
-                        row: layout.row,
-                        card: card_rect,
-                        color: authored.canvas.observation.color,
-                        depth: authored.canvas.observation.depth,
-                        header: authored.header,
-                        label: authored.label,
-                        menu: authored.menu,
-                    });
-                    #[cfg(not(test))]
-                    let _ = authored;
-                }
-                SlotMode::AddSprite => {
-                    ui.painter()
-                        .rect_filled(card_rect, 4.0, egui::Color32::from_gray(36));
-                    let button =
-                        egui::Button::new(format!("Add Sprite\n{}", view_label(layout.view)));
-                    if ui.put(card_rect.shrink(12.0), button).clicked() {
-                        self.capture(add_next_source(document).map(|_| ()));
-                    }
-                }
-                SlotMode::Hidden => {}
+        let authored_views = CANONICAL_SOURCE_ORDER
+            .into_iter()
+            .filter(|view| document.source(*view).is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(authored_views.len(), layouts.len());
+        for (layout, view) in layouts.iter().zip(authored_views) {
+            let _card_rect = to_egui(layout.card, origin);
+            let state_index = CANONICAL_SOURCE_ORDER
+                .iter()
+                .position(|candidate| *candidate == view)
+                .expect("authored views come from canonical order");
+            let authored = self.show_authored_card(ui, document, state_index, view, layout, origin);
+            #[cfg(test)]
+            observed_cards.push(SourceCardObservation {
+                view,
+                column: layout.column,
+                row: layout.row,
+                card: _card_rect,
+                color: authored.canvas.observation.color,
+                depth: authored.canvas.observation.depth,
+                header: authored.header,
+                label: authored.label,
+                menu: authored.menu,
+            });
+            #[cfg(not(test))]
+            {
+                let _ = authored;
             }
+        }
+
+        let add_button = add_button.map(|rect| to_egui(rect, origin));
+        if let Some(rect) = add_button
+            && ui.put(rect, egui::Button::new("Add Sprite")).clicked()
+        {
+            self.capture(add_next_source(document).map(|_| ()));
         }
 
         if let Some(error) = &self.error {
@@ -185,6 +167,7 @@ impl SourceGridState {
             #[cfg(test)]
             observation: SourceGridObservation {
                 cards: observed_cards,
+                add_button,
             },
         }
     }
@@ -194,14 +177,15 @@ impl SourceGridState {
         ui: &mut egui::Ui,
         document: &mut EditorDocument,
         index: usize,
+        view: CanonicalView,
         layout: &SourceCardLayout,
-        card_rect: egui::Rect,
         origin: egui::Pos2,
     ) -> AuthoredCardOutput {
+        let card_rect = to_egui(layout.card, origin);
         ui.painter()
             .rect_filled(card_rect, 4.0, egui::Color32::from_gray(36));
-        let header = card_header(document, layout.view)
-            .expect("authored slot modes always have a card header");
+        let header =
+            card_header(document, view).expect("authored slot modes always have a card header");
         let header_rect = egui::Rect::from_min_max(
             card_rect.min + egui::vec2(6.0, 2.0),
             egui::pos2(card_rect.right() - 4.0, to_egui(layout.color, origin).top()),
@@ -227,12 +211,12 @@ impl SourceGridState {
                     if ui.button("Import PNG…").clicked() {
                         ui.close();
                         if let Some(path) = pick_source_png() {
-                            self.capture(replace_source_from_png(document, layout.view, path));
+                            self.capture(replace_source_from_png(document, view, path));
                         }
                     }
                     if ui.button("Remove").clicked() {
                         ui.close();
-                        self.capture(remove_source(document, layout.view));
+                        self.capture(remove_source(document, view));
                     }
                 })
             })
@@ -240,8 +224,7 @@ impl SourceGridState {
 
         let color_rect = to_egui(layout.color, origin);
         let depth_rect = to_egui(layout.depth, origin);
-        let _canvas =
-            self.cards[index].show_pair(ui, document, layout.view, color_rect, depth_rect);
+        let _canvas = self.cards[index].show_pair(ui, document, view, color_rect, depth_rect);
         AuthoredCardOutput {
             #[cfg(test)]
             canvas: _canvas,
@@ -294,28 +277,43 @@ mod tests {
     use super::*;
     use crate::layout::{Size, calculate_layout};
 
+    fn render_grid(
+        context: &egui::Context,
+        grid: &mut SourceGridState,
+        document: &mut EditorDocument,
+        layout: &crate::layout::WorkspaceLayout,
+    ) -> SourceGridObservation {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 1000.0),
+            )),
+            ..Default::default()
+        };
+        let mut observation = None;
+        let _ = context.run_ui(input, |ui| {
+            observation = Some(
+                grid.show(
+                    ui,
+                    document,
+                    &layout.source_cards,
+                    layout.add_button,
+                    egui::Pos2::ZERO,
+                )
+                .observation,
+            );
+        });
+        observation.unwrap()
+    }
+
     #[test]
     fn every_fallback_header_renders_inside_its_card_without_touching_the_menu() {
         for view in CANONICAL_SOURCE_ORDER {
             let context = egui::Context::default();
             let mut document = EditorDocument::new(Bounds::new(32, 32, 32).unwrap(), view);
-            let layout = calculate_layout(Size::new(1600.0, 1000.0)).unwrap();
+            let layout = calculate_layout(Size::new(1600.0, 1000.0), 1).unwrap();
             let mut grid = SourceGridState::default();
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1600.0, 1000.0),
-                )),
-                ..Default::default()
-            };
-            let mut observation = None;
-            let _ = context.run_ui(input, |ui| {
-                observation = Some(
-                    grid.show(ui, &mut document, &layout.source_cards, egui::Pos2::ZERO)
-                        .observation,
-                );
-            });
-            let observation = observation.unwrap();
+            let observation = render_grid(&context, &mut grid, &mut document, &layout);
             let card = observation
                 .cards
                 .iter()
@@ -330,6 +328,33 @@ mod tests {
                 card.menu
             );
             assert!(!card.label.intersects(card.menu));
+        }
+    }
+
+    #[test]
+    fn front_and_top_pack_adjacent_with_one_compact_add_control() {
+        let context = egui::Context::default();
+        let mut document =
+            EditorDocument::new(Bounds::new(32, 32, 32).unwrap(), CanonicalView::Front);
+        document.add_source(CanonicalView::Top).unwrap();
+        let layout = calculate_layout(Size::new(1600.0, 1000.0), 2).unwrap();
+        let mut grid = SourceGridState::default();
+        let observation = render_grid(&context, &mut grid, &mut document, &layout);
+
+        assert_eq!(
+            observation
+                .cards
+                .iter()
+                .map(|card| (card.view, card.column, card.row))
+                .collect::<Vec<_>>(),
+            [(CanonicalView::Front, 0, 0), (CanonicalView::Top, 1, 0),]
+        );
+        let add = observation
+            .add_button
+            .expect("fewer than six sources can add");
+        assert_eq!(add.height(), crate::layout::SOURCE_ACTION_HEIGHT);
+        for card in observation.cards {
+            assert!(!add.intersects(card.card));
         }
     }
 }

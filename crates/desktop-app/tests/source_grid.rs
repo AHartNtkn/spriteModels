@@ -2,9 +2,7 @@ use std::{fs::File, path::Path};
 
 use desktop_app::{
     layout::CANONICAL_SOURCE_ORDER,
-    source_grid::{
-        SlotMode, add_next_source, card_header, remove_source, replace_source_from_png, slot_modes,
-    },
+    source_grid::{add_next_source, card_header, remove_source, replace_source_from_png},
 };
 use editor_core::EditorDocument;
 use png::{BitDepth, ColorType, Encoder};
@@ -31,39 +29,20 @@ fn write_png(path: &Path, pixels: &[[u8; 4]]) {
 }
 
 #[test]
-fn only_the_next_empty_canonical_position_offers_add_sprite() {
+fn compact_add_action_creates_sources_in_canonical_display_order() {
     let mut document = document();
-    assert_eq!(
-        slot_modes(&document),
-        [
-            SlotMode::Authored,
-            SlotMode::AddSprite,
-            SlotMode::Hidden,
-            SlotMode::Hidden,
-            SlotMode::Hidden,
-            SlotMode::Hidden,
-        ]
-    );
-
-    add_next_source(&mut document).unwrap();
-    assert_eq!(
-        slot_modes(&document),
-        [
-            SlotMode::Authored,
-            SlotMode::Authored,
-            SlotMode::AddSprite,
-            SlotMode::Hidden,
-            SlotMode::Hidden,
-            SlotMode::Hidden,
-        ]
-    );
-    assert_eq!(
-        document
-            .sources()
-            .map(|source| source.view())
-            .collect::<Vec<_>>(),
-        vec![CANONICAL_SOURCE_ORDER[0], CANONICAL_SOURCE_ORDER[1]]
-    );
+    let added = CANONICAL_SOURCE_ORDER
+        .into_iter()
+        .skip(1)
+        .map(|expected| {
+            let actual = add_next_source(&mut document).unwrap();
+            assert_eq!(actual, expected);
+            actual
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(added, CANONICAL_SOURCE_ORDER[1..]);
+    assert_eq!(document.sources().len(), 6);
+    assert!(add_next_source(&mut document).is_err());
 }
 
 #[test]
