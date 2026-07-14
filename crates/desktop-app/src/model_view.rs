@@ -2,6 +2,8 @@ use editor_core::{EditorDocument, EditorError, OrbitCamera, PreviewCache};
 use eframe::egui;
 use relief_render::FrameBuffer;
 
+const FIT_FRACTION: f32 = 0.9;
+
 #[derive(Default)]
 pub struct ModelView {
     camera: OrbitCamera,
@@ -21,6 +23,7 @@ pub struct ModelViewOutput {
 #[cfg(test)]
 pub(crate) struct ModelViewObservation {
     pub rect: egui::Rect,
+    pub image_rect: egui::Rect,
 }
 
 impl ModelView {
@@ -52,10 +55,12 @@ impl ModelView {
             self.camera.zoom(wheel_delta);
         }
 
-        let width = rect.width().round().max(1.0) as u32;
-        let height = rect.height().round().max(1.0) as u32;
-        let preview = self.preview.frame(document, self.camera, width, height)?;
+        let preview = self.preview.frame(document, self.camera)?;
         let generation = preview.generation();
+        let native_size = egui::vec2(
+            preview.framebuffer().width() as f32,
+            preview.framebuffer().height() as f32,
+        );
         let image = (self.uploaded_generation != Some(generation))
             .then(|| color_image(preview.framebuffer()));
         if let Some(image) = image {
@@ -87,10 +92,16 @@ impl ModelView {
 
         ui.painter()
             .rect_filled(rect, 4.0, egui::Color32::from_gray(24));
+        let scale = presentation_scale(
+            native_size,
+            rect.size(),
+            self.camera.presentation_zoom_milli(),
+        );
+        let image_rect = egui::Rect::from_center_size(rect.center(), native_size * scale as f32);
         if let Some(texture) = &self.texture {
-            ui.painter().image(
+            ui.painter().with_clip_rect(rect).image(
                 texture.id(),
-                rect,
+                image_rect,
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
@@ -99,10 +110,18 @@ impl ModelView {
             #[cfg(test)]
             observation: ModelViewObservation {
                 rect: response.rect,
+                image_rect,
             },
             response,
         })
     }
+}
+
+fn presentation_scale(native: egui::Vec2, available: egui::Vec2, zoom_milli: u32) -> u32 {
+    let fit_width = (available.x * FIT_FRACTION / native.x).floor();
+    let fit_height = (available.y * FIT_FRACTION / native.y).floor();
+    let fit = fit_width.min(fit_height).max(1.0) as u32;
+    ((u64::from(fit) * u64::from(zoom_milli) + 500) / 1_000).max(1) as u32
 }
 
 fn color_image(framebuffer: &FrameBuffer) -> egui::ColorImage {
@@ -164,5 +183,21 @@ mod tests {
         run_frame(&context, &mut model_view, &document);
         assert_eq!(model_view.preview.generation(), unchanged_generation);
         assert_eq!(model_view.texture_upload_calls, unchanged_uploads);
+    }
+
+    #[test]
+    fn integer_presentation_scale_fits_then_zooms_without_render_geometry() {
+        assert_eq!(
+            presentation_scale(egui::vec2(84.0, 84.0), egui::vec2(1000.0, 950.0), 1_000),
+            10
+        );
+        assert_eq!(
+            presentation_scale(egui::vec2(84.0, 84.0), egui::vec2(1000.0, 950.0), 1_500),
+            15
+        );
+        assert_eq!(
+            presentation_scale(egui::vec2(84.0, 84.0), egui::vec2(420.0, 420.0), 1_000),
+            4
+        );
     }
 }

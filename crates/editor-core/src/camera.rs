@@ -23,6 +23,12 @@ pub struct OrbitCamera {
     zoom_milli: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct OrbitOrientation {
+    yaw_millidegrees: i32,
+    pitch_millidegrees: i32,
+}
+
 impl OrbitCamera {
     pub fn drag(&mut self, delta_x: f32, delta_y: f32) {
         let yaw_delta = quantized_delta(delta_x, DRAG_MILLIDEGREES_PER_POINT);
@@ -45,20 +51,26 @@ impl OrbitCamera {
         *self = Self::default();
     }
 
+    pub fn presentation_zoom_milli(self) -> u32 {
+        self.zoom_milli
+    }
+
+    pub(crate) fn orientation(self) -> OrbitOrientation {
+        OrbitOrientation {
+            yaw_millidegrees: self.yaw_millidegrees,
+            pitch_millidegrees: self.pitch_millidegrees,
+        }
+    }
+
     pub fn target_view(self) -> TargetView {
         let yaw = millidegrees_to_radians(self.yaw_millidegrees);
         let pitch = millidegrees_to_radians(self.pitch_millidegrees);
-        let zoom = f64::from(self.zoom_milli) / 1_000.0;
         let (sin_yaw, cos_yaw) = yaw.sin_cos();
         let (sin_pitch, cos_pitch) = pitch.sin_cos();
 
-        let screen_right = [cos_yaw * zoom, 0.0, sin_yaw * zoom].map(quantized_ratio);
-        let screen_down = [
-            sin_yaw * sin_pitch * zoom,
-            cos_pitch * zoom,
-            -cos_yaw * sin_pitch * zoom,
-        ]
-        .map(quantized_ratio);
+        let screen_right = [cos_yaw, 0.0, sin_yaw].map(quantized_ratio);
+        let screen_down =
+            [sin_yaw * sin_pitch, cos_pitch, -cos_yaw * sin_pitch].map(quantized_ratio);
         let depth = [-sin_yaw * cos_pitch, sin_pitch, cos_yaw * cos_pitch].map(quantized_ratio);
 
         TargetView::from_camera(CameraBasis::new(screen_right, screen_down, depth))

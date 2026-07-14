@@ -137,9 +137,9 @@ fn extreme_finite_orbit_input_remains_bounded_and_deterministic() {
     assert_eq!(first.target_view(), second.target_view());
     let document = one_pixel_document();
     let mut preview = PreviewCache::default();
-    let frame = preview.frame(&document, first, 48, 32).unwrap();
+    let frame = preview.frame(&document, first).unwrap();
     let frame = frame.framebuffer();
-    assert_eq!((frame.width(), frame.height()), (48, 32));
+    assert_eq!((frame.width(), frame.height()), (7, 7));
 
     let pitch_maximum = first;
     first.drag(0.0, 1.0);
@@ -165,12 +165,12 @@ fn an_unchanged_preview_key_returns_the_same_framebuffer() {
     let mut preview = PreviewCache::default();
 
     let first = preview
-        .frame(&document, camera, 48, 32)
+        .frame(&document, camera)
         .unwrap()
         .framebuffer()
         .clone();
     let second = preview
-        .frame(&document, camera, 48, 32)
+        .frame(&document, camera)
         .unwrap()
         .framebuffer()
         .clone();
@@ -184,34 +184,22 @@ fn preview_generation_advances_once_per_successful_render() {
     let camera = OrbitCamera::default();
     let mut preview = PreviewCache::default();
 
-    let initial_generation = preview
-        .frame(&document, camera, 48, 32)
-        .unwrap()
-        .generation();
+    let initial_generation = preview.frame(&document, camera).unwrap().generation();
     assert_eq!(initial_generation, 1);
     assert_eq!(preview.generation(), initial_generation);
     assert_eq!(
-        preview
-            .frame(&document, camera, 48, 32)
-            .unwrap()
-            .generation(),
+        preview.frame(&document, camera).unwrap().generation(),
         initial_generation
     );
 
     for rgb in [[91, 82, 73], [64, 55, 46], [37, 28, 19]] {
         recolor(&mut document, CanonicalView::Front, rgb);
     }
-    let edited_generation = preview
-        .frame(&document, camera, 48, 32)
-        .unwrap()
-        .generation();
+    let edited_generation = preview.frame(&document, camera).unwrap().generation();
     assert_eq!(edited_generation, initial_generation + 1);
     assert_eq!(preview.generation(), edited_generation);
     assert_eq!(
-        preview
-            .frame(&document, camera, 48, 32)
-            .unwrap()
-            .generation(),
+        preview.frame(&document, camera).unwrap().generation(),
         edited_generation
     );
 }
@@ -221,29 +209,17 @@ fn several_document_mutations_update_then_stabilize_the_framebuffer() {
     let mut document = one_pixel_document();
     let camera = OrbitCamera::default();
     let mut preview = PreviewCache::default();
-    let initial = preview
-        .frame(&document, camera, 48, 32)
-        .unwrap()
-        .framebuffer()
-        .clone();
+    let initial_generation = preview.frame(&document, camera).unwrap().generation();
 
     for rgb in [[40, 50, 60], [70, 80, 90], [100, 110, 120]] {
         recolor(&mut document, CanonicalView::Front, rgb);
     }
-    let changed = preview
-        .frame(&document, camera, 48, 32)
-        .unwrap()
-        .framebuffer()
-        .clone();
-    let repeated = preview
-        .frame(&document, camera, 48, 32)
-        .unwrap()
-        .framebuffer()
-        .clone();
+    let changed_generation = preview.frame(&document, camera).unwrap().generation();
+    let repeated_generation = preview.frame(&document, camera).unwrap().generation();
 
     assert_eq!(document.revision(), 3);
-    assert_ne!(changed, initial);
-    assert_eq!(repeated, changed);
+    assert_eq!(changed_generation, initial_generation + 1);
+    assert_eq!(repeated_generation, changed_generation);
 }
 
 #[test]
@@ -252,14 +228,14 @@ fn both_bowl_sources_update_preview_and_reopen_with_a_visible_recessed_basin() {
     let camera = OrbitCamera::default();
     let mut preview = PreviewCache::default();
     let original = preview
-        .frame(&document, camera, 96, 96)
+        .frame(&document, camera)
         .unwrap()
         .framebuffer()
         .clone();
 
     recolor(&mut document, CanonicalView::Front, [19, 211, 83]);
     let front_edited = preview
-        .frame(&document, camera, 96, 96)
+        .frame(&document, camera)
         .unwrap()
         .framebuffer()
         .clone();
@@ -267,7 +243,7 @@ fn both_bowl_sources_update_preview_and_reopen_with_a_visible_recessed_basin() {
 
     recolor(&mut document, CanonicalView::Top, [67, 101, 239]);
     let both_edited = preview
-        .frame(&document, camera, 96, 96)
+        .frame(&document, camera)
         .unwrap()
         .framebuffer()
         .clone();
@@ -281,7 +257,7 @@ fn both_bowl_sources_update_preview_and_reopen_with_a_visible_recessed_basin() {
     assert_eq!(reopened_model, saved_model);
     let reopened = EditorDocument::from_model(reopened_model, None).unwrap();
     let mut reopened_preview = PreviewCache::default();
-    let reopened_frame = reopened_preview.frame(&reopened, camera, 96, 96).unwrap();
+    let reopened_frame = reopened_preview.frame(&reopened, camera).unwrap();
     let reopened_frame = reopened_frame.framebuffer();
     assert_eq!(reopened_frame, &both_edited);
 
@@ -309,4 +285,54 @@ fn both_bowl_sources_update_preview_and_reopen_with_a_visible_recessed_basin() {
         basin.1 < near_rim.1,
         "the basin renders behind the near rim"
     );
+}
+
+#[test]
+fn native_preview_cell_depends_only_on_registered_bounds() {
+    let document = bowl_document();
+    let mut preview = PreviewCache::default();
+    let mut camera = OrbitCamera::default();
+
+    let first = preview.frame(&document, camera).unwrap();
+    assert_eq!(
+        (first.framebuffer().width(), first.framebuffer().height()),
+        (84, 84)
+    );
+    let generation = first.generation();
+
+    camera.zoom(7.0);
+    let zoomed = preview.frame(&document, camera).unwrap();
+    assert_eq!(
+        (zoomed.framebuffer().width(), zoomed.framebuffer().height()),
+        (84, 84)
+    );
+    assert_eq!(zoomed.generation(), generation);
+
+    camera.drag(24.0, -12.0);
+    let orbited = preview.frame(&document, camera).unwrap();
+    assert_eq!(
+        (
+            orbited.framebuffer().width(),
+            orbited.framebuffer().height()
+        ),
+        (84, 84)
+    );
+    assert_eq!(orbited.generation(), generation + 1);
+}
+
+#[test]
+fn replacing_a_document_with_equal_revision_cannot_reuse_its_preview() {
+    let first = one_pixel_document();
+    let mut edited = one_pixel_document();
+    recolor(&mut edited, CanonicalView::Front, [201, 17, 83]);
+    let second = EditorDocument::from_model(edited.to_model().unwrap(), None).unwrap();
+    assert_eq!(first.revision(), second.revision());
+
+    let camera = OrbitCamera::default();
+    let mut preview = PreviewCache::default();
+    preview.frame(&first, camera).unwrap();
+    let generation = preview.generation();
+    preview.frame(&second, camera).unwrap();
+
+    assert_eq!(preview.generation(), generation + 1);
 }

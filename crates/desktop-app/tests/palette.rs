@@ -104,12 +104,12 @@ fn run_palette_frame(
     events: Vec<egui::Event>,
 ) -> egui::FullOutput {
     context.run_ui(palette_input(events), |ui| {
-        ui.set_width(42.0);
+        ui.set_width(desktop_app::layout::TOOL_COLUMN_WIDTH);
         palette.show(ui, document);
     })
 }
 
-fn glyph<'a>(output: &'a egui::FullOutput, text: &str) -> &'a egui::epaint::TextShape {
+fn label<'a>(output: &'a egui::FullOutput, text: &str) -> &'a egui::epaint::TextShape {
     output
         .shapes
         .iter()
@@ -128,8 +128,8 @@ fn color_layer_palette_visibly_disables_eraser_and_ignores_clicks() {
     let mut palette = desktop_app::palette::PaletteState::new(&document);
 
     let initial = run_palette_frame(&context, &mut palette, &mut document, Vec::new());
-    let pencil_color = glyph(&initial, "✎").fallback_color;
-    let eraser = glyph(&initial, "⌫");
+    let pencil_color = label(&initial, "Pencil").fallback_color;
+    let eraser = label(&initial, "Eraser");
     let eraser_color = eraser.fallback_color;
     let eraser_position = eraser.visual_bounding_rect().center();
     assert!(eraser_color.a() < pencil_color.a());
@@ -160,4 +160,25 @@ fn color_layer_palette_visibly_disables_eraser_and_ignores_clicks() {
         }],
     );
     assert_eq!(document.tool(), Tool::Pencil);
+}
+
+#[test]
+fn every_palette_control_has_a_visible_supported_text_label() {
+    let context = egui::Context::default();
+    let mut document = document(1);
+    let mut palette = desktop_app::palette::PaletteState::new(&document);
+    let output = run_palette_frame(&context, &mut palette, &mut document, Vec::new());
+
+    for expected in [
+        "Pencil",
+        "Eraser",
+        "Fill",
+        "Eyedropper",
+        "Color",
+        "Color Layer",
+        "Depth Layer",
+        "Relief",
+    ] {
+        label(&output, expected);
+    }
 }

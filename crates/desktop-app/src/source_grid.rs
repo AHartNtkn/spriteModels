@@ -59,28 +59,24 @@ pub fn remove_source(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CardHeader {
-    pub title: &'static str,
-    pub assignment: &'static str,
+    pub label: &'static str,
 }
 
 pub fn card_header(document: &EditorDocument, view: CanonicalView) -> Option<CardHeader> {
     document.source(view)?;
-    let assignment = if document.source(editor_core::opposite(view)).is_none() {
-        match editor_core::opposite(view) {
-            CanonicalView::Front => "Fallback for Front",
-            CanonicalView::Right => "Fallback for Right",
-            CanonicalView::Top => "Fallback for Top",
-            CanonicalView::Back => "Fallback for Back",
-            CanonicalView::Left => "Fallback for Left",
-            CanonicalView::Bottom => "Fallback for Bottom",
+    let label = if document.source(editor_core::opposite(view)).is_none() {
+        match view {
+            CanonicalView::Front => "Front → Back",
+            CanonicalView::Right => "Right → Left",
+            CanonicalView::Top => "Top → Bottom",
+            CanonicalView::Back => "Back → Front",
+            CanonicalView::Left => "Left → Right",
+            CanonicalView::Bottom => "Bottom → Top",
         }
     } else {
-        "Authored only"
+        view_label(view)
     };
-    Some(CardHeader {
-        title: view_label(view),
-        assignment,
-    })
+    Some(CardHeader { label })
 }
 
 pub struct SourceGridState {
@@ -196,7 +192,7 @@ impl SourceGridState {
         ui.painter().text(
             header_rect.left_center(),
             egui::Align2::LEFT_CENTER,
-            format!("{} · {}", header.title, header.assignment),
+            header.label,
             egui::FontId::monospace(9.0),
             egui::Color32::LIGHT_GRAY,
         );

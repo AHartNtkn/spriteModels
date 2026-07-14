@@ -412,7 +412,7 @@ mod tests {
         assert!(composition.menu.rect.right() <= 1600.0);
 
         assert!(composition.palette.rect.is_positive());
-        assert!(composition.palette.controls.len() >= 9);
+        assert_eq!(composition.palette.controls.len(), 8);
         for control in &composition.palette.controls {
             assert!(control.is_positive());
             assert!(composition.palette.rect.contains_rect(*control));
@@ -422,6 +422,13 @@ mod tests {
         }
 
         assert!(composition.model.rect.is_positive());
+        assert!(composition.model.image_rect.is_positive());
+        assert!(
+            composition
+                .model
+                .rect
+                .contains_rect(composition.model.image_rect)
+        );
         assert!(composition.menu.rect.bottom() <= composition.palette.rect.top());
         assert!(composition.menu.rect.bottom() <= composition.model.rect.top());
         assert!(composition.palette.rect.right() < composition.model.rect.left());

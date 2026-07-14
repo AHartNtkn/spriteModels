@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use depthsprite_format::DepthSpriteModel;
 use relief_core::{Bounds, CanonicalView, Chart};
@@ -54,7 +57,10 @@ pub struct EditorDocument {
     pub(crate) stroke_before: Option<DocumentState>,
     pub(crate) path: Option<PathBuf>,
     pub(crate) revision: u64,
+    pub(crate) render_identity: u64,
 }
+
+static NEXT_RENDER_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 impl EditorDocument {
     pub fn new(bounds: Bounds, initial: CanonicalView) -> Self {
@@ -221,6 +227,10 @@ impl EditorDocument {
         self.revision
     }
 
+    pub(crate) fn render_key(&self) -> (u64, u64) {
+        (self.render_identity, self.revision)
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -242,6 +252,7 @@ impl EditorDocument {
             stroke_before: None,
             path,
             revision: 0,
+            render_identity: NEXT_RENDER_IDENTITY.fetch_add(1, Ordering::Relaxed),
         }
     }
 

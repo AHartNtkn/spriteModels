@@ -97,17 +97,13 @@ fn headers_report_fallback_assignment_and_update_after_override() {
     let mut document = document();
 
     let fallback = card_header(&document, FRONT).unwrap();
-    assert_eq!(fallback.title, "Front");
-    assert_eq!(fallback.assignment, "Fallback for Back");
+    assert_eq!(fallback.label, "Front → Back");
 
     document.add_source(CanonicalView::Back).unwrap();
     let overridden = card_header(&document, FRONT).unwrap();
-    assert_eq!(overridden.title, "Front");
-    assert_eq!(overridden.assignment, "Authored only");
+    assert_eq!(overridden.label, "Front");
     assert_eq!(
-        card_header(&document, CanonicalView::Back)
-            .unwrap()
-            .assignment,
-        "Authored only"
+        card_header(&document, CanonicalView::Back).unwrap().label,
+        "Back"
     );
 }

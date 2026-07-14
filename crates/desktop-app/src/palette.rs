@@ -7,29 +7,24 @@ use eframe::egui;
 pub struct ToolEntry {
     pub tool: Tool,
     pub label: &'static str,
-    pub glyph: &'static str,
 }
 
 const TOOLS: [ToolEntry; 4] = [
     ToolEntry {
         tool: Tool::Pencil,
         label: "Pencil",
-        glyph: "✎",
     },
     ToolEntry {
         tool: Tool::Eraser,
         label: "Eraser",
-        glyph: "⌫",
     },
     ToolEntry {
         tool: Tool::Fill,
         label: "Fill",
-        glyph: "▨",
     },
     ToolEntry {
         tool: Tool::Eyedropper,
         label: "Eyedropper",
-        glyph: "⌾",
     },
 ];
 
@@ -165,7 +160,7 @@ impl PaletteState {
                     .add_enabled_ui(entry.tool.is_available_on(document.active_layer()), |ui| {
                         ui.add_sized(
                             [ui.available_width(), 28.0],
-                            egui::Button::selectable(selected, entry.glyph),
+                            egui::Button::selectable(selected, entry.label),
                         )
                     })
                     .inner
@@ -178,17 +173,19 @@ impl PaletteState {
             }
 
             ui.separator();
-            let mut rgb = document.current_rgb();
-            let color_response = ui
-                .color_edit_button_srgb(&mut rgb)
-                .on_hover_text("Color: hue and saturation/value");
-            #[cfg(test)]
-            controls.push(color_response.rect);
-            if color_response.changed() {
-                document.set_current_rgb(rgb);
-            }
-            let rgb_response = ui.menu_button("RGB", |ui| {
+            let color_response = ui.menu_button("Color", |ui| {
                 ui.set_min_width(170.0);
+                let rgb = document.current_rgb();
+                let mut color = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                if egui::color_picker::color_picker_color32(
+                    ui,
+                    &mut color,
+                    egui::color_picker::Alpha::Opaque,
+                ) {
+                    let [red, green, blue, _] = color.to_array();
+                    document.set_current_rgb([red, green, blue]);
+                }
+
                 let rgb = document.current_rgb();
                 for (channel, label) in ["R", "G", "B"].into_iter().enumerate() {
                     let mut value = rgb[channel];
@@ -231,13 +228,13 @@ impl PaletteState {
                 }
             });
             #[cfg(test)]
-            controls.push(rgb_response.response.rect);
+            controls.push(color_response.response.rect);
             #[cfg(not(test))]
-            let _ = &rgb_response;
+            let _ = &color_response;
 
             ui.separator();
             let color_layer_response = ui
-                .selectable_label(document.active_layer() == ActiveLayer::Color, "C")
+                .selectable_label(document.active_layer() == ActiveLayer::Color, "Color Layer")
                 .on_hover_text("Edit color");
             #[cfg(test)]
             controls.push(color_layer_response.rect);
@@ -245,7 +242,7 @@ impl PaletteState {
                 document.set_active_layer(ActiveLayer::Color);
             }
             let depth_layer_response = ui
-                .selectable_label(document.active_layer() == ActiveLayer::Depth, "D")
+                .selectable_label(document.active_layer() == ActiveLayer::Depth, "Depth Layer")
                 .on_hover_text("Edit relief");
             #[cfg(test)]
             controls.push(depth_layer_response.rect);
@@ -253,7 +250,7 @@ impl PaletteState {
                 document.set_active_layer(ActiveLayer::Depth);
             }
 
-            let depth_response = ui.menu_button("Z", |ui| {
+            let depth_response = ui.menu_button("Relief", |ui| {
                 ui.set_min_width(190.0);
                 let mut relief = match document.current_depth() {
                     DepthValue::Empty => 0,

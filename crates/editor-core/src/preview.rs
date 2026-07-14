@@ -1,13 +1,12 @@
 use relief_render::{FrameBuffer, RenderRequest, render_model};
 
-use crate::{EditorDocument, EditorError, OrbitCamera};
+use crate::{EditorDocument, EditorError, OrbitCamera, camera::OrbitOrientation};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PreviewKey {
+    document_identity: u64,
     revision: u64,
-    camera: OrbitCamera,
-    width: u32,
-    height: u32,
+    orientation: OrbitOrientation,
 }
 
 #[derive(Default)]
@@ -43,18 +42,17 @@ impl PreviewCache {
         &mut self,
         document: &EditorDocument,
         camera: OrbitCamera,
-        width: u32,
-        height: u32,
     ) -> Result<PreviewFrame<'_>, EditorError> {
+        let (document_identity, revision) = document.render_key();
         let key = PreviewKey {
-            revision: document.revision(),
-            camera,
-            width,
-            height,
+            document_identity,
+            revision,
+            orientation: camera.orientation(),
         };
         if self.key != Some(key) {
             let charts = document.resolved_charts()?;
-            let request = RenderRequest::new(width, height, camera.target_view());
+            let side = native_cell_side(document.bounds());
+            let request = RenderRequest::new(side, side, camera.target_view());
             let framebuffer = render_model(document.bounds(), &charts, &request)?;
             self.generation = self
                 .generation
@@ -79,6 +77,14 @@ impl PreviewCache {
             generation: self.generation,
         })
     }
+}
+
+fn native_cell_side(bounds: relief_core::Bounds) -> u32 {
+    bounds
+        .width()
+        .saturating_add(bounds.height())
+        .saturating_add(bounds.depth())
+        .saturating_add(4)
 }
 
 #[cfg(test)]
@@ -116,8 +122,8 @@ mod tests {
         let camera = OrbitCamera::default();
         let mut preview = PreviewCache::default();
 
-        preview.frame(&document, camera, 48, 32).unwrap();
-        preview.frame(&document, camera, 48, 32).unwrap();
+        preview.frame(&document, camera).unwrap();
+        preview.frame(&document, camera).unwrap();
 
         assert_eq!(preview.render_count, 1);
     }
@@ -127,13 +133,13 @@ mod tests {
         let mut document = document();
         let camera = OrbitCamera::default();
         let mut preview = PreviewCache::default();
-        preview.frame(&document, camera, 48, 32).unwrap();
+        preview.frame(&document, camera).unwrap();
 
         for rgb in [[40, 50, 60], [70, 80, 90], [100, 110, 120]] {
             recolor(&mut document, rgb);
         }
-        preview.frame(&document, camera, 48, 32).unwrap();
-        preview.frame(&document, camera, 48, 32).unwrap();
+        preview.frame(&document, camera).unwrap();
+        preview.frame(&document, camera).unwrap();
 
         assert_eq!(document.revision(), 3);
         assert_eq!(preview.render_count, 2);
@@ -144,11 +150,11 @@ mod tests {
         let document = document();
         let mut camera = OrbitCamera::default();
         let mut preview = PreviewCache::default();
-        preview.frame(&document, camera, 48, 32).unwrap();
+        preview.frame(&document, camera).unwrap();
 
         camera.drag(9.0, 4.0);
-        preview.frame(&document, camera, 48, 32).unwrap();
-        preview.frame(&document, camera, 48, 32).unwrap();
+        preview.frame(&document, camera).unwrap();
+        preview.frame(&document, camera).unwrap();
 
         assert_eq!(preview.render_count, 2);
     }

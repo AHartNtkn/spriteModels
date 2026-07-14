@@ -61,7 +61,7 @@ fn model_texture_delta(output: &egui::FullOutput) -> Option<(TextureId, TextureO
         .textures_delta
         .set
         .iter()
-        .find(|(_, delta)| delta.image.size() == [280, 180])
+        .find(|(_, delta)| delta.image.size() == [10, 10])
         .map(|(id, delta)| (*id, delta.options))
 }
 
@@ -107,7 +107,7 @@ fn successive_drag_frames_apply_incremental_deltas_and_leave_document_untouched(
     run_frame(&context, &mut view, &document, Vec::new());
 
     let start = MODEL.center();
-    run_frame(
+    let zoomed = run_frame(
         &context,
         &mut view,
         &document,
@@ -134,6 +134,10 @@ fn successive_drag_frames_apply_incremental_deltas_and_leave_document_untouched(
     assert_eq!(document.is_dirty(), dirty);
     assert_eq!(document.revision(), revision);
     assert!(document.can_undo());
+    assert!(
+        model_texture_delta(&zoomed).is_none(),
+        "presentation zoom must not regenerate or upload model geometry"
+    );
     assert!(document.undo());
     assert!(!document.undo(), "model drag added no undo entry");
 }

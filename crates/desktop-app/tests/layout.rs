@@ -166,8 +166,8 @@ fn menu_is_a_top_strip_above_one_uninterrupted_workspace() {
 fn tools_are_a_narrow_vertical_column_and_model_is_dominant() {
     let layout = calculate_layout(Size::new(1600.0, 1000.0)).unwrap();
 
-    assert!(layout.tools.height() > layout.tools.width() * 10.0);
-    assert!(layout.tools.width() < layout.model.width() / 10.0);
+    assert!(layout.tools.height() > layout.tools.width() * 5.0);
+    assert!(layout.tools.width() < SOURCE_CARD_WIDTH);
     assert!(layout.model.width() > layout.sources.width());
     assert_dominates_canvases(&layout);
 }

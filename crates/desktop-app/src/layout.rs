@@ -3,7 +3,7 @@ use relief_core::CanonicalView;
 pub const MENU_HEIGHT: f32 = 28.0;
 pub const WORKSPACE_PADDING: f32 = 10.0;
 pub const PANEL_GAP: f32 = 10.0;
-pub const TOOL_COLUMN_WIDTH: f32 = 42.0;
+pub const TOOL_COLUMN_WIDTH: f32 = 100.0;
 pub const SOURCE_COLUMNS: usize = 3;
 pub const SOURCE_ROWS: usize = 2;
 pub const SOURCE_SLOT_COUNT: usize = SOURCE_COLUMNS * SOURCE_ROWS;
