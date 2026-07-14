@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::{DecodedTexel, decode_rgba};
+use crate::{DecodedTexel, EMPTY_RGBA, ImageEdge, ResizeDelta, decode_rgba};
 
 /// Validated fixed-scale model dimensions.
 ///
@@ -142,6 +142,58 @@ impl Chart {
 
     pub fn texels(&self) -> impl ExactSizeIterator<Item = DecodedTexel> + '_ {
         self.rgba.iter().copied().map(decode_rgba)
+    }
+
+    pub(crate) fn edge_contains_authored_pixel(&self, edge: ImageEdge) -> bool {
+        match edge {
+            ImageEdge::Left => (0..self.height).any(|y| self.rgba_at(0, y) != Some(EMPTY_RGBA)),
+            ImageEdge::Right => {
+                (0..self.height).any(|y| self.rgba_at(self.width - 1, y) != Some(EMPTY_RGBA))
+            }
+            ImageEdge::Top => (0..self.width).any(|x| self.rgba_at(x, 0) != Some(EMPTY_RGBA)),
+            ImageEdge::Bottom => {
+                (0..self.width).any(|x| self.rgba_at(x, self.height - 1) != Some(EMPTY_RGBA))
+            }
+        }
+    }
+
+    pub(crate) fn resized(&self, edge: ImageEdge, delta: ResizeDelta) -> Self {
+        let (width, height) = match (edge, delta) {
+            (ImageEdge::Left | ImageEdge::Right, ResizeDelta::Add) => (self.width + 1, self.height),
+            (ImageEdge::Left | ImageEdge::Right, ResizeDelta::Remove) => {
+                (self.width - 1, self.height)
+            }
+            (ImageEdge::Top | ImageEdge::Bottom, ResizeDelta::Add) => (self.width, self.height + 1),
+            (ImageEdge::Top | ImageEdge::Bottom, ResizeDelta::Remove) => {
+                (self.width, self.height - 1)
+            }
+        };
+        let mut rgba = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let source = match (edge, delta) {
+                    (ImageEdge::Left, ResizeDelta::Add) => x.checked_sub(1).map(|x| (x, y)),
+                    (ImageEdge::Right, ResizeDelta::Add) => (x < self.width).then_some((x, y)),
+                    (ImageEdge::Top, ResizeDelta::Add) => y.checked_sub(1).map(|y| (x, y)),
+                    (ImageEdge::Bottom, ResizeDelta::Add) => (y < self.height).then_some((x, y)),
+                    (ImageEdge::Left, ResizeDelta::Remove) => Some((x + 1, y)),
+                    (ImageEdge::Right, ResizeDelta::Remove) => Some((x, y)),
+                    (ImageEdge::Top, ResizeDelta::Remove) => Some((x, y + 1)),
+                    (ImageEdge::Bottom, ResizeDelta::Remove) => Some((x, y)),
+                };
+                rgba.push(
+                    source
+                        .and_then(|(x, y)| self.rgba_at(x, y))
+                        .unwrap_or(EMPTY_RGBA),
+                );
+            }
+        }
+        Self {
+            view: self.view,
+            width,
+            height,
+            rgba,
+        }
     }
 }
 

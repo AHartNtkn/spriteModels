@@ -1,6 +1,37 @@
+use relief_core::{DiscardPolicy, ReassignMode, ResizeRequest};
+
 use crate::{EditorDocument, EditorError, document::DocumentState};
 
 impl EditorDocument {
+    pub fn resize_source(
+        &mut self,
+        request: ResizeRequest,
+        policy: DiscardPolicy,
+    ) -> Result<(), EditorError> {
+        self.ensure_no_active_stroke()?;
+        let before = self.state.clone();
+        self.state.model.resize(request, policy)?;
+        self.finish_command(before);
+        Ok(())
+    }
+
+    pub fn reassign_source(
+        &mut self,
+        from: relief_core::CanonicalView,
+        to: relief_core::CanonicalView,
+        mode: ReassignMode,
+    ) -> Result<(), EditorError> {
+        self.ensure_no_active_stroke()?;
+        let before = self.state.clone();
+        self.state.model.reassign_chart(from, to, mode)?;
+        if self.state.selection == from {
+            self.state.selection = to;
+            self.clamp_current_depth(to.maximum_inward_depth(self.bounds()));
+        }
+        self.finish_command(before);
+        Ok(())
+    }
+
     pub fn begin_stroke(&mut self) -> Result<(), EditorError> {
         self.ensure_no_active_stroke()?;
         self.stroke_before = Some(self.state.clone());

@@ -56,6 +56,18 @@ impl EditorDocument {
         self.state.current_depth = depth;
     }
 
+    pub(crate) fn clamp_current_depth(&mut self, maximum: u8) {
+        let DepthValue::Relief(relief) = self.state.current_depth else {
+            return;
+        };
+        if relief.get() > maximum {
+            self.state.current_depth = DepthValue::Relief(
+                ReliefValue::new(maximum)
+                    .expect("canonical maximum inward depth is always paintable"),
+            );
+        }
+    }
+
     pub fn pencil_pixel(
         &mut self,
         view: CanonicalView,

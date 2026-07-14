@@ -146,6 +146,19 @@ impl EditorDocument {
         self.state.selection
     }
 
+    pub fn select_source(&mut self, view: CanonicalView) -> Result<(), EditorError> {
+        if self.state.model.chart(view).is_none() {
+            return Err(relief_core::ModelError::MissingView(view).into());
+        }
+        self.state.selection = view;
+        self.clamp_current_depth(view.maximum_inward_depth(self.bounds()));
+        Ok(())
+    }
+
+    pub fn maximum_inward_depth(&self) -> u8 {
+        self.state.selection.maximum_inward_depth(self.bounds())
+    }
+
     pub fn active_layer(&self) -> ActiveLayer {
         self.state.active_layer
     }

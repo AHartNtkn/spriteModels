@@ -1,6 +1,9 @@
 use thiserror::Error;
 
-use crate::{Bounds, CanonicalView, Chart, ChartError};
+use crate::{
+    Bounds, CanonicalView, Chart, ChartEdge, ChartError, DiscardPolicy, ReassignMode, ResizeDelta,
+    ResizeRequest, WorldAxis,
+};
 
 pub const EMPTY_RGBA: [u8; 4] = [255, 0, 255, 0];
 
@@ -112,6 +115,109 @@ impl AuthoredModel {
             charts,
         }
     }
+
+    pub fn resize(
+        &mut self,
+        request: ResizeRequest,
+        policy: DiscardPolicy,
+    ) -> Result<(), ModelError> {
+        let world_edge = request.view.world_edge(request.edge);
+        let change = match request.delta {
+            ResizeDelta::Add => 1,
+            ResizeDelta::Remove => -1,
+        };
+        let dimensions = [
+            self.bounds.width() as i64,
+            self.bounds.height() as i64,
+            self.bounds.depth() as i64,
+        ];
+        let axis = match world_edge.axis {
+            WorldAxis::X => 0,
+            WorldAxis::Y => 1,
+            WorldAxis::Z => 2,
+        };
+        let mut prospective = dimensions;
+        prospective[axis] += change;
+        let new_bounds = Bounds::new(
+            prospective[0] as u32,
+            prospective[1] as u32,
+            prospective[2] as u32,
+        )?;
+
+        let affected = self
+            .charts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, chart)| {
+                chart
+                    .view()
+                    .image_edge(world_edge)
+                    .map(|edge| (index, edge))
+            })
+            .collect::<Vec<_>>();
+
+        if request.delta == ResizeDelta::Remove && policy == DiscardPolicy::Reject {
+            let edges = affected
+                .iter()
+                .filter_map(|&(index, edge)| {
+                    self.charts[index]
+                        .edge_contains_authored_pixel(edge)
+                        .then_some(ChartEdge {
+                            view: self.charts[index].view(),
+                            edge,
+                        })
+                })
+                .collect::<Vec<_>>();
+            if !edges.is_empty() {
+                return Err(ModelError::ResizeWouldDiscard { edges });
+            }
+        }
+
+        let mut charts = self.charts.clone();
+        for (index, edge) in affected {
+            charts[index] = charts[index].resized(edge, request.delta);
+        }
+        let replacement = Self::new(new_bounds, charts)?;
+        *self = replacement;
+        Ok(())
+    }
+
+    pub fn reassign_chart(
+        &mut self,
+        from: CanonicalView,
+        to: CanonicalView,
+        mode: ReassignMode,
+    ) -> Result<(), ModelError> {
+        let Some(index) = self.charts.iter().position(|chart| chart.view() == from) else {
+            return Err(ModelError::MissingView(from));
+        };
+        if self.chart(to).is_some() {
+            return Err(ModelError::DuplicateView(to));
+        }
+
+        let source = &self.charts[index];
+        let target = match mode {
+            ReassignMode::Preserve => {
+                let expected = to.dimensions(self.bounds);
+                let actual = source.dimensions();
+                if actual != expected {
+                    return Err(ModelError::DimensionMismatch {
+                        view: to,
+                        expected,
+                        actual,
+                    });
+                }
+                Chart::from_rgba(to, actual.0, actual.1, source.rgba().to_vec())?
+            }
+            ReassignMode::RecreateEmpty => empty_chart(self.bounds, to)?,
+        };
+
+        let mut charts = self.charts.clone();
+        charts[index] = target;
+        let replacement = Self::new(self.bounds, charts)?;
+        *self = replacement;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -161,6 +267,8 @@ pub enum ModelError {
         actual: u8,
         maximum: u8,
     },
+    #[error("resizing would discard authored pixels on {edges:?}")]
+    ResizeWouldDiscard { edges: Vec<ChartEdge> },
     #[error(transparent)]
     Chart(#[from] ChartError),
 }

@@ -1,5 +1,8 @@
 use editor_core::{ActiveLayer, DepthValue, EditorDocument, ReliefValue};
-use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart};
+use relief_core::{
+    AuthoredModel, Bounds, CanonicalView, Chart, DiscardPolicy, ImageEdge, ReassignMode,
+    ResizeDelta, ResizeRequest,
+};
 
 const FRONT: CanonicalView = CanonicalView::Front;
 
@@ -175,4 +178,53 @@ fn source_commands_and_fill_each_advance_revision_once() {
     let before_remove = document.revision();
     document.remove_source(CanonicalView::Back).unwrap();
     assert_eq!(document.revision(), before_remove + 1);
+}
+
+#[test]
+fn resize_is_exactly_one_undo_step() {
+    let mut document = document(2, 1, vec![[255, 0, 255, 0]; 2]);
+    let before = document.to_model();
+    let before_revision = document.revision();
+
+    document
+        .resize_source(
+            ResizeRequest {
+                view: FRONT,
+                edge: ImageEdge::Left,
+                delta: ResizeDelta::Add,
+            },
+            DiscardPolicy::Reject,
+        )
+        .unwrap();
+
+    assert_eq!(document.revision(), before_revision + 1);
+    assert_eq!(document.bounds().width(), 3);
+    assert!(document.undo());
+    assert_eq!(document.to_model(), before);
+    assert!(!document.can_undo());
+    assert!(document.redo());
+    assert_eq!(document.bounds().width(), 3);
+    assert!(!document.can_redo());
+}
+
+#[test]
+fn reassignment_is_exactly_one_undo_step_and_tracks_the_selected_source() {
+    let mut document = document(2, 1, vec![[1, 2, 3, 255]; 2]);
+    let before = document.to_model();
+    let before_revision = document.revision();
+
+    document
+        .reassign_source(FRONT, CanonicalView::Back, ReassignMode::Preserve)
+        .unwrap();
+
+    assert_eq!(document.revision(), before_revision + 1);
+    assert_eq!(document.selected_view(), CanonicalView::Back);
+    assert!(document.source(FRONT).is_none());
+    assert!(document.undo());
+    assert_eq!(document.to_model(), before);
+    assert_eq!(document.selected_view(), FRONT);
+    assert!(!document.can_undo());
+    assert!(document.redo());
+    assert_eq!(document.selected_view(), CanonicalView::Back);
+    assert!(!document.can_redo());
 }
