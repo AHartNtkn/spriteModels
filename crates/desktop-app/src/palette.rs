@@ -7,24 +7,29 @@ use eframe::egui;
 pub struct ToolEntry {
     pub tool: Tool,
     pub label: &'static str,
+    pub glyph: &'static str,
 }
 
 const TOOLS: [ToolEntry; 4] = [
     ToolEntry {
         tool: Tool::Pencil,
         label: "Pencil",
+        glyph: "✎",
     },
     ToolEntry {
         tool: Tool::Eraser,
         label: "Eraser",
+        glyph: "⌫",
     },
     ToolEntry {
         tool: Tool::Fill,
         label: "Fill",
+        glyph: "▨",
     },
     ToolEntry {
         tool: Tool::Eyedropper,
         label: "Eyedropper",
+        glyph: "⌾",
     },
 ];
 
@@ -142,91 +147,105 @@ impl PaletteState {
     pub fn show(&mut self, ui: &mut egui::Ui, document: &mut EditorDocument) {
         ui.vertical(|ui| {
             for entry in tool_entries() {
-                if ui
-                    .selectable_label(document.tool() == entry.tool, entry.label)
-                    .clicked()
-                {
+                let selected = document.tool() == entry.tool;
+                let response = ui
+                    .add_sized(
+                        [ui.available_width(), 28.0],
+                        egui::Button::selectable(selected, entry.glyph),
+                    )
+                    .on_hover_text(entry.label);
+                if response.clicked() {
                     select_tool(document, entry.tool);
                 }
             }
 
             ui.separator();
-            ui.label("Color");
             let mut rgb = document.current_rgb();
-            if ui.color_edit_button_srgb(&mut rgb).changed() {
+            if ui
+                .color_edit_button_srgb(&mut rgb)
+                .on_hover_text("Color: hue and saturation/value")
+                .changed()
+            {
                 document.set_current_rgb(rgb);
             }
-            for (channel, label) in ["R", "G", "B"].into_iter().enumerate() {
-                let mut value = rgb[channel];
-                ui.horizontal(|ui| {
-                    ui.label(label);
-                    if ui
-                        .add(egui::DragValue::new(&mut value).range(0..=255))
-                        .changed()
-                    {
-                        set_rgb_channel(document, channel, value)
-                            .expect("palette RGB controls enumerate exactly three channels");
-                    }
-                });
-            }
-
-            if document.current_rgb() != self.synced_rgb
-                && !ui.memory(|memory| memory.focused().is_some())
-            {
-                self.sync_hex(document.current_rgb());
-            }
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.hex_input)
-                    .char_limit(6)
-                    .hint_text("RRGGBB"),
-            );
-            let submit = response.lost_focus()
-                || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
-            if submit {
-                match apply_hex_rgb(document, &self.hex_input) {
-                    Ok(()) => {
-                        self.sync_hex(document.current_rgb());
-                        self.hex_error = false;
-                    }
-                    Err(_) => self.hex_error = true,
+            ui.menu_button("RGB", |ui| {
+                ui.set_min_width(170.0);
+                let rgb = document.current_rgb();
+                for (channel, label) in ["R", "G", "B"].into_iter().enumerate() {
+                    let mut value = rgb[channel];
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        if ui
+                            .add(egui::DragValue::new(&mut value).range(0..=255))
+                            .changed()
+                        {
+                            set_rgb_channel(document, channel, value)
+                                .expect("palette RGB controls enumerate exactly three channels");
+                        }
+                    });
                 }
-            }
-            if self.hex_error {
-                ui.colored_label(egui::Color32::LIGHT_RED, "Use six hex digits");
-            }
 
-            ui.separator();
-            ui.label("Layer");
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(document.active_layer() == ActiveLayer::Color, "Color")
-                    .clicked()
+                if document.current_rgb() != self.synced_rgb
+                    && !ui.memory(|memory| memory.focused().is_some())
                 {
-                    document.set_active_layer(ActiveLayer::Color);
+                    self.sync_hex(document.current_rgb());
                 }
-                if ui
-                    .selectable_label(document.active_layer() == ActiveLayer::Depth, "Depth")
-                    .clicked()
-                {
-                    document.set_active_layer(ActiveLayer::Depth);
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.hex_input)
+                        .char_limit(6)
+                        .hint_text("RRGGBB"),
+                );
+                let submit = response.lost_focus()
+                    || (response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                if submit {
+                    match apply_hex_rgb(document, &self.hex_input) {
+                        Ok(()) => {
+                            self.sync_hex(document.current_rgb());
+                            self.hex_error = false;
+                        }
+                        Err(_) => self.hex_error = true,
+                    }
+                }
+                if self.hex_error {
+                    ui.colored_label(egui::Color32::LIGHT_RED, "Use six hex digits");
                 }
             });
 
-            let mut relief = match document.current_depth() {
-                DepthValue::Empty => 0,
-                DepthValue::Relief(value) => value.get(),
-            };
+            ui.separator();
             if ui
-                .add(egui::Slider::new(&mut relief, 0..=254).text("relief"))
-                .changed()
+                .selectable_label(document.active_layer() == ActiveLayer::Color, "C")
+                .on_hover_text("Edit color")
+                .clicked()
             {
-                document.set_current_depth(DepthValue::Relief(
-                    ReliefValue::new(relief).expect("slider enforces valid relief"),
-                ));
+                document.set_active_layer(ActiveLayer::Color);
             }
-            let labels = relief_labels(document.current_depth());
-            ui.small(labels.units);
-            ui.small(labels.model_pixels);
+            if ui
+                .selectable_label(document.active_layer() == ActiveLayer::Depth, "D")
+                .on_hover_text("Edit relief")
+                .clicked()
+            {
+                document.set_active_layer(ActiveLayer::Depth);
+            }
+
+            ui.menu_button("Z", |ui| {
+                ui.set_min_width(190.0);
+                let mut relief = match document.current_depth() {
+                    DepthValue::Empty => 0,
+                    DepthValue::Relief(value) => value.get(),
+                };
+                if ui
+                    .add(egui::Slider::new(&mut relief, 0..=254).text("relief"))
+                    .changed()
+                {
+                    document.set_current_depth(DepthValue::Relief(
+                        ReliefValue::new(relief).expect("slider enforces valid relief"),
+                    ));
+                }
+                let labels = relief_labels(document.current_depth());
+                ui.label(labels.units);
+                ui.label(labels.model_pixels);
+            });
         });
     }
 
