@@ -1,6 +1,6 @@
 use std::{io, path::PathBuf};
 
-use relief_core::{Bounds, CanonicalView, ChartError};
+use relief_core::{CanonicalView, ChartError};
 use thiserror::Error;
 
 use crate::CanonicalViewName;
@@ -34,8 +34,12 @@ pub enum PackageError {
     DuplicateView(CanonicalViewName),
     #[error("model contains no charts")]
     EmptyModel,
-    #[error("chart bounds {actual:?} do not match model bounds {expected:?}")]
-    MixedBounds { expected: Bounds, actual: Bounds },
+    #[error("chart {view:?} dimensions {actual:?} do not match model bounds {expected:?}")]
+    DimensionMismatch {
+        view: CanonicalView,
+        expected: (u32, u32),
+        actual: (u32, u32),
+    },
     #[error(
         "entry {entry} must encode nonpremultiplied 8-bit RGBA PNG, got {color_type} {bit_depth}"
     )]

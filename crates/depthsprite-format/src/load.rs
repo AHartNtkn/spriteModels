@@ -5,7 +5,7 @@ use std::{
 };
 
 use png::{BitDepth, ColorType, Decoder, Transformations};
-use relief_core::{CanonicalView, Chart, ChartError};
+use relief_core::{CanonicalView, Chart};
 use zip::ZipArchive;
 
 use crate::{DepthSpriteModel, ManifestV1, PackageError};
@@ -25,7 +25,7 @@ pub fn load_reader<R: Read + Seek>(reader: R) -> Result<DepthSpriteModel, Packag
     for view_name in manifest.views {
         let entry = view_name.entry_name();
         let bytes = read_entry(&mut archive, entry)?;
-        charts.push(decode_chart(entry, &bytes, bounds, view_name.into())?);
+        charts.push(decode_chart(entry, &bytes, view_name.into())?);
     }
     DepthSpriteModel::new(bounds, charts)
 }
@@ -42,12 +42,7 @@ fn read_entry<R: Read + Seek>(
     Ok(bytes)
 }
 
-fn decode_chart(
-    entry: &str,
-    bytes: &[u8],
-    bounds: relief_core::Bounds,
-    view: CanonicalView,
-) -> Result<Chart, PackageError> {
+fn decode_chart(entry: &str, bytes: &[u8], view: CanonicalView) -> Result<Chart, PackageError> {
     let mut decoder = Decoder::new(Cursor::new(bytes));
     decoder.set_transformations(Transformations::IDENTITY);
     let mut reader = decoder
@@ -63,11 +58,6 @@ fn decode_chart(
             color_type: format!("{:?}", info.color_type),
             bit_depth: format!("{:?}", info.bit_depth),
         });
-    }
-    if let Err(source @ ChartError::DimensionMismatch { .. }) =
-        Chart::from_rgba(bounds, view, info.width, info.height, Vec::new())
-    {
-        return Err(PackageError::InvalidChart { view, source });
     }
     let buffer_size = reader
         .output_buffer_size()
@@ -86,6 +76,6 @@ fn decode_chart(
         .chunks_exact(4)
         .map(|chunk| [chunk[0], chunk[1], chunk[2], chunk[3]])
         .collect();
-    Chart::from_rgba(bounds, view, output.width, output.height, pixels)
+    Chart::from_rgba(view, output.width, output.height, pixels)
         .map_err(|source| PackageError::InvalidChart { view, source })
 }

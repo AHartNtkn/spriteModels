@@ -8,7 +8,7 @@ use tempfile::tempdir;
 
 fn chart(bounds: Bounds, view: CanonicalView, pixels: Vec<[u8; 4]>) -> Chart {
     let (width, height) = view.dimensions(bounds);
-    Chart::from_rgba(bounds, view, width, height, pixels).unwrap()
+    Chart::from_rgba(view, width, height, pixels).unwrap()
 }
 
 fn saved(model: &DepthSpriteModel) -> Vec<u8> {
@@ -80,6 +80,21 @@ fn model_is_a_sorted_unique_shared_bounds_bundle() {
             ]
         ),
         Err(PackageError::DuplicateView(_))
+    ));
+}
+
+#[test]
+fn model_bounds_validate_each_chart_view_dimensions() {
+    let bounds = Bounds::new(2, 1, 3).unwrap();
+    let chart = Chart::from_rgba(CanonicalView::Top, 2, 2, vec![[0, 0, 0, 0]; 4]).unwrap();
+
+    assert!(matches!(
+        DepthSpriteModel::new(bounds, vec![chart]),
+        Err(PackageError::DimensionMismatch {
+            view: CanonicalView::Top,
+            expected: (2, 3),
+            actual: (2, 2),
+        })
     ));
 }
 

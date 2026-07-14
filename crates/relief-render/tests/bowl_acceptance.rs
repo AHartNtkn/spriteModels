@@ -18,7 +18,7 @@ fn asset(name: &str) -> PathBuf {
 }
 
 fn is_foreground(chart: &relief_core::Chart, x: i32, y: i32) -> bool {
-    let (width, height) = chart.view().dimensions(chart.bounds());
+    let (width, height) = chart.dimensions();
     x >= 0
         && y >= 0
         && x < width as i32
@@ -206,6 +206,7 @@ fn generated_block_is_three_flat_canonical_charts() {
 fn two_chart_bowl_has_front_near_rim_and_top_recessed_visible_basin() {
     let model = load_path(asset("bowl.depthsprite")).unwrap();
     let frame = render_model(
+        model.bounds(),
         model.charts(),
         &RenderRequest::new(96, 96, TargetView::bowl_acceptance()),
     )

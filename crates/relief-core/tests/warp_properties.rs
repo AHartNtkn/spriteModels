@@ -1,5 +1,5 @@
 use num_rational::Ratio;
-use relief_core::{Bounds, CanonicalView, Chart, ReliefField, SourcePoint, WarpCoefficients};
+use relief_core::{CanonicalView, Chart, ReliefField, SourcePoint, WarpCoefficients};
 
 fn alpha(relief_eighths: u8) -> u8 {
     255 - relief_eighths
@@ -34,7 +34,6 @@ fn direct_warp_keeps_fractional_source_and_relief_exact() {
 #[test]
 fn owning_foreground_cell_has_an_exact_one_sided_closure_limit() {
     let chart = Chart::from_rgba(
-        Bounds::new(2, 1, 1).unwrap(),
         CanonicalView::Front,
         2,
         1,
@@ -57,7 +56,6 @@ fn owning_foreground_cell_has_an_exact_one_sided_closure_limit() {
 #[test]
 fn closure_limit_uses_only_the_owning_foreground_component() {
     let chart = Chart::from_rgba(
-        Bounds::new(3, 1, 1).unwrap(),
         CanonicalView::Front,
         3,
         1,

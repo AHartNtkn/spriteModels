@@ -1,5 +1,5 @@
 use num_rational::Ratio;
-use relief_core::{Bounds, CanonicalView, Chart, ComponentMap, ReliefField};
+use relief_core::{CanonicalView, Chart, ComponentMap, ReliefField};
 
 fn alpha(depth_eighths: u8) -> u8 {
     255 - depth_eighths
@@ -8,7 +8,6 @@ fn alpha(depth_eighths: u8) -> u8 {
 #[test]
 fn tent_field_is_exact_at_texel_centers_and_interpolates_between_them() {
     let chart = Chart::from_rgba(
-        Bounds::new(2, 1, 1).unwrap(),
         CanonicalView::Front,
         2,
         1,
@@ -33,7 +32,6 @@ fn tent_field_is_exact_at_texel_centers_and_interpolates_between_them() {
 #[test]
 fn alpha_zero_terminates_the_domain_and_components_do_not_mix() {
     let chart = Chart::from_rgba(
-        Bounds::new(3, 1, 1).unwrap(),
         CanonicalView::Front,
         3,
         1,
@@ -55,7 +53,6 @@ fn alpha_zero_terminates_the_domain_and_components_do_not_mix() {
 #[test]
 fn diagonal_foreground_texels_remain_independent_near_their_shared_corner() {
     let chart = Chart::from_rgba(
-        Bounds::new(2, 2, 1).unwrap(),
         CanonicalView::Front,
         2,
         2,
@@ -84,7 +81,6 @@ fn diagonal_foreground_texels_remain_independent_near_their_shared_corner() {
 #[test]
 fn mask_edges_and_one_pixel_wide_support_normalize_partial_tent_weight() {
     let chart = Chart::from_rgba(
-        Bounds::new(2, 1, 1).unwrap(),
         CanonicalView::Front,
         2,
         1,
@@ -106,7 +102,6 @@ fn mask_edges_and_one_pixel_wide_support_normalize_partial_tent_weight() {
 #[test]
 fn sampling_rejects_chart_boundaries_background_and_extrapolation() {
     let chart = Chart::from_rgba(
-        Bounds::new(3, 1, 1).unwrap(),
         CanonicalView::Front,
         3,
         1,

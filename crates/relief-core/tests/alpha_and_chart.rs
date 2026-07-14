@@ -71,41 +71,25 @@ fn canonical_view_rank_round_trips_for_every_view() {
 }
 
 #[test]
-fn chart_rejects_dimensions_that_disagree_with_bounds() {
-    let bounds = Bounds::new(2, 1, 3).unwrap();
-    let error =
-        Chart::from_rgba(bounds, CanonicalView::Top, 2, 2, vec![[0, 0, 0, 0]; 4]).unwrap_err();
-    assert_eq!(
-        error,
-        ChartError::DimensionMismatch {
-            expected: (2, 3),
-            actual: (2, 2)
-        }
-    );
+fn chart_dimensions_are_local_to_the_image() {
+    let chart = Chart::from_rgba(CanonicalView::Top, 2, 2, vec![[0, 0, 0, 0]; 4]).unwrap();
+
+    assert_eq!(chart.view(), CanonicalView::Top);
+    assert_eq!(chart.dimensions(), (2, 2));
 }
 
 #[test]
 fn chart_rejects_any_non_exact_texel_count() {
-    let bounds = Bounds::new(2, 1, 3).unwrap();
-
     for texel_count in [5, 7] {
-        let error = Chart::from_rgba(
-            bounds,
-            CanonicalView::Top,
-            2,
-            3,
-            vec![[0, 0, 0, 0]; texel_count],
-        )
-        .unwrap_err();
+        let error = Chart::from_rgba(CanonicalView::Top, 2, 3, vec![[0, 0, 0, 0]; texel_count])
+            .unwrap_err();
         assert_eq!(error, ChartError::PixelCount);
     }
 }
 
 #[test]
 fn chart_preserves_raw_rgba_while_decoding_relief_on_demand() {
-    let bounds = Bounds::new(2, 1, 1).unwrap();
     let chart = Chart::from_rgba(
-        bounds,
         CanonicalView::Front,
         2,
         1,

@@ -16,8 +16,8 @@ pub fn generate_examples(output: &Path) -> Result<(), Box<dyn Error>> {
 
 fn bowl_model() -> Result<DepthSpriteModel, Box<dyn Error>> {
     let bounds = Bounds::new(32, 16, 32)?;
-    let front = Chart::from_rgba(bounds, CanonicalView::Front, 32, 16, bowl_front_pixels())?;
-    let top = Chart::from_rgba(bounds, CanonicalView::Top, 32, 32, bowl_top_pixels())?;
+    let front = Chart::from_rgba(CanonicalView::Front, 32, 16, bowl_front_pixels())?;
+    let top = Chart::from_rgba(CanonicalView::Top, 32, 32, bowl_top_pixels())?;
     Ok(DepthSpriteModel::new(bounds, vec![front, top])?)
 }
 
@@ -113,7 +113,6 @@ fn block_model() -> Result<DepthSpriteModel, Box<dyn Error>> {
     .map(|(view, color)| {
         let (width, height) = view.dimensions(bounds);
         Chart::from_rgba(
-            bounds,
             view,
             width,
             height,

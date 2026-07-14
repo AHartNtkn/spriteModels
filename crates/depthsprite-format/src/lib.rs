@@ -29,10 +29,13 @@ impl DepthSpriteModel {
 
         let mut views = HashSet::with_capacity(charts.len());
         for chart in &charts {
-            if chart.bounds() != bounds {
-                return Err(PackageError::MixedBounds {
-                    expected: bounds,
-                    actual: chart.bounds(),
+            let expected = chart.view().dimensions(bounds);
+            let actual = chart.dimensions();
+            if actual != expected {
+                return Err(PackageError::DimensionMismatch {
+                    view: chart.view(),
+                    expected,
+                    actual,
                 });
             }
             if !views.insert(chart.view()) {

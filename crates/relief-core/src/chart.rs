@@ -92,7 +92,6 @@ impl CanonicalView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chart {
-    bounds: Bounds,
     view: CanonicalView,
     width: u32,
     height: u32,
@@ -101,33 +100,20 @@ pub struct Chart {
 
 impl Chart {
     pub fn from_rgba(
-        bounds: Bounds,
         view: CanonicalView,
         width: u32,
         height: u32,
         rgba: Vec<[u8; 4]>,
     ) -> Result<Self, ChartError> {
-        let expected = view.dimensions(bounds);
-        if expected != (width, height) {
-            return Err(ChartError::DimensionMismatch {
-                expected,
-                actual: (width, height),
-            });
-        }
         if rgba.len() != (width as usize) * (height as usize) {
             return Err(ChartError::PixelCount);
         }
         Ok(Self {
-            bounds,
             view,
             width,
             height,
             rgba,
         })
-    }
-
-    pub fn bounds(&self) -> Bounds {
-        self.bounds
     }
 
     pub fn view(&self) -> CanonicalView {
@@ -159,11 +145,6 @@ impl Chart {
 pub enum ChartError {
     #[error("model bounds must be nonzero")]
     ZeroBounds,
-    #[error("expected image dimensions {expected:?}, got {actual:?}")]
-    DimensionMismatch {
-        expected: (u32, u32),
-        actual: (u32, u32),
-    },
     #[error("RGBA pixel count does not match image dimensions")]
     PixelCount,
 }

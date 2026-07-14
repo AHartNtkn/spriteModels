@@ -12,8 +12,7 @@ fn save(model: &DepthSpriteModel) -> Vec<u8> {
 #[test]
 fn hidden_rgb_survives_alpha_zero_round_trip() {
     let bounds = Bounds::new(1, 1, 1).unwrap();
-    let chart =
-        Chart::from_rgba(bounds, CanonicalView::Front, 1, 1, vec![[17, 31, 47, 0]]).unwrap();
+    let chart = Chart::from_rgba(CanonicalView::Front, 1, 1, vec![[17, 31, 47, 0]]).unwrap();
     let model = DepthSpriteModel::new(bounds, vec![chart]).unwrap();
 
     let reopened = load_reader(Cursor::new(save(&model))).unwrap();

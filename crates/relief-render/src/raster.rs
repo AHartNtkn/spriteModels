@@ -1,5 +1,5 @@
 use num_rational::Ratio;
-use relief_core::{Chart, DecodedTexel, ReliefField, SourcePoint, WarpedSample};
+use relief_core::{Bounds, Chart, DecodedTexel, ReliefField, SourcePoint, WarpedSample};
 use thiserror::Error;
 
 use crate::{
@@ -48,7 +48,11 @@ struct PixelBounds {
     y_end: u32,
 }
 
-pub fn render_model(charts: &[Chart], request: &RenderRequest) -> Result<FrameBuffer, RenderError> {
+pub fn render_model(
+    bounds: Bounds,
+    charts: &[Chart],
+    request: &RenderRequest,
+) -> Result<FrameBuffer, RenderError> {
     (request.width as usize)
         .checked_mul(request.height as usize)
         .ok_or(RenderError::FrameBufferTooLarge)?;
@@ -57,7 +61,7 @@ pub fn render_model(charts: &[Chart], request: &RenderRequest) -> Result<FrameBu
         return Ok(frame);
     }
 
-    let extents = projected_extents(charts, &request.target);
+    let extents = projected_extents(bounds, charts, &request.target);
     let Some(TargetExtents {
         min_x,
         max_x,
@@ -73,10 +77,7 @@ pub fn render_model(charts: &[Chart], request: &RenderRequest) -> Result<FrameBu
         let mut raster = RasterState { frame: &mut frame };
 
         for chart in charts {
-            let Some(warp) = request
-                .target
-                .warp_coefficients(chart.view(), chart.bounds())
-            else {
+            let Some(warp) = request.target.warp_coefficients(chart.view(), bounds) else {
                 continue;
             };
             let relief = ReliefField::new(chart);
@@ -134,10 +135,12 @@ pub fn render_model(charts: &[Chart], request: &RenderRequest) -> Result<FrameBu
     Ok(frame)
 }
 
-fn projected_extents(charts: &[Chart], target: &TargetView) -> Option<TargetExtents> {
-    charts
-        .first()
-        .map(|chart| target.framing_extents(chart.bounds()))
+fn projected_extents(
+    bounds: Bounds,
+    charts: &[Chart],
+    target: &TargetView,
+) -> Option<TargetExtents> {
+    charts.first().map(|_| target.framing_extents(bounds))
 }
 
 fn rasterize_triangle(
