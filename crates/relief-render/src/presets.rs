@@ -1,5 +1,5 @@
 use num_rational::Ratio;
-use relief_core::{Bounds, CanonicalView, WarpCoefficients};
+use relief_core::{Bounds, CanonicalView, RELIEF_UNITS_PER_PIXEL, WarpCoefficients};
 
 type Vector = [Ratio<i64>; 3];
 
@@ -28,7 +28,6 @@ enum ProjectionSource {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetView {
-    preset_version: u32,
     source: ProjectionSource,
 }
 
@@ -41,16 +40,13 @@ pub(crate) struct TargetExtents {
 }
 
 impl TargetView {
-    pub const PRESET_VERSION: u32 = 1;
-
     pub fn from_camera(camera: CameraBasis) -> Self {
         Self {
-            preset_version: Self::PRESET_VERSION,
             source: ProjectionSource::Camera(camera),
         }
     }
 
-    pub fn front_v1() -> Self {
+    pub fn front() -> Self {
         Self::from_camera(CameraBasis::new(
             integer_vector(1, 0, 0),
             integer_vector(0, 1, 0),
@@ -58,7 +54,7 @@ impl TargetView {
         ))
     }
 
-    pub fn right_v1() -> Self {
+    pub fn right() -> Self {
         Self::from_camera(CameraBasis::new(
             integer_vector(0, 0, -1),
             integer_vector(0, 1, 0),
@@ -66,7 +62,7 @@ impl TargetView {
         ))
     }
 
-    pub fn top_v1() -> Self {
+    pub fn top() -> Self {
         Self::from_camera(CameraBasis::new(
             integer_vector(1, 0, 0),
             integer_vector(0, 0, 1),
@@ -74,7 +70,7 @@ impl TargetView {
         ))
     }
 
-    pub fn isometric_v1() -> Self {
+    pub fn isometric() -> Self {
         Self::from_camera(CameraBasis::new(
             [Ratio::new(1, 2), ratio_zero(), Ratio::new(1, 2)],
             [Ratio::new(1, 4), Ratio::new(1, 2), Ratio::new(-1, 4)],
@@ -92,10 +88,6 @@ impl TargetView {
             ],
             integer_vector(-1, 4, 1),
         ))
-    }
-
-    pub fn preset_version(&self) -> u32 {
-        self.preset_version
     }
 
     pub fn is_front_facing(&self, view: CanonicalView) -> bool {
@@ -131,7 +123,6 @@ impl TargetView {
 
     pub fn front_for_test() -> Self {
         Self {
-            preset_version: Self::PRESET_VERSION,
             source: ProjectionSource::IdentityAllCharts,
         }
     }
@@ -223,7 +214,7 @@ fn inward_axis(view: CanonicalView) -> Vector {
 }
 
 fn compose(camera: &CameraBasis, frame: &ChartFrame) -> WarpCoefficients {
-    let eighth = Ratio::new(1, 8);
+    let relief_unit = Ratio::new(1, RELIEF_UNITS_PER_PIXEL);
     WarpCoefficients::from_rational(
         [
             [
@@ -238,15 +229,15 @@ fn compose(camera: &CameraBasis, frame: &ChartFrame) -> WarpCoefficients {
             ],
         ],
         [
-            dot(&camera.screen_right, &frame.inward) * eighth,
-            dot(&camera.screen_down, &frame.inward) * eighth,
+            dot(&camera.screen_right, &frame.inward) * relief_unit,
+            dot(&camera.screen_down, &frame.inward) * relief_unit,
         ],
         [
             dot(&camera.depth, &frame.source_x),
             dot(&camera.depth, &frame.source_y),
             dot(&camera.depth, &frame.origin),
         ],
-        dot(&camera.depth, &frame.inward) * eighth,
+        dot(&camera.depth, &frame.inward) * relief_unit,
     )
 }
 

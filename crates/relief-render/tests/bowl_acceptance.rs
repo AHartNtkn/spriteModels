@@ -5,7 +5,7 @@ use std::{
 
 use depthsprite_format::load_path;
 use relief_core::{Bounds, CanonicalView, DecodedTexel};
-use relief_render::{RenderDiagnostic, RenderRequest, TargetView, render_model};
+use relief_render::{RenderRequest, TargetView, render_model};
 
 const TOP_RGB: [u8; 3] = [216, 156, 85];
 const FRONT_RGB: [u8; 3] = [144, 76, 52];
@@ -252,8 +252,4 @@ fn two_chart_bowl_has_front_near_rim_and_top_recessed_visible_basin() {
         [TOP_RGB[0], TOP_RGB[1], TOP_RGB[2], 255]
     );
     assert_eq!(frame.rgba_at(0, 0), [0, 0, 0, 0]);
-    assert!(!frame.diagnostics().iter().any(|diagnostic| matches!(
-        diagnostic,
-        RenderDiagnostic::ReliefBeyondOpposingPlane { .. }
-    )));
 }

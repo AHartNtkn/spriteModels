@@ -25,10 +25,6 @@ impl CanonicalViewName {
             Self::Bottom => "views/bottom.png",
         }
     }
-
-    pub(crate) fn rank(self) -> u8 {
-        CanonicalView::from(self).rank()
-    }
 }
 
 impl From<CanonicalViewName> for CanonicalView {
@@ -75,7 +71,7 @@ impl ManifestV1 {
             return Err(PackageError::UnsupportedVersion(self.version));
         }
         let [width, height, depth] = self.bounds_pixels;
-        if width == 0 || height == 0 || depth == 0 || width > 512 || height > 512 || depth > 512 {
+        if width == 0 || height == 0 || depth == 0 {
             return Err(PackageError::InvalidBounds(self.bounds_pixels));
         }
         if !(1..=6).contains(&self.views.len()) {

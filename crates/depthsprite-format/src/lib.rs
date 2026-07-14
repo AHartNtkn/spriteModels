@@ -4,15 +4,13 @@ mod manifest;
 mod save;
 
 pub use error::PackageError;
-pub use load::{MAX_ARCHIVE_SIZE, MAX_COMPRESSED_SIZE, load_path, load_reader};
+pub use load::{load_path, load_reader};
 pub use manifest::{CanonicalViewName, ManifestV1};
 pub use save::{save_path_atomic, save_writer};
 
 use std::collections::HashSet;
 
 use relief_core::{Bounds, Chart};
-
-const MAX_BOUND: u32 = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DepthSpriteModel {
@@ -22,7 +20,6 @@ pub struct DepthSpriteModel {
 
 impl DepthSpriteModel {
     pub fn new(bounds: Bounds, mut charts: Vec<Chart>) -> Result<Self, PackageError> {
-        validate_bounds(bounds)?;
         if charts.is_empty() {
             return Err(PackageError::EmptyModel);
         }
@@ -53,12 +50,4 @@ impl DepthSpriteModel {
     pub fn charts(&self) -> &[Chart] {
         &self.charts
     }
-}
-
-pub(crate) fn validate_bounds(bounds: Bounds) -> Result<(), PackageError> {
-    let dimensions = [bounds.width(), bounds.height(), bounds.depth()];
-    if dimensions.into_iter().any(|value| value > MAX_BOUND) {
-        return Err(PackageError::InvalidBounds(dimensions));
-    }
-    Ok(())
 }

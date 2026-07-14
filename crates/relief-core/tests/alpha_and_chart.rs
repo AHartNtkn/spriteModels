@@ -1,7 +1,10 @@
-use relief_core::{Bounds, CanonicalView, Chart, ChartError, DecodedTexel, decode_rgba};
+use relief_core::{
+    Bounds, CanonicalView, Chart, ChartError, DecodedTexel, RELIEF_UNITS_PER_PIXEL, decode_rgba,
+};
 
 #[test]
 fn alpha_is_background_or_exact_eighth_pixel_relief() {
+    assert_eq!(RELIEF_UNITS_PER_PIXEL, 8);
     assert_eq!(decode_rgba([9, 8, 7, 0]), DecodedTexel::Background);
     assert_eq!(
         decode_rgba([9, 8, 7, 255]),

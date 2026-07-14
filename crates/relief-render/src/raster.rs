@@ -1,14 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use num_rational::Ratio;
-use relief_core::{CanonicalView, Chart, DecodedTexel, ReliefField, SourcePoint, WarpedSample};
-
-use crate::diagnostic::normalize_diagnostics;
+use relief_core::{Chart, DecodedTexel, ReliefField, SourcePoint, WarpedSample};
 use thiserror::Error;
 
 use crate::{
-    FragmentKey, FrameBuffer, RenderDiagnostic, TargetView, framebuffer::commit_fragment,
-    presets::TargetExtents,
+    FragmentKey, FrameBuffer, TargetView, framebuffer::commit_fragment, presets::TargetExtents,
 };
 
 const MICROCELLS_PER_AXIS: i64 = 8;
@@ -39,53 +34,10 @@ pub enum RenderError {
 #[derive(Clone, Debug)]
 struct Vertex {
     warped: WarpedSample,
-    flat_screen: [Ratio<i64>; 2],
-}
-
-type EqualDepthColors = BTreeMap<Ratio<i64>, BTreeSet<(CanonicalView, [u8; 3])>>;
-
-#[derive(Clone, Copy, Debug)]
-struct TightRegion {
-    min_x: Ratio<i64>,
-    max_x: Ratio<i64>,
-    min_y: Ratio<i64>,
-    max_y: Ratio<i64>,
-}
-
-impl TightRegion {
-    fn centered(
-        request: &RenderRequest,
-        min_x: Ratio<i64>,
-        max_x: Ratio<i64>,
-        min_y: Ratio<i64>,
-        max_y: Ratio<i64>,
-    ) -> Self {
-        let center_x = Ratio::new(i64::from(request.width), 2);
-        let center_y = Ratio::new(i64::from(request.height), 2);
-        let half_width = (max_x - min_x) / 2;
-        let half_height = (max_y - min_y) / 2;
-        Self {
-            min_x: center_x - half_width,
-            max_x: center_x + half_width,
-            min_y: center_y - half_height,
-            max_y: center_y + half_height,
-        }
-    }
-
-    fn contains(self, x: u32, y: u32) -> bool {
-        let center_x = Ratio::new(2 * i64::from(x) + 1, 2);
-        let center_y = Ratio::new(2 * i64::from(y) + 1, 2);
-        center_x >= self.min_x
-            && center_x < self.max_x
-            && center_y >= self.min_y
-            && center_y < self.max_y
-    }
 }
 
 struct RasterState<'a> {
     frame: &'a mut FrameBuffer,
-    equal_depth: &'a mut [EqualDepthColors],
-    candidate_views: &'a mut [BTreeSet<CanonicalView>],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,13 +49,11 @@ struct PixelBounds {
 }
 
 pub fn render_model(charts: &[Chart], request: &RenderRequest) -> Result<FrameBuffer, RenderError> {
-    let pixel_count = (request.width as usize)
+    (request.width as usize)
         .checked_mul(request.height as usize)
         .ok_or(RenderError::FrameBufferTooLarge)?;
     let mut frame = FrameBuffer::transparent(request.width, request.height);
-    record_relief_bound_diagnostics(charts, &mut frame.diagnostics);
-    if pixel_count == 0 {
-        finish_diagnostics(&mut frame);
+    if request.width == 0 || request.height == 0 {
         return Ok(frame);
     }
 
@@ -115,20 +65,12 @@ pub fn render_model(charts: &[Chart], request: &RenderRequest) -> Result<FrameBu
         max_y,
     }) = extents
     else {
-        finish_diagnostics(&mut frame);
         return Ok(frame);
     };
     let offset_x = Ratio::new(i64::from(request.width), 2) - (min_x + max_x) / 2;
     let offset_y = Ratio::new(i64::from(request.height), 2) - (min_y + max_y) / 2;
-    let tight_region = TightRegion::centered(request, min_x, max_x, min_y, max_y);
-    let mut equal_depth = vec![BTreeMap::new(); pixel_count];
-    let mut candidate_views = vec![BTreeSet::new(); pixel_count];
     {
-        let mut raster = RasterState {
-            frame: &mut frame,
-            equal_depth: &mut equal_depth,
-            candidate_views: &mut candidate_views,
-        };
+        let mut raster = RasterState { frame: &mut frame };
 
         for chart in charts {
             let Some(warp) = request
@@ -165,15 +107,9 @@ pub fn render_model(charts: &[Chart], request: &RenderRequest) -> Result<FrameBu
                                     "microcell corner belongs to its foreground cell closure",
                                 );
                                 let mut warped = warp.apply(source.clone(), height);
-                                let mut flat = warp.apply(source.clone(), Ratio::from_integer(0));
                                 warped.screen_x += offset_x;
                                 warped.screen_y += offset_y;
-                                flat.screen_x += offset_x;
-                                flat.screen_y += offset_y;
-                                Vertex {
-                                    warped,
-                                    flat_screen: [flat.screen_x, flat.screen_y],
-                                }
+                                Vertex { warped }
                             });
 
                             rasterize_triangle(
@@ -195,73 +131,7 @@ pub fn render_model(charts: &[Chart], request: &RenderRequest) -> Result<FrameBu
         }
     }
 
-    let output_covered_pixels = frame.keys.iter().filter(|key| key.is_some()).count() as u32;
-    let conflicting_pixels = candidate_views
-        .iter()
-        .filter(|views| views.len() > 1)
-        .count() as u32;
-    if output_covered_pixels > 0
-        && u64::from(conflicting_pixels) * 5 > u64::from(output_covered_pixels)
-    {
-        frame.diagnostics.push(RenderDiagnostic::HeavyChartOverlap {
-            covered_pixels: output_covered_pixels,
-            conflicting_pixels,
-        });
-    }
-
-    let total_pixels = (0..request.height)
-        .flat_map(|y| (0..request.width).map(move |x| (x, y)))
-        .filter(|(x, y)| tight_region.contains(*x, *y))
-        .count() as u32;
-    let covered_pixels = frame
-        .keys
-        .iter()
-        .enumerate()
-        .filter(|(index, key)| {
-            let x = (*index % request.width as usize) as u32;
-            let y = (*index / request.width as usize) as u32;
-            key.is_some() && tight_region.contains(x, y)
-        })
-        .count() as u32;
-    if total_pixels > 0 && u64::from(covered_pixels) * 10 < u64::from(total_pixels) * 7 {
-        frame
-            .diagnostics
-            .push(RenderDiagnostic::InsufficientCoverage {
-                covered_pixels,
-                total_pixels,
-            });
-    }
-
-    finish_diagnostics(&mut frame);
     Ok(frame)
-}
-
-fn record_relief_bound_diagnostics(charts: &[Chart], diagnostics: &mut Vec<RenderDiagnostic>) {
-    for chart in charts {
-        let opposing_plane_eighths = match chart.view() {
-            CanonicalView::Front | CanonicalView::Back => chart.bounds().depth().saturating_mul(8),
-            CanonicalView::Left | CanonicalView::Right => chart.bounds().width().saturating_mul(8),
-            CanonicalView::Top | CanonicalView::Bottom => chart.bounds().height().saturating_mul(8),
-        };
-        let (width, height) = chart.dimensions();
-        for source_y in 0..height {
-            for source_x in 0..width {
-                if let Some(DecodedTexel::Relief { eighths, .. }) = chart.texel(source_x, source_y)
-                    && u32::from(eighths) > opposing_plane_eighths
-                {
-                    diagnostics.push(RenderDiagnostic::ReliefBeyondOpposingPlane {
-                        view: chart.view(),
-                        source_x,
-                        source_y,
-                    });
-                }
-            }
-        }
-    }
-}
-
-fn finish_diagnostics(frame: &mut FrameBuffer) {
-    normalize_diagnostics(&mut frame.diagnostics);
 }
 
 fn projected_extents(charts: &[Chart], target: &TargetView) -> Option<TargetExtents> {
@@ -281,7 +151,6 @@ fn rasterize_triangle(
         _ => unreachable!("only an owning foreground cell reaches rasterization"),
     };
     let [first, second, third] = vertices;
-    let flat_area = flat_edge(first, second, third.flat_screen[0], third.flat_screen[1]);
     let mut area = edge(
         first,
         second,
@@ -290,15 +159,6 @@ fn rasterize_triangle(
     );
     if area == Ratio::from_integer(0) {
         return;
-    }
-    if flat_area != Ratio::from_integer(0)
-        && (flat_area < Ratio::from_integer(0)) != (area < Ratio::from_integer(0))
-    {
-        state.frame.diagnostics.push(RenderDiagnostic::WarpFold {
-            view: chart.view(),
-            source_x: source_cell.0,
-            source_y: source_cell.1,
-        });
     }
     if area < Ratio::from_integer(0) {
         vertices.swap(1, 2);
@@ -337,32 +197,6 @@ fn rasterize_triangle(
                 &vertices[2].warped.depth,
             ]);
             let (source_x, source_y) = source_cell;
-            let index = (y * state.frame.width() + x) as usize;
-            state.candidate_views[index].insert(chart.view());
-            for &(other_view, other_rgb) in
-                state.equal_depth[index].get(&depth).into_iter().flatten()
-            {
-                if other_rgb != rgb {
-                    let (first, second) = if other_view < chart.view() {
-                        (other_view, chart.view())
-                    } else {
-                        (chart.view(), other_view)
-                    };
-                    state
-                        .frame
-                        .diagnostics
-                        .push(RenderDiagnostic::EqualDepthColorConflict {
-                            x,
-                            y,
-                            first,
-                            second,
-                        });
-                }
-            }
-            state.equal_depth[index]
-                .entry(depth)
-                .or_default()
-                .insert((chart.view(), rgb));
             commit_fragment(
                 state.frame,
                 x,
@@ -425,11 +259,6 @@ fn edge(first: &Vertex, second: &Vertex, x: &Ratio<i64>, y: &Ratio<i64>) -> Rati
         - (second.warped.screen_y - first.warped.screen_y) * (*x - first.warped.screen_x)
 }
 
-fn flat_edge(first: &Vertex, second: &Vertex, x: Ratio<i64>, y: Ratio<i64>) -> Ratio<i64> {
-    (second.flat_screen[0] - first.flat_screen[0]) * (y - first.flat_screen[1])
-        - (second.flat_screen[1] - first.flat_screen[1]) * (x - first.flat_screen[0])
-}
-
 fn covered_by_top_left_rule(vertices: &[&Vertex; 3], x: &Ratio<i64>, y: &Ratio<i64>) -> bool {
     (0..3).all(|index| {
         let first = vertices[index];
@@ -462,7 +291,6 @@ mod tests {
                 screen_y: y,
                 depth: Ratio::from_integer(0),
             },
-            flat_screen: [Ratio::from_integer(0), Ratio::from_integer(0)],
         }
     }
 

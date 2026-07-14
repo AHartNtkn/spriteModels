@@ -11,9 +11,9 @@ fn integer_vector(x: i64, y: i64, z: i64) -> [Ratio<i64>; 3] {
 }
 
 #[test]
-fn v1_front_is_identity_for_front_and_culls_edge_on_and_back_facing_charts() {
+fn front_is_identity_for_front_and_culls_edge_on_and_back_facing_charts() {
     let bounds = Bounds::new(2, 3, 4).unwrap();
-    let target = TargetView::front_v1();
+    let target = TargetView::front();
     let warp = target
         .warp_coefficients(CanonicalView::Front, bounds)
         .unwrap();
@@ -22,7 +22,6 @@ fn v1_front_is_identity_for_front_and_culls_edge_on_and_back_facing_charts() {
         Ratio::from_integer(8),
     );
 
-    assert_eq!(target.preset_version(), 1);
     assert_eq!(sample.screen_x, Ratio::new(1, 2));
     assert_eq!(sample.screen_y, Ratio::new(3, 2));
     assert_eq!(sample.depth, Ratio::from_integer(1));
@@ -31,11 +30,11 @@ fn v1_front_is_identity_for_front_and_culls_edge_on_and_back_facing_charts() {
 }
 
 #[test]
-fn v1_right_and_top_presets_compose_signed_chart_frames() {
+fn right_and_top_views_compose_signed_chart_frames() {
     let bounds = Bounds::new(2, 3, 4).unwrap();
     let source = SourcePoint::new(Ratio::from_integer(1), Ratio::new(1, 2));
 
-    let right = TargetView::right_v1()
+    let right = TargetView::right()
         .warp_coefficients(CanonicalView::Right, bounds)
         .unwrap()
         .apply(source.clone(), Ratio::from_integer(8));
@@ -43,7 +42,7 @@ fn v1_right_and_top_presets_compose_signed_chart_frames() {
     assert_eq!(right.screen_y, Ratio::new(1, 2));
     assert_eq!(right.depth, Ratio::from_integer(-1));
 
-    let top = TargetView::top_v1()
+    let top = TargetView::top()
         .warp_coefficients(CanonicalView::Top, bounds)
         .unwrap()
         .apply(source, Ratio::from_integer(8));
@@ -53,9 +52,9 @@ fn v1_right_and_top_presets_compose_signed_chart_frames() {
 }
 
 #[test]
-fn v1_isometric_basis_is_exact_and_exposes_front_right_top_only() {
+fn isometric_basis_is_exact_and_exposes_front_right_top_only() {
     let bounds = Bounds::new(4, 4, 4).unwrap();
-    let target = TargetView::isometric_v1();
+    let target = TargetView::isometric();
     let front = target
         .warp_coefficients(CanonicalView::Front, bounds)
         .unwrap()

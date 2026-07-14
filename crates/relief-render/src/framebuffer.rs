@@ -1,8 +1,6 @@
 use num_rational::Ratio;
 use relief_core::CanonicalView;
 
-use crate::RenderDiagnostic;
-
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct FragmentKey {
     pub depth: Ratio<i64>,
@@ -25,7 +23,6 @@ pub struct FrameBuffer {
     height: u32,
     pub(crate) keys: Vec<Option<FragmentKey>>,
     pub(crate) rgba: Vec<[u8; 4]>,
-    pub(crate) diagnostics: Vec<RenderDiagnostic>,
 }
 
 impl FrameBuffer {
@@ -36,7 +33,6 @@ impl FrameBuffer {
             height,
             keys: vec![None; pixel_count],
             rgba: vec![[0, 0, 0, 0]; pixel_count],
-            diagnostics: Vec::new(),
         }
     }
 
@@ -50,10 +46,6 @@ impl FrameBuffer {
 
     pub fn pixels(&self) -> &[[u8; 4]] {
         &self.rgba
-    }
-
-    pub fn diagnostics(&self) -> &[RenderDiagnostic] {
-        &self.diagnostics
     }
 
     pub fn rgba_at(&self, x: u32, y: u32) -> [u8; 4] {

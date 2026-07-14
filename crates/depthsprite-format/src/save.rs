@@ -7,7 +7,7 @@ use std::{
 
 use png::{BitDepth, ColorType, Compression, Encoder, Filter};
 use relief_core::{Chart, DecodedTexel};
-use zip::{CompressionMethod, DateTime, ZipWriter, write::SimpleFileOptions};
+use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 use crate::{CanonicalViewName, DepthSpriteModel, ManifestV1, PackageError};
 
@@ -16,10 +16,7 @@ pub fn save_writer<W: Write + Seek>(
     writer: &mut W,
 ) -> Result<(), PackageError> {
     let mut archive = ZipWriter::new(writer);
-    let options = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
-        .last_modified_time(DateTime::default())
-        .unix_permissions(0o644);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
     let bounds = model.bounds();
     let manifest = ManifestV1 {
@@ -75,7 +72,6 @@ pub fn save_path_atomic(
         ));
     }
 
-    sync_parent(destination)?;
     Ok(())
 }
 
@@ -138,60 +134,8 @@ fn report_cleanup_result(
     }
 }
 
-#[cfg(unix)]
 fn replace_file(source: &Path, destination: &Path) -> Result<(), PackageError> {
     std::fs::rename(source, destination)?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn replace_file(source: &Path, destination: &Path) -> Result<(), PackageError> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination_wide: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    // SAFETY: Both paths are owned, NUL-terminated UTF-16 buffers that remain alive for the call.
-    let result = unsafe {
-        MoveFileExW(
-            source_wide.as_ptr(),
-            destination_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_parent(destination: &Path) -> Result<(), PackageError> {
-    let parent = destination
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty());
-    match std::fs::File::open(parent.unwrap_or_else(|| Path::new(".")))?.sync_all() {
-        Ok(()) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
-            ) => {}
-        Err(error) => return Err(error.into()),
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn sync_parent(_destination: &Path) -> Result<(), PackageError> {
-    // MOVEFILE_WRITE_THROUGH flushes the move operation; Windows does not offer a portable
-    // directory-handle equivalent to Unix directory fsync through std.
     Ok(())
 }
 
