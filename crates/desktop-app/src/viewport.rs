@@ -178,7 +178,10 @@ pub(crate) fn show(
     }
 
     let delta = response.drag_delta();
-    let drag = drag_from_pointer_delta(response.dragged(), [delta.x, delta.y]);
+    let drag = drag_from_pointer_delta(
+        response.dragged_by(eframe::egui::PointerButton::Primary),
+        [delta.x, delta.y],
+    );
     let scroll = if response.hovered() {
         ui.input(|input| input.smooth_scroll_delta.y)
     } else {
@@ -202,9 +205,47 @@ pub(crate) fn drag_from_pointer_delta(dragged: bool, delta: [f32; 2]) -> Option<
 
 #[cfg(test)]
 mod tests {
+    use eframe::egui::{Context, Event, Modifiers, PointerButton, RawInput, Rect, pos2, vec2};
     use relief_render::{TargetView, render_model};
 
-    use super::{ViewPreset, ViewportState, drag_from_pointer_delta};
+    use super::{ViewPreset, ViewportInput, ViewportState, drag_from_pointer_delta, show};
+
+    fn viewport_frame(context: &Context, events: Vec<Event>) -> ViewportInput {
+        let mut input = None;
+        let _ = context.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 200.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                input = Some(show(ui, None, &ViewportState::default()));
+            },
+        );
+        input.unwrap()
+    }
+
+    fn drag_with_button(button: PointerButton) -> ViewportInput {
+        let context = Context::default();
+        let position = pos2(50.0, 50.0);
+        viewport_frame(&context, Vec::new());
+        viewport_frame(
+            &context,
+            vec![
+                Event::PointerMoved(position),
+                Event::PointerButton {
+                    pos: position,
+                    button,
+                    pressed: true,
+                    modifiers: Modifiers::default(),
+                },
+            ],
+        );
+        viewport_frame(
+            &context,
+            vec![Event::PointerMoved(position + vec2(6.0, -3.0))],
+        )
+    }
 
     #[test]
     fn every_effective_camera_mutation_advances_generation() {
@@ -263,6 +304,30 @@ mod tests {
         assert_eq!(drag_from_pointer_delta(true, [0.0, 0.0]), None);
         assert_eq!(drag_from_pointer_delta(true, [0.2, -0.2]), None);
         assert_eq!(drag_from_pointer_delta(true, [3.0, -2.0]), Some((3, 2)));
+    }
+
+    #[test]
+    fn only_primary_button_drag_mutates_orbit_and_queues_generation() {
+        for button in [PointerButton::Secondary, PointerButton::Middle] {
+            let input = drag_with_button(button);
+            let mut viewport = ViewportState::default();
+            let original_target = viewport.target().clone();
+
+            let generation = input.drag.and_then(|(x, y)| viewport.drag(x, y));
+
+            assert_eq!(generation, None, "{button:?} drag queued a render");
+            assert_eq!(viewport.generation(), 0);
+            assert_eq!(viewport.target(), &original_target);
+        }
+
+        let input = drag_with_button(PointerButton::Primary);
+        let mut viewport = ViewportState::default();
+        let original_target = viewport.target().clone();
+        let generation = input.drag.and_then(|(x, y)| viewport.drag(x, y));
+
+        assert_eq!(generation, Some(1));
+        assert_eq!(viewport.generation(), 1);
+        assert_ne!(viewport.target(), &original_target);
     }
 
     #[test]
