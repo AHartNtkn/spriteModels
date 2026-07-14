@@ -1,9 +1,6 @@
 use std::{fs::File, path::Path};
 
-use desktop_app::{
-    layout::CANONICAL_SOURCE_ORDER,
-    source_grid::{add_next_source, card_header, remove_source, replace_source_from_png},
-};
+use desktop_app::source_grid::{add_source, card_header, remove_source, replace_source_from_png};
 use editor_core::EditorDocument;
 use png::{BitDepth, ColorType, Encoder};
 use relief_core::{Bounds, CanonicalView, EMPTY_RGBA};
@@ -29,20 +26,12 @@ fn write_png(path: &Path, pixels: &[[u8; 4]]) {
 }
 
 #[test]
-fn compact_add_action_creates_sources_in_canonical_display_order() {
+fn add_action_accepts_an_explicit_unoccupied_side() {
     let mut document = document();
-    let added = CANONICAL_SOURCE_ORDER
-        .into_iter()
-        .skip(1)
-        .map(|expected| {
-            let actual = add_next_source(&mut document).unwrap();
-            assert_eq!(actual, expected);
-            actual
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(added, CANONICAL_SOURCE_ORDER[1..]);
-    assert_eq!(document.sources().len(), 6);
-    assert!(add_next_source(&mut document).is_err());
+    add_source(&mut document, CanonicalView::Back).unwrap();
+
+    assert!(document.source(CanonicalView::Back).is_some());
+    assert!(document.source(CanonicalView::Right).is_none());
 }
 
 #[test]
@@ -53,53 +42,29 @@ fn add_import_replace_and_remove_are_undoable_document_commands() {
     write_png(&path, &replacement);
     let mut document = document();
 
-    let added = add_next_source(&mut document).unwrap();
-    assert_eq!(added, CanonicalView::Right);
-    assert!(document.source(added).is_some());
+    add_source(&mut document, CanonicalView::Back).unwrap();
+    assert!(document.source(CanonicalView::Back).is_some());
     assert!(document.undo());
-    assert!(document.source(added).is_none());
+    assert!(document.source(CanonicalView::Back).is_none());
 
     replace_source_from_png(&mut document, FRONT, &path).unwrap();
     assert_eq!(document.source(FRONT).unwrap().rgba(), replacement);
     assert!(document.undo());
     assert_eq!(document.source(FRONT).unwrap().rgba(), &[EMPTY_RGBA; 2]);
 
-    add_next_source(&mut document).unwrap();
-    remove_source(&mut document, CanonicalView::Right).unwrap();
-    assert!(document.source(CanonicalView::Right).is_none());
+    add_source(&mut document, CanonicalView::Back).unwrap();
+    remove_source(&mut document, CanonicalView::Back).unwrap();
+    assert!(document.source(CanonicalView::Back).is_none());
     assert!(document.undo());
-    assert!(document.source(CanonicalView::Right).is_some());
+    assert!(document.source(CanonicalView::Back).is_some());
 }
 
 #[test]
-fn headers_report_fallback_assignment_and_update_after_override() {
-    for (view, opposite, expected) in [
-        (CanonicalView::Front, CanonicalView::Back, "Front → Back"),
-        (CanonicalView::Right, CanonicalView::Left, "Right → Left"),
-        (CanonicalView::Top, CanonicalView::Bottom, "Top → Bottom"),
-        (CanonicalView::Back, CanonicalView::Front, "Back → Front"),
-        (CanonicalView::Left, CanonicalView::Right, "Left → Right"),
-        (CanonicalView::Bottom, CanonicalView::Top, "Bottom → Top"),
-    ] {
-        let mut document = EditorDocument::new(Bounds::new(2, 1, 1).unwrap(), view);
-        assert_eq!(card_header(&document, view).unwrap().label, expected);
+fn card_headers_only_name_the_assigned_side() {
+    let document = document();
 
-        document.add_source(opposite).unwrap();
-        assert_eq!(card_header(&document, view).unwrap().label, view_name(view));
-        assert_eq!(
-            card_header(&document, opposite).unwrap().label,
-            view_name(opposite)
-        );
-    }
-}
-
-fn view_name(view: CanonicalView) -> &'static str {
-    match view {
-        CanonicalView::Front => "Front",
-        CanonicalView::Right => "Right",
-        CanonicalView::Top => "Top",
-        CanonicalView::Back => "Back",
-        CanonicalView::Left => "Left",
-        CanonicalView::Bottom => "Bottom",
-    }
+    assert_eq!(
+        card_header(&document, CanonicalView::Front).unwrap().label,
+        "Front"
+    );
 }

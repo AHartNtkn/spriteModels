@@ -139,6 +139,7 @@ pub(crate) struct PaletteObservation {
     pub rect: egui::Rect,
     pub controls: Vec<egui::Rect>,
     pub color_popover: Option<ColorPopoverObservation>,
+    pub relief_popover: Option<ReliefPopoverObservation>,
 }
 
 #[cfg(test)]
@@ -148,6 +149,13 @@ pub(crate) struct ColorPopoverObservation {
     pub rgb_rows: [egui::Rect; 3],
     pub rgb_labels: [egui::Rect; 3],
     pub hex: egui::Rect,
+}
+
+#[cfg(test)]
+pub(crate) struct ReliefPopoverObservation {
+    pub rect: egui::Rect,
+    pub slider: egui::Rect,
+    pub maximum: u8,
 }
 
 impl PaletteState {
@@ -165,6 +173,8 @@ impl PaletteState {
         let mut controls = Vec::new();
         #[cfg(test)]
         let mut color_popover = None;
+        #[cfg(test)]
+        let mut relief_popover = None;
         let palette = ui.vertical(|ui| {
             for entry in tool_entries() {
                 let selected = document.tool() == entry.tool;
@@ -289,14 +299,13 @@ impl PaletteState {
 
             let depth_response = ui.menu_button("Relief", |ui| {
                 ui.set_min_width(190.0);
+                let maximum = document.maximum_inward_depth();
                 let mut relief = match document.current_depth() {
                     DepthValue::Empty => 0,
                     DepthValue::Relief(value) => value.get(),
                 };
-                if ui
-                    .add(egui::Slider::new(&mut relief, 0..=254).text("relief"))
-                    .changed()
-                {
+                let slider = ui.add(egui::Slider::new(&mut relief, 0..=maximum).text("relief"));
+                if slider.changed() {
                     document.set_current_depth(DepthValue::Relief(
                         ReliefValue::new(relief).expect("slider enforces valid relief"),
                     ));
@@ -304,6 +313,14 @@ impl PaletteState {
                 let labels = relief_labels(document.current_depth());
                 ui.label(labels.units);
                 ui.label(labels.model_pixels);
+                #[cfg(test)]
+                {
+                    relief_popover = Some(ReliefPopoverObservation {
+                        rect: ui.min_rect(),
+                        slider: slider.rect,
+                        maximum,
+                    });
+                }
             });
             #[cfg(test)]
             controls.push(depth_response.response.rect);
@@ -318,6 +335,7 @@ impl PaletteState {
                 rect: palette.response.rect,
                 controls,
                 color_popover,
+                relief_popover,
             },
         }
     }
@@ -376,6 +394,30 @@ mod tests {
             .unwrap_or_else(|| panic!("palette did not paint {text:?}"))
     }
 
+    fn click(
+        context: &egui::Context,
+        palette: &mut PaletteState,
+        document: &mut EditorDocument,
+        position: Pos2,
+    ) -> PaletteObservation {
+        let (_, clicked) = run_frame(
+            context,
+            palette,
+            document,
+            vec![
+                Event::PointerMoved(position),
+                pointer_button(position, true),
+                pointer_button(position, false),
+            ],
+        );
+        let (_, settled) = run_frame(context, palette, document, Vec::new());
+        if settled.color_popover.is_some() || settled.relief_popover.is_some() {
+            settled
+        } else {
+            clicked
+        }
+    }
+
     #[test]
     fn color_button_opens_embedded_picker_rgb_and_hex_controls_with_contained_labels() {
         let context = egui::Context::default();
@@ -421,5 +463,48 @@ mod tests {
                 "the {label} label is rendered"
             );
         }
+    }
+
+    #[test]
+    fn relief_slider_uses_the_selected_sources_maximum_inward_depth() {
+        let context = egui::Context::default();
+        let mut document = EditorDocument::new(Bounds::new(2, 3, 5).unwrap(), CanonicalView::Front);
+        document.add_source(CanonicalView::Top).unwrap();
+        assert_eq!(document.maximum_inward_depth(), 12);
+        let mut palette = PaletteState::new(&document);
+
+        let (_, initial) = run_frame(&context, &mut palette, &mut document, Vec::new());
+        let opened = click(
+            &context,
+            &mut palette,
+            &mut document,
+            initial.controls[7].center(),
+        );
+        let relief = opened
+            .relief_popover
+            .expect("Relief opens its slider popover");
+        assert_eq!(relief.maximum, document.maximum_inward_depth());
+        assert!(relief.rect.contains_rect(relief.slider));
+
+        let slider_position = relief.slider.left_center() + egui::vec2(98.0, 0.0);
+        run_frame(
+            &context,
+            &mut palette,
+            &mut document,
+            vec![
+                Event::PointerMoved(slider_position),
+                pointer_button(slider_position, true),
+            ],
+        );
+        run_frame(
+            &context,
+            &mut palette,
+            &mut document,
+            vec![pointer_button(slider_position, false)],
+        );
+        assert_eq!(
+            document.current_depth(),
+            DepthValue::Relief(ReliefValue::new(12).unwrap())
+        );
     }
 }

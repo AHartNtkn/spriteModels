@@ -4,7 +4,7 @@ use desktop_app::canvas::{
 };
 use editor_core::{ActiveLayer, EditorDocument, Tool};
 use eframe::egui::{self, Color32, Pos2, Rect, pos2};
-use relief_core::{Bounds, CanonicalView, EMPTY_RGBA};
+use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart, EMPTY_RGBA};
 
 const VIEW: CanonicalView = CanonicalView::Front;
 
@@ -33,8 +33,18 @@ fn run_pair_frame(
     document: &mut EditorDocument,
     events: Vec<egui::Event>,
 ) -> egui::FullOutput {
+    run_view_pair_frame(context, state, document, VIEW, events)
+}
+
+fn run_view_pair_frame(
+    context: &egui::Context,
+    state: &mut desktop_app::canvas::CanvasPairState,
+    document: &mut EditorDocument,
+    view: CanonicalView,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
     context.run_ui(raw_input(events), |ui| {
-        state.show_pair(ui, document, VIEW, COLOR_RECT, DEPTH_RECT);
+        state.show_pair(ui, document, view, COLOR_RECT, DEPTH_RECT);
     })
 }
 
@@ -133,6 +143,39 @@ fn color_projection_shows_stored_rgb_even_when_depth_is_empty() {
     assert_eq!(
         display_pixels(&document, VIEW, CanvasKind::Depth),
         [Color32::MAGENTA]
+    );
+}
+
+#[test]
+fn alpha_223_displays_the_same_gray_for_views_with_different_depth_limits() {
+    let bounds = Bounds::new(1, 16, 8).unwrap();
+    let mut front = vec![EMPTY_RGBA; 16];
+    front[0] = [1, 2, 3, 223];
+    let mut top = vec![EMPTY_RGBA; 8];
+    top[0] = [4, 5, 6, 223];
+    let document = EditorDocument::from_model(
+        AuthoredModel::new(
+            bounds,
+            vec![
+                Chart::from_rgba(CanonicalView::Front, 1, 16, front).unwrap(),
+                Chart::from_rgba(CanonicalView::Top, 1, 8, top).unwrap(),
+            ],
+        )
+        .unwrap(),
+        None,
+    );
+
+    assert_ne!(
+        CanonicalView::Front.maximum_inward_depth(bounds),
+        CanonicalView::Top.maximum_inward_depth(bounds)
+    );
+    assert_eq!(
+        display_pixels(&document, CanonicalView::Front, CanvasKind::Depth)[0],
+        display_pixels(&document, CanonicalView::Top, CanvasKind::Depth)[0]
+    );
+    assert_eq!(
+        display_pixels(&document, CanonicalView::Front, CanvasKind::Depth)[0],
+        Color32::from_gray(32)
     );
 }
 
@@ -309,6 +352,38 @@ fn fill_and_eyedropper_dispatch_through_pair_widget_frames() {
     eyedrop.set_tool(Tool::Eyedropper);
     click_pair(&context, &mut state, &mut eyedrop, COLOR_RECT.center());
     assert_eq!(eyedrop.current_rgb(), [71, 81, 91]);
+}
+
+#[test]
+fn primary_press_selects_its_source_before_selecting_the_layer() {
+    let context = egui::Context::default();
+    let mut state = desktop_app::canvas::CanvasPairState::default();
+    let mut document = EditorDocument::new(Bounds::new(2, 3, 4).unwrap(), CanonicalView::Front);
+    document.add_source(CanonicalView::Top).unwrap();
+    document.select_source(CanonicalView::Front).unwrap();
+    document.set_active_layer(ActiveLayer::Depth);
+    let position = COLOR_RECT.center();
+
+    run_view_pair_frame(
+        &context,
+        &mut state,
+        &mut document,
+        CanonicalView::Top,
+        Vec::new(),
+    );
+    run_view_pair_frame(
+        &context,
+        &mut state,
+        &mut document,
+        CanonicalView::Top,
+        vec![
+            moved(position),
+            button(position, egui::PointerButton::Primary, true),
+        ],
+    );
+
+    assert_eq!(document.selected_view(), CanonicalView::Top);
+    assert_eq!(document.active_layer(), ActiveLayer::Color);
 }
 
 #[test]

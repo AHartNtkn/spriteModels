@@ -390,7 +390,9 @@ impl CanvasPairState {
 
         if ui.input(|input| input.pointer.primary_pressed()) {
             if let (Some((kind, _, _)), Some(pixel)) = (hovered_canvas, self.hover) {
-                let result = self.stroke.pointer_down(document, view, kind, pixel);
+                let result = document
+                    .select_source(view)
+                    .and_then(|()| self.stroke.pointer_down(document, view, kind, pixel));
                 self.capture(result);
             }
         } else if ui.input(|input| input.pointer.primary_down())
