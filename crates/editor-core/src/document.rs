@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use depthsprite_format::DepthSpriteModel;
 use relief_core::{Bounds, CanonicalView, Chart};
 
-use crate::{DepthValue, EditorError, SourceSprite, fallback::resolve_charts};
+use crate::{DepthValue, EditorError, ReliefValue, SourceSprite, fallback::resolve_charts};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActiveLayer {
@@ -30,6 +30,16 @@ pub(crate) struct DocumentState {
     pub(crate) current_depth: DepthValue,
 }
 
+impl DocumentState {
+    pub(crate) fn has_same_persistent_content(&self, other: &Self) -> bool {
+        self.bounds == other.bounds && self.has_same_authored_sources(other)
+    }
+
+    pub(crate) fn has_same_authored_sources(&self, other: &Self) -> bool {
+        self.sources == other.sources
+    }
+}
+
 pub struct EditorDocument {
     pub(crate) state: DocumentState,
     pub(crate) saved_state: DocumentState,
@@ -49,7 +59,9 @@ impl EditorDocument {
             active_layer: ActiveLayer::Color,
             tool: Tool::Pencil,
             current_rgb: [0, 0, 0],
-            current_depth: DepthValue::Relief(0),
+            current_depth: DepthValue::Relief(
+                ReliefValue::new(0).expect("zero relief is always valid"),
+            ),
         };
         Self::from_clean_state(state, None)
     }
@@ -72,7 +84,9 @@ impl EditorDocument {
             active_layer: ActiveLayer::Color,
             tool: Tool::Pencil,
             current_rgb: [0, 0, 0],
-            current_depth: DepthValue::Relief(0),
+            current_depth: DepthValue::Relief(
+                ReliefValue::new(0).expect("zero relief is always valid"),
+            ),
         };
         Ok(Self::from_clean_state(state, path))
     }
@@ -190,7 +204,7 @@ impl EditorDocument {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.state != self.saved_state
+        !self.state.has_same_persistent_content(&self.saved_state)
     }
 
     pub fn path(&self) -> Option<&Path> {

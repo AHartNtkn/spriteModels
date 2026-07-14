@@ -1,5 +1,5 @@
 use depthsprite_format::DepthSpriteModel;
-use editor_core::{ActiveLayer, DepthValue, EditorDocument, SourceSprite};
+use editor_core::{ActiveLayer, DepthValue, EditorDocument, ReliefValue, SourceSprite};
 use relief_core::{Bounds, CanonicalView, Chart};
 
 const FRONT: CanonicalView = CanonicalView::Front;
@@ -23,6 +23,10 @@ fn pixels(document: &EditorDocument, view: CanonicalView) -> Vec<[u8; 4]> {
     document.source(view).unwrap().rgba().to_vec()
 }
 
+fn relief(value: u8) -> DepthValue {
+    DepthValue::Relief(ReliefValue::new(value).unwrap())
+}
+
 #[test]
 fn several_pixel_writes_in_one_drag_are_one_undo_step() {
     let original = vec![[1, 2, 3, 4]; 3];
@@ -42,6 +46,24 @@ fn several_pixel_writes_in_one_drag_are_one_undo_step() {
     assert!(!document.can_undo());
     assert!(document.redo());
     assert_eq!(pixels(&document, FRONT), vec![[9, 8, 7, 4]; 3]);
+}
+
+#[test]
+fn selection_changes_without_pixel_writes_do_not_create_a_stroke_command() {
+    let original = vec![[7, 8, 9, 200], [1, 2, 3, 0]];
+    let mut document = document(2, 1, original.clone());
+
+    document.begin_stroke().unwrap();
+    document.set_current_rgb([90, 91, 92]);
+    document.eyedrop(FRONT, 0, 0).unwrap();
+    document.set_active_layer(ActiveLayer::Depth);
+    document.set_current_depth(relief(42));
+    document.eyedrop(FRONT, 1, 0).unwrap();
+
+    assert!(!document.finish_stroke().unwrap());
+    assert_eq!(pixels(&document, FRONT), original);
+    assert!(!document.can_undo());
+    assert!(!document.undo());
 }
 
 #[test]
@@ -102,7 +124,7 @@ fn successful_mutations_and_restorations_advance_revision_monotonically() {
     let original = vec![[1, 2, 3, 4]; 2];
     let mut document = document(2, 1, original.clone());
     document.set_active_layer(ActiveLayer::Depth);
-    document.set_current_depth(DepthValue::Relief(10)).unwrap();
+    document.set_current_depth(relief(10));
     let initial = document.revision();
 
     document.begin_stroke().unwrap();

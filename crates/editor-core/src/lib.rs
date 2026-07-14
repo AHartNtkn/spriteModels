@@ -5,7 +5,7 @@ mod history;
 mod source;
 
 pub use document::{ActiveLayer, EditorDocument, Tool};
-pub use edit::DepthValue;
+pub use edit::{DepthValue, ReliefValue};
 pub use fallback::opposite;
 pub use source::SourceSprite;
 

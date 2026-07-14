@@ -5,7 +5,38 @@ use crate::{ActiveLayer, EditorDocument, EditorError, SourceSprite};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DepthValue {
     Empty,
-    Relief(u8),
+    Relief(ReliefValue),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReliefValue(u8);
+
+impl ReliefValue {
+    pub const fn new(value: u8) -> Result<Self, EditorError> {
+        if value <= 254 {
+            Ok(Self(value))
+        } else {
+            Err(EditorError::InvalidRelief(value))
+        }
+    }
+
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for ReliefValue {
+    type Error = EditorError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ReliefValue> for u8 {
+    fn from(value: ReliefValue) -> Self {
+        value.get()
+    }
 }
 
 impl EditorDocument {
@@ -17,12 +48,8 @@ impl EditorDocument {
         self.state.current_rgb = rgb;
     }
 
-    pub fn set_current_depth(&mut self, depth: DepthValue) -> Result<(), EditorError> {
-        if let DepthValue::Relief(255) = depth {
-            return Err(EditorError::InvalidRelief(255));
-        }
+    pub fn set_current_depth(&mut self, depth: DepthValue) {
         self.state.current_depth = depth;
-        Ok(())
     }
 
     pub fn pencil_pixel(
@@ -44,7 +71,7 @@ impl EditorDocument {
                 let DepthValue::Relief(relief) = self.state.current_depth else {
                     return Ok(false);
                 };
-                [pixel[0], pixel[1], pixel[2], 255 - relief]
+                [pixel[0], pixel[1], pixel[2], 255 - relief.get()]
             }
         };
         self.write_live_pixel(view, x, y, replacement)
@@ -94,7 +121,7 @@ impl EditorDocument {
                     return Ok(false);
                 };
                 let target = rgba[start][3];
-                let replacement = 255 - relief;
+                let replacement = 255 - relief.get();
                 if target == replacement {
                     return Ok(false);
                 }
@@ -121,7 +148,10 @@ impl EditorDocument {
                 self.state.current_depth = if pixel[3] == 0 {
                     DepthValue::Empty
                 } else {
-                    DepthValue::Relief(255 - pixel[3])
+                    DepthValue::Relief(
+                        ReliefValue::new(255 - pixel[3])
+                            .expect("nonempty alpha always decodes to relief 0..=254"),
+                    )
                 };
             }
         }

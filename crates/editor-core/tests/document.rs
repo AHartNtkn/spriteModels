@@ -72,6 +72,27 @@ fn replacing_a_source_rejects_dimensions_that_do_not_match_model_bounds() {
 }
 
 #[test]
+fn removing_the_only_source_returns_last_source_without_changing_the_document() {
+    let mut document = EditorDocument::new(bounds(), CanonicalView::Front);
+    let before_sources: Vec<_> = document.sources().cloned().collect();
+    let before_selection = document.selected_view();
+    let before_revision = document.revision();
+
+    let error = document.remove_source(CanonicalView::Front).unwrap_err();
+
+    assert!(matches!(error, EditorError::LastSource));
+    assert_eq!(
+        document.sources().cloned().collect::<Vec<_>>(),
+        before_sources
+    );
+    assert_eq!(document.selected_view(), before_selection);
+    assert_eq!(document.revision(), before_revision);
+    assert!(!document.is_dirty());
+    assert!(!document.can_undo());
+    assert!(!document.can_redo());
+}
+
+#[test]
 fn model_conversion_preserves_authored_rgba_order_and_clean_baseline() {
     let top_pixels = vec![[20, 21, 22, 23]; 8];
     let front_pixels = vec![

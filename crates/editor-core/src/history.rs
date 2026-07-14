@@ -12,7 +12,7 @@ impl EditorDocument {
             .stroke_before
             .take()
             .ok_or(EditorError::NoActiveStroke)?;
-        let changed = self.state != before;
+        let changed = !self.state.has_same_authored_sources(&before);
         if changed {
             self.record_undo(before);
         }
@@ -60,7 +60,7 @@ impl EditorDocument {
     }
 
     pub(crate) fn finish_command(&mut self, before: DocumentState) -> bool {
-        if self.state == before {
+        if self.state.has_same_persistent_content(&before) {
             return false;
         }
         self.record_undo(before);

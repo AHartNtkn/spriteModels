@@ -1,5 +1,5 @@
 use depthsprite_format::DepthSpriteModel;
-use editor_core::{ActiveLayer, DepthValue, EditorDocument, EditorError};
+use editor_core::{ActiveLayer, DepthValue, EditorDocument, EditorError, ReliefValue};
 use relief_core::{Bounds, CanonicalView, Chart};
 
 const VIEW: CanonicalView = CanonicalView::Front;
@@ -13,6 +13,27 @@ fn document(width: u32, height: u32, pixels: Vec<[u8; 4]>) -> EditorDocument {
 
 fn pixels(document: &EditorDocument) -> Vec<[u8; 4]> {
     document.source(VIEW).unwrap().rgba().to_vec()
+}
+
+fn relief(value: u8) -> DepthValue {
+    DepthValue::Relief(ReliefValue::new(value).unwrap())
+}
+
+#[test]
+fn relief_value_is_validated_before_depth_value_construction() {
+    for value in 0..=254 {
+        let relief = ReliefValue::new(value).unwrap();
+        assert_eq!(relief.get(), value);
+        assert_eq!(u8::from(ReliefValue::try_from(value).unwrap()), value);
+    }
+    assert!(matches!(
+        ReliefValue::new(255),
+        Err(EditorError::InvalidRelief(255))
+    ));
+    assert!(matches!(
+        ReliefValue::try_from(255),
+        Err(EditorError::InvalidRelief(255))
+    ));
 }
 
 #[test]
@@ -32,7 +53,7 @@ fn color_pencil_changes_rgb_and_preserves_alpha() {
 fn depth_pencil_encodes_relief_and_preserves_rgb() {
     let mut document = document(1, 1, vec![[11, 22, 33, 19]]);
     document.set_active_layer(ActiveLayer::Depth);
-    document.set_current_depth(DepthValue::Relief(42)).unwrap();
+    document.set_current_depth(relief(42));
 
     document.begin_stroke().unwrap();
     assert!(document.pencil_pixel(VIEW, 0, 0).unwrap());
@@ -45,7 +66,7 @@ fn depth_pencil_encodes_relief_and_preserves_rgb() {
 fn depth_pencil_adds_geometry_to_an_empty_pixel_without_discarding_rgb() {
     let mut document = document(1, 1, vec![[31, 32, 33, 0]]);
     document.set_active_layer(ActiveLayer::Depth);
-    document.set_current_depth(DepthValue::Relief(0)).unwrap();
+    document.set_current_depth(relief(0));
 
     document.begin_stroke().unwrap();
     assert!(document.pencil_pixel(VIEW, 0, 0).unwrap());
@@ -73,20 +94,16 @@ fn only_depth_eraser_is_available_and_it_preserves_rgb() {
 }
 
 #[test]
-fn empty_or_out_of_range_depth_cannot_be_painted() {
+fn explicit_empty_depth_cannot_be_painted() {
     let original = [50, 51, 52, 90];
     let mut document = document(1, 1, vec![original]);
     document.set_active_layer(ActiveLayer::Depth);
-    document.set_current_depth(DepthValue::Empty).unwrap();
+    document.set_current_depth(DepthValue::Empty);
     document.begin_stroke().unwrap();
     assert!(!document.pencil_pixel(VIEW, 0, 0).unwrap());
     assert!(!document.finish_stroke().unwrap());
     assert_eq!(pixels(&document), [original]);
 
-    assert!(matches!(
-        document.set_current_depth(DepthValue::Relief(255)),
-        Err(EditorError::InvalidRelief(255))
-    ));
     assert_eq!(document.current_depth(), DepthValue::Empty);
 }
 
@@ -139,7 +156,7 @@ fn depth_fill_uses_only_contiguous_seed_alpha_and_preserves_each_rgb() {
         ],
     );
     document.set_active_layer(ActiveLayer::Depth);
-    document.set_current_depth(DepthValue::Relief(200)).unwrap();
+    document.set_current_depth(relief(200));
 
     assert!(document.fill(VIEW, 0, 0).unwrap());
 
@@ -161,7 +178,7 @@ fn depth_fill_cannot_paint_the_explicit_empty_selection() {
     let original = vec![[1, 2, 3, 20], [4, 5, 6, 20]];
     let mut document = document(2, 1, original.clone());
     document.set_active_layer(ActiveLayer::Depth);
-    document.set_current_depth(DepthValue::Empty).unwrap();
+    document.set_current_depth(DepthValue::Empty);
 
     assert!(!document.fill(VIEW, 0, 0).unwrap());
     assert_eq!(pixels(&document), original);
@@ -177,11 +194,34 @@ fn eyedropper_selects_color_relief_and_explicit_empty_depth() {
 
     document.set_active_layer(ActiveLayer::Depth);
     document.eyedrop(VIEW, 0, 0).unwrap();
-    assert_eq!(document.current_depth(), DepthValue::Relief(55));
+    assert_eq!(document.current_depth(), relief(55));
     document.eyedrop(VIEW, 1, 0).unwrap();
     assert_eq!(document.current_depth(), DepthValue::Empty);
     document.eyedrop(VIEW, 2, 0).unwrap();
-    assert_eq!(document.current_depth(), DepthValue::Relief(254));
+    assert_eq!(document.current_depth(), relief(254));
+}
+
+#[test]
+fn palette_and_eyedropper_selection_changes_do_not_dirty_the_model() {
+    let mut document = document(2, 1, vec![[7, 8, 9, 200], [1, 2, 3, 0]]);
+
+    document.set_active_layer(ActiveLayer::Depth);
+    document.set_current_rgb([90, 91, 92]);
+    document.set_current_depth(relief(42));
+    assert!(!document.is_dirty());
+
+    document.eyedrop(VIEW, 0, 0).unwrap();
+    assert_eq!(document.current_depth(), relief(55));
+    assert!(!document.is_dirty());
+
+    document.eyedrop(VIEW, 1, 0).unwrap();
+    assert_eq!(document.current_depth(), DepthValue::Empty);
+    assert!(!document.is_dirty());
+
+    document.set_active_layer(ActiveLayer::Color);
+    document.eyedrop(VIEW, 0, 0).unwrap();
+    assert_eq!(document.current_rgb(), [7, 8, 9]);
+    assert!(!document.is_dirty());
 }
 
 #[test]
