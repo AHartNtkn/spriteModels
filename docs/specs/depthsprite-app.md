@@ -119,9 +119,12 @@ Magenta is categorical and does not participate in the relief scale.
 
 ## Tools
 
-The vertical palette contains Pencil, Eraser, Fill, and Eyedropper, followed by the
-current RGB swatch and current relief value. The current relief is editable in
-eighth-pixel units and also displayed in model pixels.
+The vertical palette contains Pencil, Eraser, Fill, Eyedropper, a basic RGB color
+picker, and the current relief value. The color picker shows the current swatch and
+opens compact hue and saturation/value controls with direct RGB and hexadecimal
+entry. Changing the picker updates the current paint color without changing chart
+pixels. The current relief is editable in eighth-pixel units and also displayed in
+model pixels.
 
 Tool behavior depends on the active canvas:
 
@@ -131,6 +134,9 @@ Tool behavior depends on the active canvas:
 | Eraser | Disabled | Set alpha to zero; preserve RGB |
 | Fill | Flood equal contiguous RGB; preserve alpha | Flood equal contiguous alpha with selected nonzero alpha; preserve RGB |
 | Eyedropper | Select RGB | Select relief, or empty when sampling magenta |
+
+Color Pencil and Color Fill consume the color picker's current RGB value. Color
+Eyedropper writes its sampled RGB value into that same picker.
 
 Pencil drag is one undoable stroke. Fill is one command. Adding, replacing, or
 removing a source is one command. Undo and redo restore exact RGBA data, source
@@ -179,6 +185,8 @@ Headless tests prove:
 - depth eraser removes a sample while preserving RGB;
 - layer fills affect only the selected contiguous value;
 - eyedroppers select the exact active-layer value;
+- the color picker accepts visual, RGB, and hexadecimal input, and its selected RGB
+  is used by color pencil and fill;
 - stroke, fill, source, undo, and redo commands restore exact document states;
 - one revision invalidation produces one matching preview render;
 - orbit input changes camera state without changing document state;
@@ -187,8 +195,9 @@ Headless tests prove:
 
 A realistic application check proves the top-menu file lifecycle, vertical tools,
 progressive three-by-two source grid, color-over-depth card composition, shared
-canvas coordinates, minimum 3× model-to-canvas dimensions, immediate preview
-updates, and read-only model interaction.
+canvas coordinates, minimum 3× model-to-canvas dimensions, color selection and
+painting through the palette picker, immediate preview updates, and read-only model
+interaction.
 
 ## Acceptance
 
