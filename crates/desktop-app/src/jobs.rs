@@ -1,7 +1,8 @@
 use std::{
+    any::Any,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex, MutexGuard, PoisonError,
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
@@ -40,7 +41,7 @@ pub(crate) struct RenderResult {
 
 pub(crate) enum RenderEvent {
     Complete(RenderResult),
-    Failed { generation: u64, error: RenderError },
+    Failed { generation: u64, error: String },
 }
 
 pub(crate) fn install_if_current(
@@ -75,10 +76,21 @@ pub(crate) enum RenderWorkerError {
 }
 
 pub(crate) struct RenderWorker {
-    jobs: Option<Sender<RenderJob>>,
+    queue: Arc<RenderQueue>,
     results: Receiver<RenderEvent>,
     thread: Option<JoinHandle<()>>,
-    shutdown: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct QueueState {
+    latest: Option<RenderJob>,
+    shutdown: bool,
+}
+
+#[derive(Default)]
+struct RenderQueue {
+    state: Mutex<QueueState>,
+    changed: Condvar,
 }
 
 impl RenderWorker {
@@ -99,19 +111,20 @@ impl RenderWorker {
     }
 
     fn with_renderer(renderer: Renderer) -> Self {
-        let (job_sender, job_receiver) = mpsc::channel::<RenderJob>();
         let (result_sender, result_receiver) = mpsc::channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let thread_shutdown = Arc::clone(&shutdown);
+        let queue = Arc::new(RenderQueue::default());
+        let thread_queue = Arc::clone(&queue);
         let thread = thread::Builder::new()
             .name("depthsprite-render".to_owned())
-            .spawn(move || render_loop(job_receiver, result_sender, thread_shutdown, renderer))
-            .expect("render worker thread must start");
+            .spawn(move || render_loop(thread_queue, result_sender, renderer))
+            .ok();
+        if thread.is_none() {
+            lock_queue(&queue).shutdown = true;
+        }
         Self {
-            jobs: Some(job_sender),
+            queue,
             results: result_receiver,
-            thread: Some(thread),
-            shutdown,
+            thread,
         }
     }
 
@@ -121,15 +134,18 @@ impl RenderWorker {
         model: DepthSpriteModel,
         request: RenderRequest,
     ) -> Result<(), RenderWorkerError> {
-        self.jobs
-            .as_ref()
-            .ok_or(RenderWorkerError::ShutDown)?
-            .send(RenderJob {
-                generation,
-                model,
-                request,
-            })
-            .map_err(|_| RenderWorkerError::ShutDown)
+        let mut state = lock_queue(&self.queue);
+        if state.shutdown {
+            return Err(RenderWorkerError::ShutDown);
+        }
+        state.latest = Some(RenderJob {
+            generation,
+            model,
+            request,
+        });
+        drop(state);
+        self.queue.changed.notify_one();
+        Ok(())
     }
 
     pub(crate) fn try_recv(&self) -> Result<RenderEvent, mpsc::TryRecvError> {
@@ -142,16 +158,15 @@ impl RenderWorker {
     }
 
     pub(crate) fn shutdown(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-        self.jobs.take();
-        if let Some(thread) = self.thread.take() {
-            thread.join().expect("render worker panicked");
+        {
+            let mut state = lock_queue(&self.queue);
+            state.shutdown = true;
+            state.latest = None;
         }
-    }
-
-    #[cfg(test)]
-    fn shutdown_signal_for_test(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.shutdown)
+        self.queue.changed.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -161,29 +176,58 @@ impl Drop for RenderWorker {
     }
 }
 
-fn render_loop(
-    jobs: Receiver<RenderJob>,
-    results: Sender<RenderEvent>,
-    shutdown: Arc<AtomicBool>,
-    renderer: Renderer,
-) {
-    for job in jobs {
-        if shutdown.load(Ordering::Acquire) {
+fn render_loop(queue: Arc<RenderQueue>, results: Sender<RenderEvent>, renderer: Renderer) {
+    loop {
+        let Some(job) = take_next_job(&queue) else {
             break;
-        }
-        let event = match renderer(&job.model, &job.request) {
-            Ok(frame) => RenderEvent::Complete(RenderResult {
+        };
+        let event = match catch_unwind(AssertUnwindSafe(|| renderer(&job.model, &job.request))) {
+            Ok(Ok(frame)) => RenderEvent::Complete(RenderResult {
                 generation: job.generation,
                 frame,
             }),
-            Err(error) => RenderEvent::Failed {
+            Ok(Err(error)) => RenderEvent::Failed {
                 generation: job.generation,
-                error,
+                error: error.to_string(),
+            },
+            Err(payload) => RenderEvent::Failed {
+                generation: job.generation,
+                error: format!("preview renderer panicked: {}", panic_message(payload)),
             },
         };
         if results.send(event).is_err() {
             break;
         }
+    }
+}
+
+fn lock_queue(queue: &RenderQueue) -> MutexGuard<'_, QueueState> {
+    queue.state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn take_next_job(queue: &RenderQueue) -> Option<RenderJob> {
+    let mut state = lock_queue(queue);
+    loop {
+        if state.shutdown {
+            return None;
+        }
+        if let Some(job) = state.latest.take() {
+            return Some(job);
+        }
+        state = queue
+            .changed
+            .wait(state)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+}
+
+fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_owned()
     }
 }
 
@@ -291,7 +335,7 @@ mod tests {
             }
             Ok(transparent_frame())
         });
-        let shutdown_requested = worker.shutdown_signal_for_test();
+        let shutdown_queue = Arc::clone(&worker.queue);
         let model = load_path(asset("block.depthsprite")).unwrap();
         for generation in [1, 2] {
             worker
@@ -311,7 +355,7 @@ mod tests {
         }
 
         let shutdown_thread = std::thread::spawn(move || worker.shutdown());
-        while !shutdown_requested.load(Ordering::SeqCst) {
+        while !super::lock_queue(&shutdown_queue).shutdown {
             std::thread::yield_now();
         }
         {
@@ -323,5 +367,89 @@ mod tests {
         shutdown_thread.join().unwrap();
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn rapid_submits_replace_intermediate_queued_job_with_newest() {
+        let gate = Arc::new((Mutex::new((false, false)), Condvar::new()));
+        let render_gate = Arc::clone(&gate);
+        let mut worker = RenderWorker::new_with_renderer(move |_model, request| {
+            let frame = render_model(&[], request).unwrap();
+            let (lock, changed) = &*render_gate;
+            let mut state = lock.lock().unwrap();
+            if !state.0 {
+                state.0 = true;
+                changed.notify_all();
+                while !state.1 {
+                    state = changed.wait(state).unwrap();
+                }
+            }
+            Ok(frame)
+        });
+        let model = load_path(asset("block.depthsprite")).unwrap();
+        worker
+            .submit(
+                1,
+                model.clone(),
+                RenderRequest::new(1, 1, TargetView::front_v1()),
+            )
+            .unwrap();
+        {
+            let (lock, changed) = &*gate;
+            let mut state = lock.lock().unwrap();
+            while !state.0 {
+                state = changed.wait(state).unwrap();
+            }
+        }
+        for (generation, side) in [(2, 2), (3, 3)] {
+            worker
+                .submit(
+                    generation,
+                    model.clone(),
+                    RenderRequest::new(side, side, TargetView::front_v1()),
+                )
+                .unwrap();
+        }
+        {
+            let (lock, changed) = &*gate;
+            let mut state = lock.lock().unwrap();
+            state.1 = true;
+            changed.notify_all();
+        }
+
+        let first = worker.recv_timeout(Duration::from_secs(2)).unwrap();
+        let newest = worker.recv_timeout(Duration::from_secs(2)).unwrap();
+        let RenderEvent::Complete(first) = first else {
+            panic!("expected first render");
+        };
+        let RenderEvent::Complete(newest) = newest else {
+            panic!("expected newest render");
+        };
+        assert_eq!((first.generation, first.frame.width()), (1, 1));
+        assert_eq!((newest.generation, newest.frame.width()), (3, 3));
+        assert!(worker.recv_timeout(Duration::from_millis(50)).is_err());
+        worker.shutdown();
+    }
+
+    #[test]
+    fn renderer_panic_is_a_tagged_failure_and_shutdown_does_not_panic() {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut worker = RenderWorker::new_with_renderer(|_model, _request| {
+                panic!("injected renderer panic")
+            });
+            let model = load_path(asset("block.depthsprite")).unwrap();
+            worker
+                .submit(19, model, RenderRequest::new(1, 1, TargetView::front_v1()))
+                .unwrap();
+            let event = worker.recv_timeout(Duration::from_secs(2)).unwrap();
+            let RenderEvent::Failed { generation, error } = event else {
+                panic!("expected controlled render failure");
+            };
+            assert_eq!(generation, 19);
+            assert!(error.to_string().contains("panicked"));
+            worker.shutdown();
+        }));
+
+        assert!(outcome.is_ok());
     }
 }

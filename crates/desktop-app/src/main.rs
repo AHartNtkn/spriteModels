@@ -1,13 +1,11 @@
 mod app;
+mod export_jobs;
 mod export_ui;
 mod jobs;
 mod viewport;
 
 fn main() -> eframe::Result {
-    let bundled_bowl = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("assets/examples/bowl.depthsprite");
-    let initial_path = app::select_initial_path(std::env::args_os().nth(1), &bundled_bowl);
+    let initial_path = std::env::args_os().nth(1).map(std::path::PathBuf::from);
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: eframe::egui::ViewportBuilder::default()

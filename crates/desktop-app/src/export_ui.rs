@@ -74,7 +74,11 @@ impl ExportOptions {
     }
 }
 
-pub(crate) fn show(ui: &mut eframe::egui::Ui, options: &mut ExportOptions) -> bool {
+pub(crate) fn show(
+    ui: &mut eframe::egui::Ui,
+    options: &mut ExportOptions,
+    export_enabled: bool,
+) -> bool {
     ui.heading("Export sheet");
     let mut direction = options.direction();
     eframe::egui::ComboBox::from_label("Directions")
@@ -120,7 +124,8 @@ pub(crate) fn show(ui: &mut eframe::egui::Ui, options: &mut ExportOptions) -> bo
         options.set_padding(padding);
     }
     ui.label("Elevation: v1 fixed");
-    ui.button("Export PNG…").clicked()
+    ui.add_enabled(export_enabled, eframe::egui::Button::new("Export PNG…"))
+        .clicked()
 }
 
 #[cfg(test)]

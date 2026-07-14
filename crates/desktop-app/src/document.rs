@@ -1,12 +1,10 @@
 use std::{
-    ffi::OsString,
-    fs::OpenOptions,
-    io::{BufWriter, Cursor, Write},
+    io::{Cursor, Write},
     path::{Path, PathBuf},
 };
 
 use depthsprite_format::{
-    DepthSpriteModel, PackageError, load_path, save_path_atomic, save_writer,
+    DepthSpriteModel, PackageError, load_path, load_reader, save_path_atomic, save_writer,
 };
 use relief_render::{SheetError, SheetRequest, encode_png, render_sheet};
 use thiserror::Error;
@@ -28,11 +26,20 @@ pub enum DocumentError {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "destination replacement completed for {path:?}, but parent durability sync failed: {source}"
+    )]
+    PostReplaceSync {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
+#[derive(Clone)]
 pub struct Document {
     model: DepthSpriteModel,
-    path: PathBuf,
+    path: Option<PathBuf>,
     display_name: String,
     model_hash: u32,
 }
@@ -41,7 +48,12 @@ impl Document {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DocumentError> {
         let path = path.as_ref();
         let model = load_path(path)?;
-        Self::from_loaded(model, path)
+        Self::from_loaded(model, Some(path.to_owned()), display_name(path))
+    }
+
+    pub fn from_bundled(display_name: &str, bytes: &'static [u8]) -> Result<Self, DocumentError> {
+        let model = load_reader(Cursor::new(bytes))?;
+        Self::from_loaded(model, None, display_name.to_owned())
     }
 
     pub fn replace_from_path(&mut self, path: impl AsRef<Path>) -> Result<(), DocumentError> {
@@ -53,7 +65,7 @@ impl Document {
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<(), DocumentError> {
         let path = path.as_ref();
         save_path_atomic(&self.model, path)?;
-        self.path = path.to_owned();
+        self.path = Some(path.to_owned());
         self.display_name = display_name(path);
         Ok(())
     }
@@ -73,7 +85,7 @@ impl Document {
     }
 
     pub fn path(&self) -> Option<&Path> {
-        Some(&self.path)
+        self.path.as_deref()
     }
 
     pub fn display_name(&self) -> &str {
@@ -84,12 +96,16 @@ impl Document {
         self.model_hash
     }
 
-    fn from_loaded(model: DepthSpriteModel, path: &Path) -> Result<Self, DocumentError> {
+    fn from_loaded(
+        model: DepthSpriteModel,
+        path: Option<PathBuf>,
+        display_name: String,
+    ) -> Result<Self, DocumentError> {
         let model_hash = canonical_hash(&model)?;
         Ok(Self {
             model,
-            path: path.to_owned(),
-            display_name: display_name(path),
+            path,
+            display_name,
             model_hash,
         })
     }
@@ -109,48 +125,56 @@ fn display_name(path: &Path) -> String {
 }
 
 fn write_bytes_atomic(destination: &Path, bytes: &[u8]) -> Result<(), DocumentError> {
-    let temporary = temporary_path(destination);
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
+    write_bytes_atomic_with(destination, bytes, replace_file, sync_parent)
+}
 
-    let before_replace = (|| -> Result<(), DocumentError> {
-        let mut writer = BufWriter::new(file);
-        writer.write_all(bytes)?;
-        writer.flush()?;
-        writer.get_ref().sync_all()?;
-        drop(writer);
-        replace_file(&temporary, destination)?;
+fn write_bytes_atomic_with(
+    destination: &Path,
+    bytes: &[u8],
+    replace: impl FnOnce(&Path, &Path) -> Result<(), DocumentError>,
+    sync_destination_parent: impl FnOnce(&Path) -> Result<(), DocumentError>,
+) -> Result<(), DocumentError> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".depthsprite-export-")
+        .tempfile_in(parent)?;
+    let write_result = (|| -> Result<(), DocumentError> {
+        temporary.write_all(bytes)?;
+        temporary.flush()?;
+        temporary.as_file().sync_all()?;
         Ok(())
     })();
-    if let Err(operation) = before_replace {
-        return Err(report_cleanup_result(
-            &temporary,
-            operation,
-            std::fs::remove_file(&temporary),
-        ));
+    let (file, temporary_path) = temporary.into_parts();
+    drop(file);
+    if let Err(operation) = write_result {
+        return Err(report_cleanup_result(temporary_path, operation));
+    }
+    if let Err(operation) = replace(temporary_path.as_ref(), destination) {
+        return Err(report_cleanup_result(temporary_path, operation));
     }
 
-    sync_parent(destination)?;
+    if let Err(error) = sync_destination_parent(destination) {
+        let source = match error {
+            DocumentError::Io(source) => source,
+            other => std::io::Error::other(other.to_string()),
+        };
+        return Err(DocumentError::PostReplaceSync {
+            path: destination.to_owned(),
+            source,
+        });
+    }
     Ok(())
 }
 
-fn temporary_path(destination: &Path) -> PathBuf {
-    let mut name: OsString = destination.as_os_str().to_owned();
-    name.push(".tmp");
-    PathBuf::from(name)
-}
-
-fn report_cleanup_result(
-    temporary: &Path,
-    operation: DocumentError,
-    cleanup: std::io::Result<()>,
-) -> DocumentError {
-    match cleanup {
+fn report_cleanup_result(temporary: tempfile::TempPath, operation: DocumentError) -> DocumentError {
+    let path = temporary.to_path_buf();
+    match temporary.close() {
         Ok(()) => operation,
         Err(source) => DocumentError::TempCleanup {
-            path: temporary.to_owned(),
+            path,
             operation: operation.to_string(),
             source,
         },
@@ -210,4 +234,54 @@ fn sync_parent(destination: &Path) -> Result<(), DocumentError> {
 #[cfg(windows)]
 fn sync_parent(_destination: &Path) -> Result<(), DocumentError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, io};
+
+    use tempfile::tempdir;
+
+    use super::{DocumentError, write_bytes_atomic_with};
+
+    #[test]
+    fn pre_replace_failure_preserves_destination_and_cleans_owned_temporary() {
+        let temp = tempdir().unwrap();
+        let destination = temp.path().join("sheet.png");
+        fs::write(&destination, b"old").unwrap();
+
+        let error = write_bytes_atomic_with(
+            &destination,
+            b"new",
+            |_source, _destination| Err(io::Error::other("replace denied").into()),
+            |_destination| Ok(()),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("replace denied"));
+        assert_eq!(fs::read(&destination).unwrap(), b"old");
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn post_replace_sync_failure_says_destination_was_replaced() {
+        let temp = tempdir().unwrap();
+        let destination = temp.path().join("sheet.png");
+        fs::write(&destination, b"old").unwrap();
+
+        let error = write_bytes_atomic_with(
+            &destination,
+            b"new",
+            |source, destination| {
+                fs::rename(source, destination)?;
+                Ok(())
+            },
+            |_destination| Err(io::Error::other("directory sync denied").into()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, DocumentError::PostReplaceSync { .. }));
+        assert!(error.to_string().contains("replacement completed"));
+        assert_eq!(fs::read(&destination).unwrap(), b"new");
+    }
 }

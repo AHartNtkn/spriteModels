@@ -53,14 +53,14 @@ impl ViewportState {
         Some(self.generations.advance())
     }
 
-    pub(crate) fn wheel(&mut self, steps: i32) -> Option<u64> {
+    pub(crate) fn wheel(&mut self, steps: i32) -> bool {
         let updated = (i64::from(self.zoom) + i64::from(steps)).clamp(1, i64::from(MAX_ZOOM));
         let updated = updated as u32;
         if updated == self.zoom {
-            return None;
+            return false;
         }
         self.zoom = updated;
-        Some(self.generations.advance())
+        true
     }
 
     pub(crate) fn select_preset(&mut self, preset: ViewPreset) -> u64 {
@@ -93,8 +93,11 @@ impl ViewportState {
     }
 
     pub(crate) fn request(&self) -> RenderRequest {
-        let side = PREVIEW_SIDE * self.zoom;
-        RenderRequest::new(side, side, self.target.clone())
+        RenderRequest::new(PREVIEW_SIDE, PREVIEW_SIDE, self.target.clone())
+    }
+
+    pub(crate) fn presentation_side(&self, unscaled_side: f32) -> f32 {
+        unscaled_side * self.zoom as f32
     }
 }
 
@@ -133,10 +136,14 @@ pub(crate) struct ViewportInput {
 pub(crate) fn show(
     ui: &mut eframe::egui::Ui,
     texture: Option<&eframe::egui::TextureHandle>,
+    state: &ViewportState,
 ) -> ViewportInput {
     use eframe::egui::{Color32, Rect, Sense, Vec2, pos2};
 
-    let side = ui.available_width().min(ui.available_height()).max(96.0);
+    let unscaled_side = texture
+        .map(|texture| texture.size()[0].max(texture.size()[1]) as f32)
+        .unwrap_or(PREVIEW_SIDE as f32);
+    let side = state.presentation_side(unscaled_side);
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::drag());
     let tile = 16.0;
     let rows = (rect.height() / tile).ceil() as usize;
@@ -171,11 +178,7 @@ pub(crate) fn show(
     }
 
     let delta = response.drag_delta();
-    let drag = response.dragged().then(|| {
-        let x = delta.x.round() as i32;
-        let y = -delta.y.round() as i32;
-        (x, y)
-    });
+    let drag = drag_from_pointer_delta(response.dragged(), [delta.x, delta.y]);
     let scroll = if response.hovered() {
         ui.input(|input| input.smooth_scroll_delta.y)
     } else {
@@ -189,11 +192,19 @@ pub(crate) fn show(
     ViewportInput { drag, wheel_steps }
 }
 
+pub(crate) fn drag_from_pointer_delta(dragged: bool, delta: [f32; 2]) -> Option<(i32, i32)> {
+    if !dragged {
+        return None;
+    }
+    let mutation = (delta[0].round() as i32, -delta[1].round() as i32);
+    (mutation != (0, 0)).then_some(mutation)
+}
+
 #[cfg(test)]
 mod tests {
-    use relief_render::TargetView;
+    use relief_render::{TargetView, render_model};
 
-    use super::{ViewPreset, ViewportState};
+    use super::{ViewPreset, ViewportState, drag_from_pointer_delta};
 
     #[test]
     fn every_effective_camera_mutation_advances_generation() {
@@ -201,13 +212,14 @@ mod tests {
         assert_eq!(viewport.generation(), 0);
 
         assert_eq!(viewport.drag(12, -4), Some(1));
-        assert_eq!(viewport.wheel(1), Some(2));
-        assert_eq!(viewport.select_preset(ViewPreset::Top), 3);
-        assert_eq!(viewport.select_preset(ViewPreset::Side), 4);
-        assert_eq!(viewport.select_preset(ViewPreset::Front), 5);
+        assert!(viewport.wheel(1));
+        assert_eq!(viewport.generation(), 1);
+        assert_eq!(viewport.select_preset(ViewPreset::Top), 2);
+        assert_eq!(viewport.select_preset(ViewPreset::Side), 3);
+        assert_eq!(viewport.select_preset(ViewPreset::Front), 4);
         assert_eq!(viewport.drag(0, 0), None);
-        assert_eq!(viewport.wheel(0), None);
-        assert_eq!(viewport.generation(), 5);
+        assert!(!viewport.wheel(0));
+        assert_eq!(viewport.generation(), 4);
     }
 
     #[test]
@@ -224,11 +236,33 @@ mod tests {
     fn wheel_zoom_is_integer_and_bounded() {
         let mut viewport = ViewportState::default();
         assert_eq!(viewport.zoom(), 1);
-        assert_eq!(viewport.wheel(-1), None);
+        assert!(!viewport.wheel(-1));
         assert_eq!(viewport.zoom(), 1);
-        assert_eq!(viewport.wheel(3), Some(1));
+        assert!(viewport.wheel(3));
         assert_eq!(viewport.zoom(), 4);
-        assert_eq!(viewport.wheel(1), None);
+        assert!(!viewport.wheel(1));
+    }
+
+    #[test]
+    fn zoom_changes_integer_presentation_only() {
+        let mut viewport = ViewportState::default();
+        let before = render_model(&[], &viewport.request()).unwrap();
+
+        assert!(viewport.wheel(2));
+        let after = render_model(&[], &viewport.request()).unwrap();
+
+        assert_eq!(viewport.generation(), 0);
+        assert_eq!((before.width(), before.height()), (96, 96));
+        assert_eq!((after.width(), after.height()), (96, 96));
+        assert_eq!(viewport.presentation_side(96.0), 288.0);
+    }
+
+    #[test]
+    fn stationary_held_pointer_produces_no_drag_mutation() {
+        assert_eq!(drag_from_pointer_delta(false, [12.0, 5.0]), None);
+        assert_eq!(drag_from_pointer_delta(true, [0.0, 0.0]), None);
+        assert_eq!(drag_from_pointer_delta(true, [0.2, -0.2]), None);
+        assert_eq!(drag_from_pointer_delta(true, [3.0, -2.0]), Some((3, 2)));
     }
 
     #[test]

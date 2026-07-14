@@ -71,7 +71,7 @@ fn export_sheet_persists_the_authoritative_render_and_png_bytes() {
 }
 
 #[test]
-fn failed_png_export_preserves_existing_destination() {
+fn stale_fixed_temp_does_not_block_export_or_get_deleted() {
     let temp = tempdir().unwrap();
     let destination = temp.path().join("sheet.png");
     let temporary = temp.path().join("sheet.png.tmp");
@@ -80,12 +80,21 @@ fn failed_png_export_preserves_existing_destination() {
     fs::write(&temporary, b"foreign temp").unwrap();
     let document = Document::open(asset("block.depthsprite")).unwrap();
 
-    assert!(
-        document
-            .export_sheet(&destination, &export_request())
-            .is_err()
-    );
+    document
+        .export_sheet(&destination, &export_request())
+        .unwrap();
 
-    assert_eq!(fs::read(destination).unwrap(), original);
+    assert_ne!(fs::read(destination).unwrap(), original);
     assert_eq!(fs::read(temporary).unwrap(), b"foreign temp");
+}
+
+#[test]
+fn bundled_document_loads_validated_canonical_bytes_without_a_filesystem_path() {
+    let bytes = include_bytes!("../../../assets/examples/bowl.depthsprite");
+
+    let document = Document::from_bundled("bowl.depthsprite", bytes).unwrap();
+
+    assert_eq!(document.display_name(), "bowl.depthsprite");
+    assert_eq!(document.path(), None);
+    assert_eq!(document.model().charts().len(), 2);
 }
