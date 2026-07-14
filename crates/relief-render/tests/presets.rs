@@ -68,7 +68,7 @@ fn isometric_basis_is_exact_and_exposes_front_right_top_only() {
 
 #[test]
 fn bowl_acceptance_depth_is_the_cross_product_of_its_projection_rows() {
-    let bounds = Bounds::new(32, 16, 32).unwrap();
+    let bounds = Bounds::new(32, 12, 32).unwrap();
     let target = TargetView::bowl_acceptance();
     let warp = target
         .warp_coefficients(CanonicalView::Front, bounds)
