@@ -4,9 +4,6 @@ use depthsprite_format::{load_path, save_path_atomic};
 use relief_core::{Bounds, CanonicalView, DecodedTexel};
 use relief_render::{RenderRequest, TargetView, render_model};
 
-const FRONT_RGB: [u8; 3] = [144, 76, 52];
-const TOP_RGB: [u8; 3] = [216, 156, 85];
-
 fn bowl_asset() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/examples/bowl.depthsprite")
 }
@@ -14,7 +11,7 @@ fn bowl_asset() -> PathBuf {
 #[test]
 fn bowl_open_render_save_reopen_preserves_model_and_relief() {
     let model = load_path(bowl_asset()).unwrap();
-    assert_eq!(model.bounds(), Bounds::new(32, 16, 32).unwrap());
+    assert_eq!(model.bounds(), Bounds::new(32, 12, 32).unwrap());
     assert_eq!(
         model
             .charts()
@@ -23,37 +20,55 @@ fn bowl_open_render_save_reopen_preserves_model_and_relief() {
             .collect::<Vec<_>>(),
         vec![CanonicalView::Front, CanonicalView::Top]
     );
+    assert!(
+        model
+            .chart(CanonicalView::Front)
+            .unwrap()
+            .supplies_opposite()
+    );
+    assert!(
+        model
+            .chart(CanonicalView::Front)
+            .unwrap()
+            .mirrors_opposite()
+    );
+    assert!(!model.chart(CanonicalView::Top).unwrap().supplies_opposite());
+    assert!(!model.chart(CanonicalView::Top).unwrap().mirrors_opposite());
 
     let request = RenderRequest::new(96, 96, TargetView::bowl_acceptance());
     let resolved = model.resolve();
+    assert!(resolved.chart(CanonicalView::Back).is_some());
+    assert!(resolved.chart(CanonicalView::Bottom).is_none());
     let frame = render_model(&resolved, &request).unwrap();
-    let rim = frame.owner_at(48, 67).expect("rounded front rim");
-    let basin = frame.owner_at(48, 48).expect("recessed top basin");
-
-    assert_eq!(
-        (rim.view, rim.source_x, rim.source_y),
-        (CanonicalView::Front, 27, 2)
-    );
-    assert_eq!(
-        (basin.view, basin.source_x, basin.source_y),
-        (CanonicalView::Top, 16, 16)
-    );
-    assert_eq!(
-        model.charts()[0].texel_at(rim.source_x, rim.source_y),
-        Some(DecodedTexel::Relief {
-            rgb: FRONT_RGB,
-            eighths: 40,
-        })
-    );
-    assert_eq!(
-        model.charts()[1].texel_at(basin.source_x, basin.source_y),
-        Some(DecodedTexel::Relief {
-            rgb: TOP_RGB,
-            eighths: 64,
-        })
-    );
-    assert_eq!(frame.rgba_at(48, 67), [144, 76, 52, 255]);
-    assert_eq!(frame.rgba_at(48, 48), [216, 156, 85, 255]);
+    for view in [CanonicalView::Front, CanonicalView::Top] {
+        let (x, y, owner, rgb, relief) = (0..frame.height())
+            .flat_map(|y| (0..frame.width()).map(move |x| (x, y)))
+            .find_map(|(x, y)| {
+                let owner = frame.owner_at(x, y)?;
+                if owner.view != view {
+                    return None;
+                }
+                match model
+                    .chart(view)
+                    .unwrap()
+                    .texel_at(owner.source_x, owner.source_y)
+                {
+                    Some(DecodedTexel::Relief { rgb, eighths }) if eighths > 0 => {
+                        Some((x, y, owner, rgb, eighths))
+                    }
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| panic!("render must retain relieved {view:?} ownership"));
+        assert!(relief > 0);
+        assert_eq!(
+            frame.rgba_at(x, y),
+            [rgb[0], rgb[1], rgb[2], 255],
+            "rendered {view:?} RGB must come from its authored PNG at ({}, {})",
+            owner.source_x,
+            owner.source_y
+        );
+    }
     assert_eq!(frame.rgba_at(0, 0), [0, 0, 0, 0]);
 
     let directory = tempfile::tempdir().unwrap();

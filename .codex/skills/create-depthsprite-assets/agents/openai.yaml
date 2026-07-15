@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create DepthSprite Assets"
+  short_description: "Build clear, valid DepthSprite model assets"
+  default_prompt: "Use $create-depthsprite-assets to create or repair a DepthSprite demo asset."

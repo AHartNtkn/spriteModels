@@ -3,12 +3,10 @@ use relief_core::{Bounds, CanonicalView, SourcePoint};
 use relief_render::TargetView;
 
 #[test]
-fn front_is_identity_for_front_and_culls_edge_on_and_back_facing_charts() {
+fn front_is_identity_for_front_and_compiles_every_oriented_sprite() {
     let bounds = Bounds::new(2, 3, 4).unwrap();
     let target = TargetView::front();
-    let warp = target
-        .warp_coefficients(CanonicalView::Front, bounds)
-        .unwrap();
+    let warp = target.warp_coefficients(CanonicalView::Front, bounds);
     let sample = warp.apply(
         SourcePoint::new(Ratio::new(1, 2), Ratio::new(3, 2)),
         Ratio::from_integer(8),
@@ -17,8 +15,10 @@ fn front_is_identity_for_front_and_culls_edge_on_and_back_facing_charts() {
     assert_eq!(sample.screen_x, Ratio::new(1, 2));
     assert_eq!(sample.screen_y, Ratio::new(3, 2));
     assert_eq!(sample.depth, Ratio::from_integer(1));
-    assert!(!target.is_front_facing(CanonicalView::Right));
-    assert!(!target.is_front_facing(CanonicalView::Back));
+    let right = target.warp_coefficients(CanonicalView::Right, bounds);
+    let back = target.warp_coefficients(CanonicalView::Back, bounds);
+    assert_ne!(right, warp);
+    assert_ne!(back, warp);
 }
 
 #[test]
@@ -28,7 +28,6 @@ fn right_and_top_views_compose_signed_chart_frames() {
 
     let right = TargetView::right()
         .warp_coefficients(CanonicalView::Right, bounds)
-        .unwrap()
         .apply(source.clone(), Ratio::from_integer(8));
     assert_eq!(right.screen_x, Ratio::from_integer(-3));
     assert_eq!(right.screen_y, Ratio::new(1, 2));
@@ -36,7 +35,6 @@ fn right_and_top_views_compose_signed_chart_frames() {
 
     let top = TargetView::top()
         .warp_coefficients(CanonicalView::Top, bounds)
-        .unwrap()
         .apply(source, Ratio::from_integer(8));
     assert_eq!(top.screen_x, Ratio::from_integer(1));
     assert_eq!(top.screen_y, Ratio::new(1, 2));
@@ -44,12 +42,11 @@ fn right_and_top_views_compose_signed_chart_frames() {
 }
 
 #[test]
-fn isometric_basis_is_exact_and_exposes_front_right_top_only() {
+fn isometric_basis_is_exact_and_compiles_all_oriented_sprites() {
     let bounds = Bounds::new(4, 4, 4).unwrap();
     let target = TargetView::isometric();
     let front = target
         .warp_coefficients(CanonicalView::Front, bounds)
-        .unwrap()
         .apply(
             SourcePoint::new(Ratio::from_integer(2), Ratio::from_integer(4)),
             Ratio::from_integer(8),
@@ -58,21 +55,23 @@ fn isometric_basis_is_exact_and_exposes_front_right_top_only() {
     assert_eq!(front.screen_x, Ratio::new(3, 2));
     assert_eq!(front.screen_y, Ratio::new(9, 4));
     assert_eq!(front.depth, Ratio::from_integer(1));
-    assert!(target.is_front_facing(CanonicalView::Front));
-    assert!(target.is_front_facing(CanonicalView::Right));
-    assert!(target.is_front_facing(CanonicalView::Top));
-    assert!(!target.is_front_facing(CanonicalView::Back));
-    assert!(!target.is_front_facing(CanonicalView::Left));
-    assert!(!target.is_front_facing(CanonicalView::Bottom));
+    for view in [
+        CanonicalView::Front,
+        CanonicalView::Back,
+        CanonicalView::Left,
+        CanonicalView::Right,
+        CanonicalView::Top,
+        CanonicalView::Bottom,
+    ] {
+        let _ = target.warp_coefficients(view, bounds);
+    }
 }
 
 #[test]
 fn bowl_acceptance_depth_is_the_cross_product_of_its_projection_rows() {
     let bounds = Bounds::new(32, 12, 32).unwrap();
     let target = TargetView::bowl_acceptance();
-    let warp = target
-        .warp_coefficients(CanonicalView::Front, bounds)
-        .unwrap();
+    let warp = target.warp_coefficients(CanonicalView::Front, bounds);
     let origin = warp.apply(
         SourcePoint::new(Ratio::from_integer(0), Ratio::from_integer(0)),
         Ratio::from_integer(0),
@@ -113,8 +112,6 @@ fn bowl_acceptance_depth_is_the_cross_product_of_its_projection_rows() {
     for index in 0..3 {
         assert_eq!(depth[index], cross[index] * 4);
     }
-    assert!(target.is_front_facing(CanonicalView::Front));
-    assert!(target.is_front_facing(CanonicalView::Top));
 }
 
 #[test]
@@ -125,7 +122,6 @@ fn back_left_and_bottom_presets_have_the_expected_mirroring() {
 
     let back = TargetView::back()
         .warp_coefficients(CanonicalView::Back, bounds)
-        .unwrap()
         .apply(source.clone(), relief);
     assert_eq!(back.screen_x, Ratio::from_integer(-1));
     assert_eq!(back.screen_y, Ratio::from_integer(2));
@@ -133,7 +129,6 @@ fn back_left_and_bottom_presets_have_the_expected_mirroring() {
 
     let left = TargetView::left()
         .warp_coefficients(CanonicalView::Left, bounds)
-        .unwrap()
         .apply(source.clone(), relief);
     assert_eq!(left.screen_x, Ratio::from_integer(1));
     assert_eq!(left.screen_y, Ratio::from_integer(2));
@@ -141,7 +136,6 @@ fn back_left_and_bottom_presets_have_the_expected_mirroring() {
 
     let bottom = TargetView::bottom()
         .warp_coefficients(CanonicalView::Bottom, bounds)
-        .unwrap()
         .apply(source, relief);
     assert_eq!(bottom.screen_x, Ratio::from_integer(1));
     assert_eq!(bottom.screen_y, Ratio::from_integer(-2));

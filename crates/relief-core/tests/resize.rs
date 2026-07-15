@@ -468,7 +468,12 @@ fn preserve_reassignment_retains_exact_rgba_when_dimensions_match() {
     let pixels = chart(CanonicalView::Front, 2, 3, 10).rgba().to_vec();
     let mut model = AuthoredModel::new(
         bounds,
-        vec![Chart::from_rgba(CanonicalView::Front, 2, 3, pixels.clone()).unwrap()],
+        vec![
+            Chart::from_rgba(CanonicalView::Front, 2, 3, pixels.clone())
+                .unwrap()
+                .with_opposite_assignment()
+                .with_mirrored_opposite(),
+        ],
     )
     .unwrap();
 
@@ -482,14 +487,24 @@ fn preserve_reassignment_retains_exact_rgba_when_dimensions_match() {
 
     assert!(model.chart(CanonicalView::Front).is_none());
     assert_eq!(model.charts().len(), 1);
-    assert_eq!(model.chart(CanonicalView::Back).unwrap().rgba(), pixels);
+    let reassigned = model.chart(CanonicalView::Back).unwrap();
+    assert_eq!(reassigned.rgba(), pixels);
+    assert!(reassigned.supplies_opposite());
+    assert!(reassigned.mirrors_opposite());
 }
 
 #[test]
 fn preserve_reassignment_rejects_dimension_mismatch_without_mutation() {
     let bounds = Bounds::new(2, 3, 4).unwrap();
-    let mut model =
-        AuthoredModel::new(bounds, vec![chart(CanonicalView::Front, 2, 3, 10)]).unwrap();
+    let mut model = AuthoredModel::new(
+        bounds,
+        vec![
+            chart(CanonicalView::Front, 2, 3, 10)
+                .with_opposite_assignment()
+                .with_mirrored_opposite(),
+        ],
+    )
+    .unwrap();
     let before = model.clone();
 
     assert_eq!(
@@ -510,8 +525,15 @@ fn preserve_reassignment_rejects_dimension_mismatch_without_mutation() {
 #[test]
 fn recreate_reassignment_replaces_the_source_with_one_correctly_sized_empty_target() {
     let bounds = Bounds::new(2, 3, 4).unwrap();
-    let mut model =
-        AuthoredModel::new(bounds, vec![chart(CanonicalView::Front, 2, 3, 10)]).unwrap();
+    let mut model = AuthoredModel::new(
+        bounds,
+        vec![
+            chart(CanonicalView::Front, 2, 3, 10)
+                .with_opposite_assignment()
+                .with_mirrored_opposite(),
+        ],
+    )
+    .unwrap();
 
     model
         .reassign_chart(
@@ -526,4 +548,6 @@ fn recreate_reassignment_replaces_the_source_with_one_correctly_sized_empty_targ
     let target = model.chart(CanonicalView::Left).unwrap();
     assert_eq!(target.dimensions(), (4, 3));
     assert_eq!(target.rgba(), &[EMPTY_RGBA; 12]);
+    assert!(target.supplies_opposite());
+    assert!(target.mirrors_opposite());
 }

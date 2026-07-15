@@ -97,6 +97,8 @@ impl CanonicalView {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chart {
     view: CanonicalView,
+    supplies_opposite: bool,
+    mirrors_opposite: bool,
     width: u32,
     height: u32,
     rgba: Vec<[u8; 4]>,
@@ -114,6 +116,8 @@ impl Chart {
         }
         Ok(Self {
             view,
+            supplies_opposite: false,
+            mirrors_opposite: false,
             width,
             height,
             rgba,
@@ -122,6 +126,49 @@ impl Chart {
 
     pub fn view(&self) -> CanonicalView {
         self.view
+    }
+
+    pub fn with_opposite_assignment(mut self) -> Self {
+        self.supplies_opposite = true;
+        self
+    }
+
+    pub fn without_opposite_assignment(mut self) -> Self {
+        self.supplies_opposite = false;
+        self
+    }
+
+    pub fn supplies_opposite(&self) -> bool {
+        self.supplies_opposite
+    }
+
+    pub fn with_mirrored_opposite(mut self) -> Self {
+        self.mirrors_opposite = true;
+        self
+    }
+
+    pub fn without_mirrored_opposite(mut self) -> Self {
+        self.mirrors_opposite = false;
+        self
+    }
+
+    pub fn mirrors_opposite(&self) -> bool {
+        self.mirrors_opposite
+    }
+
+    pub(crate) fn with_assignments_from(mut self, source: &Self) -> Self {
+        self.supplies_opposite = source.supplies_opposite;
+        self.mirrors_opposite = source.mirrors_opposite;
+        self
+    }
+
+    pub fn assigned_views(&self) -> impl Iterator<Item = CanonicalView> {
+        [
+            Some(self.view),
+            self.supplies_opposite.then(|| self.view.opposite()),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     pub fn dimensions(&self) -> (u32, u32) {
@@ -190,6 +237,8 @@ impl Chart {
         }
         Self {
             view: self.view,
+            supplies_opposite: self.supplies_opposite,
+            mirrors_opposite: self.mirrors_opposite,
             width,
             height,
             rgba,

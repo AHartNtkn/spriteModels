@@ -11,6 +11,9 @@ fn document() -> EditorDocument {
 
 fn dirty_document() -> EditorDocument {
     let mut document = document();
+    document
+        .set_source_opposite(CanonicalView::Front, false)
+        .unwrap();
     document.add_source(CanonicalView::Back).unwrap();
     document
 }

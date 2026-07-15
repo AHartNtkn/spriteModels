@@ -2,7 +2,7 @@ use std::error::Error;
 
 use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart};
 
-use crate::pixel::{rgba, shade};
+use crate::pixel::{directional_light, rgba, shade};
 
 const BASE_RGB: [u8; 3] = [156, 132, 98];
 const FACES: [(CanonicalView, i32); 6] = [
@@ -23,7 +23,8 @@ pub fn block_model() -> Result<AuthoredModel, Box<dyn Error>> {
             let mut pixels = Vec::with_capacity((width * height) as usize);
             for y in 0..height {
                 for x in 0..width {
-                    let gradient = ((width - x + height - y) / 4) as i32;
+                    let gradient =
+                        directional_light(view, width as i32, height as i32, x as i32, y as i32);
                     let pixel = rgba(shade(BASE_RGB, face_light + gradient, 0), 0);
                     debug_assert_eq!(pixel[3], 255);
                     pixels.push(pixel);

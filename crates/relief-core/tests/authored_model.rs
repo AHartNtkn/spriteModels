@@ -186,7 +186,7 @@ fn authored_charts_are_kept_in_canonical_rank_order() {
 }
 
 #[test]
-fn one_authored_chart_resolves_to_two_observations_and_explicit_opposite_wins() {
+fn one_source_resolves_only_its_explicit_side_assignment() {
     let bounds = Bounds::new(2, 2, 2).unwrap();
     let front_pixels = vec![
         rgba(0, [200, 10, 20]),
@@ -195,30 +195,201 @@ fn one_authored_chart_resolves_to_two_observations_and_explicit_opposite_wins() 
         rgba(3, [203, 13, 23]),
     ];
     let front = Chart::from_rgba(CanonicalView::Front, 2, 2, front_pixels.clone()).unwrap();
-    let mut model = AuthoredModel::new(bounds, vec![front]).unwrap();
+    let model = AuthoredModel::new(bounds, vec![front]).unwrap();
     let resolved = model.resolve();
     assert_eq!(resolved.bounds(), bounds);
+    assert_eq!(resolved.charts().len(), 1);
+    assert!(resolved.chart(CanonicalView::Back).is_none());
+}
+
+#[test]
+fn one_source_can_be_explicitly_assigned_to_an_opposite_pair() {
+    let bounds = Bounds::new(2, 2, 2).unwrap();
+    let front_pixels = vec![rgba(0, [200, 10, 20]); 4];
+    let front = Chart::from_rgba(CanonicalView::Front, 2, 2, front_pixels.clone())
+        .unwrap()
+        .with_opposite_assignment();
+    let model = AuthoredModel::new(bounds, vec![front]).unwrap();
+    let resolved = model.resolve();
+
     assert_eq!(resolved.charts().len(), 2);
+    assert_eq!(
+        resolved.chart(CanonicalView::Front).unwrap().rgba(),
+        front_pixels
+    );
     assert_eq!(
         resolved.chart(CanonicalView::Back).unwrap().rgba(),
         front_pixels
     );
+}
 
-    let back = chart(bounds, CanonicalView::Back, rgba(0, [20, 10, 200]));
-    model.add_chart(back).unwrap();
-    let resolved = model.resolve();
-    assert_eq!(
-        resolved.chart(CanonicalView::Front).unwrap().rgba()[0][0],
-        200
+#[test]
+fn mirror_assignment_defaults_false_and_survives_disabling_opposite() {
+    let bounds = Bounds::new(2, 2, 2).unwrap();
+    let front = chart(bounds, CanonicalView::Front, rgba(0, [1, 2, 3]));
+    let mut model = AuthoredModel::new(bounds, vec![front]).unwrap();
+
+    assert!(
+        !model
+            .chart(CanonicalView::Front)
+            .unwrap()
+            .supplies_opposite()
+    );
+    assert!(
+        !model
+            .chart(CanonicalView::Front)
+            .unwrap()
+            .mirrors_opposite()
+    );
+
+    model
+        .set_opposite_mirror(CanonicalView::Front, true)
+        .unwrap();
+    assert!(
+        model
+            .chart(CanonicalView::Front)
+            .unwrap()
+            .mirrors_opposite()
+    );
+    assert!(model.resolve().chart(CanonicalView::Back).is_none());
+
+    model
+        .set_opposite_assignment(CanonicalView::Front, true)
+        .unwrap();
+    model
+        .set_opposite_assignment(CanonicalView::Front, false)
+        .unwrap();
+
+    assert!(
+        !model
+            .chart(CanonicalView::Front)
+            .unwrap()
+            .supplies_opposite()
+    );
+    assert!(
+        model
+            .chart(CanonicalView::Front)
+            .unwrap()
+            .mirrors_opposite()
+    );
+    assert!(model.resolve().chart(CanonicalView::Back).is_none());
+}
+
+#[test]
+fn mirror_resolution_reverses_the_canonical_frame_axis_for_every_pair() {
+    let bounds = Bounds::new(2, 2, 2).unwrap();
+    let authored = vec![
+        rgba(0, [10, 1, 1]),
+        rgba(1, [20, 2, 2]),
+        rgba(2, [30, 3, 3]),
+        rgba(3, [40, 4, 4]),
+    ];
+    let horizontal = vec![authored[1], authored[0], authored[3], authored[2]];
+    let vertical = vec![authored[2], authored[3], authored[0], authored[1]];
+
+    for view in [
+        CanonicalView::Front,
+        CanonicalView::Back,
+        CanonicalView::Left,
+        CanonicalView::Right,
+        CanonicalView::Top,
+        CanonicalView::Bottom,
+    ] {
+        let source = Chart::from_rgba(view, 2, 2, authored.clone())
+            .unwrap()
+            .with_opposite_assignment()
+            .with_mirrored_opposite();
+        let model = AuthoredModel::new(bounds, vec![source]).unwrap();
+        let resolved = model.resolve();
+        let expected = match view {
+            CanonicalView::Front
+            | CanonicalView::Back
+            | CanonicalView::Left
+            | CanonicalView::Right => &horizontal,
+            CanonicalView::Top | CanonicalView::Bottom => &vertical,
+        };
+
+        assert_eq!(resolved.chart(view).unwrap().rgba(), authored);
+        assert_eq!(resolved.chart(view.opposite()).unwrap().rgba(), expected);
+    }
+}
+
+#[test]
+fn mirror_disabled_keeps_direct_opposite_rgba_for_every_pair() {
+    let bounds = Bounds::new(2, 2, 2).unwrap();
+    let authored = vec![
+        rgba(0, [10, 1, 1]),
+        rgba(1, [20, 2, 2]),
+        rgba(2, [30, 3, 3]),
+        rgba(3, [40, 4, 4]),
+    ];
+
+    for view in [
+        CanonicalView::Front,
+        CanonicalView::Back,
+        CanonicalView::Left,
+        CanonicalView::Right,
+        CanonicalView::Top,
+        CanonicalView::Bottom,
+    ] {
+        let source = Chart::from_rgba(view, 2, 2, authored.clone())
+            .unwrap()
+            .with_opposite_assignment();
+        let model = AuthoredModel::new(bounds, vec![source]).unwrap();
+
+        assert_eq!(
+            model.resolve().chart(view.opposite()).unwrap().rgba(),
+            authored
+        );
+    }
+}
+
+#[test]
+fn editing_pixels_preserves_both_explicit_assignment_bits() {
+    let bounds = Bounds::new(2, 2, 2).unwrap();
+    let front = chart(bounds, CanonicalView::Front, rgba(0, [1, 2, 3]))
+        .with_opposite_assignment()
+        .with_mirrored_opposite();
+    let mut model = AuthoredModel::new(bounds, vec![front]).unwrap();
+    let replacement = vec![rgba(0, [9, 8, 7]); 4];
+
+    model
+        .set_rgba(CanonicalView::Front, replacement.clone())
+        .unwrap();
+
+    assert!(
+        model
+            .chart(CanonicalView::Front)
+            .unwrap()
+            .supplies_opposite()
+    );
+    assert!(
+        model
+            .chart(CanonicalView::Front)
+            .unwrap()
+            .mirrors_opposite()
     );
     assert_eq!(
-        resolved.chart(CanonicalView::Back).unwrap().rgba()[0][2],
-        200
+        model.resolve().chart(CanonicalView::Back).unwrap().rgba(),
+        replacement
     );
 }
 
 #[test]
-fn removing_an_explicit_opposite_restores_the_derived_observation() {
+fn assigned_sides_cannot_overlap_another_source() {
+    let bounds = Bounds::new(2, 2, 2).unwrap();
+    let front =
+        chart(bounds, CanonicalView::Front, rgba(0, [200, 10, 20])).with_opposite_assignment();
+    let back = chart(bounds, CanonicalView::Back, rgba(0, [20, 10, 200]));
+
+    assert_eq!(
+        AuthoredModel::new(bounds, vec![front, back]),
+        Err(ModelError::DuplicateView(CanonicalView::Back))
+    );
+}
+
+#[test]
+fn removing_an_explicit_opposite_leaves_that_side_absent() {
     let bounds = Bounds::new(2, 2, 2).unwrap();
     let front = chart(bounds, CanonicalView::Front, rgba(0, [200, 10, 20]));
     let back = chart(bounds, CanonicalView::Back, rgba(0, [20, 10, 200]));
@@ -226,9 +397,7 @@ fn removing_an_explicit_opposite_restores_the_derived_observation() {
 
     model.remove_chart(CanonicalView::Back).unwrap();
 
-    let resolved_back = model.resolve().chart(CanonicalView::Back).unwrap().clone();
-    assert_eq!(resolved_back.view(), CanonicalView::Back);
-    assert_eq!(resolved_back.rgba()[0], [200, 10, 20, 255]);
+    assert!(model.resolve().chart(CanonicalView::Back).is_none());
 }
 
 #[test]

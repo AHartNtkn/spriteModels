@@ -28,6 +28,7 @@ fn write_png(path: &Path, pixels: &[[u8; 4]]) {
 #[test]
 fn add_action_accepts_an_explicit_unoccupied_side() {
     let mut document = document();
+    document.set_source_opposite(FRONT, false).unwrap();
     add_source(&mut document, CanonicalView::Back).unwrap();
 
     assert!(document.source(CanonicalView::Back).is_some());
@@ -41,6 +42,7 @@ fn add_import_replace_and_remove_are_undoable_document_commands() {
     let replacement = [[11, 22, 33, 44], [55, 66, 77, 88]];
     write_png(&path, &replacement);
     let mut document = document();
+    document.set_source_opposite(FRONT, false).unwrap();
 
     add_source(&mut document, CanonicalView::Back).unwrap();
     assert!(document.source(CanonicalView::Back).is_some());
@@ -60,11 +62,12 @@ fn add_import_replace_and_remove_are_undoable_document_commands() {
 }
 
 #[test]
-fn card_headers_only_name_the_assigned_side() {
-    let document = document();
+fn card_headers_show_the_explicit_opposite_assignment() {
+    let mut document = document();
+    document.set_source_opposite(FRONT, true).unwrap();
 
     assert_eq!(
         card_header(&document, CanonicalView::Front).unwrap().label,
-        "Front"
+        "Front + Back"
     );
 }

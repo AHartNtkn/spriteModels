@@ -34,15 +34,19 @@ pub fn remove_source(
     document.remove_source(view)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CardHeader {
-    pub label: &'static str,
+    pub label: String,
 }
 
 pub fn card_header(document: &EditorDocument, view: CanonicalView) -> Option<CardHeader> {
-    document.source(view)?;
+    let source = document.source(view)?;
     Some(CardHeader {
-        label: view_label(view),
+        label: if source.supplies_opposite() {
+            format!("{} + {}", view_label(view), view_label(view.opposite()))
+        } else {
+            view_label(view).to_owned()
+        },
     })
 }
 
@@ -89,7 +93,26 @@ pub(crate) struct SideTargetObservation {
 #[cfg(test)]
 pub(crate) struct SidePopoverObservation {
     pub rect: egui::Rect,
+    pub opposite: Option<OppositeObservation>,
+    pub mirror: Option<MirrorObservation>,
     pub targets: Vec<SideTargetObservation>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct OppositeObservation {
+    pub opposite: CanonicalView,
+    pub rect: egui::Rect,
+    pub enabled: bool,
+    pub checked: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct MirrorObservation {
+    pub rect: egui::Rect,
+    pub enabled: bool,
+    pub checked: bool,
 }
 
 #[cfg(test)]
@@ -226,7 +249,7 @@ impl SourceGridState {
                     #[cfg(test)]
                     let mut targets = Vec::new();
                     for view in SOURCE_DISPLAY_ORDER {
-                        let enabled = document.source(view).is_none();
+                        let enabled = !document.side_is_assigned(view);
                         let response = ui.add_enabled(enabled, egui::Button::new(view_label(view)));
                         #[cfg(test)]
                         targets.push(SideTargetObservation {
@@ -243,6 +266,8 @@ impl SourceGridState {
                     {
                         add_popover = Some(SidePopoverObservation {
                             rect: ui.min_rect(),
+                            opposite: None,
+                            mirror: None,
                             targets,
                         });
                     }
@@ -326,6 +351,8 @@ impl SourceGridState {
         );
 
         let mut assignment = None;
+        let mut opposite_change = None;
+        let mut mirror_change = None;
         #[cfg(test)]
         let mut side_popover = None;
         let _side_selector = ui
@@ -334,10 +361,54 @@ impl SourceGridState {
                     egui::Button::new(header.label).min_size(side_rect.size()),
                 )
                 .ui(ui, |ui| {
+                    let source = document.source(view).expect("the source card exists");
+                    let supplies_opposite = source.supplies_opposite();
+                    let mirrors_opposite = source.mirrors_opposite();
+                    let opposite_available =
+                        supplies_opposite || !document.side_is_assigned(view.opposite());
+                    let mut desired_opposite = supplies_opposite;
+                    let opposite = ui.add_enabled(
+                        opposite_available,
+                        egui::Checkbox::new(
+                            &mut desired_opposite,
+                            format!("Also {}", view_label(view.opposite())),
+                        ),
+                    );
+                    if opposite.changed() {
+                        opposite_change = Some(desired_opposite);
+                    }
+                    #[cfg(test)]
+                    let opposite_observation = OppositeObservation {
+                        opposite: view.opposite(),
+                        rect: opposite.rect,
+                        enabled: opposite_available,
+                        checked: supplies_opposite,
+                    };
+                    let mut desired_mirror = mirrors_opposite;
+                    let mirror = ui.add_enabled(
+                        supplies_opposite,
+                        egui::Checkbox::new(&mut desired_mirror, "Mirror Opposite"),
+                    );
+                    if mirror.changed() {
+                        mirror_change = Some(desired_mirror);
+                    }
+                    #[cfg(test)]
+                    let mirror_observation = MirrorObservation {
+                        rect: mirror.rect,
+                        enabled: supplies_opposite,
+                        checked: mirrors_opposite,
+                    };
+                    ui.separator();
                     #[cfg(test)]
                     let mut targets = Vec::new();
                     for target in SOURCE_DISPLAY_ORDER {
-                        let enabled = target != view && document.source(target).is_none();
+                        let currently_owned =
+                            |side| side == view || (supplies_opposite && side == view.opposite());
+                        let available =
+                            |side| currently_owned(side) || !document.side_is_assigned(side);
+                        let enabled = !currently_owned(target)
+                            && available(target)
+                            && (!supplies_opposite || available(target.opposite()));
                         let response =
                             ui.add_enabled(enabled, egui::Button::new(view_label(target)));
                         #[cfg(test)]
@@ -355,6 +426,8 @@ impl SourceGridState {
                     {
                         side_popover = Some(SidePopoverObservation {
                             rect: ui.min_rect(),
+                            opposite: Some(opposite_observation),
+                            mirror: Some(mirror_observation),
                             targets,
                         });
                     }
@@ -362,6 +435,17 @@ impl SourceGridState {
                 menu.0.rect
             })
             .inner;
+
+        if let Some(enabled) = opposite_change
+            && let Err(error) = document.set_source_opposite(view, enabled)
+        {
+            self.error = Some(error.to_string());
+        }
+        if let Some(enabled) = mirror_change
+            && let Err(error) = document.set_source_mirror(view, enabled)
+        {
+            self.error = Some(error.to_string());
+        }
 
         let mut resize_request = None;
         #[cfg(test)]
@@ -842,6 +926,9 @@ mod tests {
         let context = egui::Context::default();
         let mut document =
             EditorDocument::new(Bounds::new(32, 32, 32).unwrap(), CanonicalView::Front);
+        document
+            .set_source_opposite(CanonicalView::Front, false)
+            .unwrap();
         let mut grid = SourceGridState::default();
 
         let (_, initial) = run_frame(&context, &mut grid, &mut document, Vec::new());
@@ -882,10 +969,166 @@ mod tests {
     }
 
     #[test]
+    fn source_menu_remembers_mirror_while_opposite_is_disabled() {
+        let context = egui::Context::default();
+        let mut document =
+            EditorDocument::new(Bounds::new(32, 32, 32).unwrap(), CanonicalView::Top);
+        let mut grid = SourceGridState::default();
+
+        let (_, initial) = run_frame(&context, &mut grid, &mut document, Vec::new());
+        let opened = click(
+            &context,
+            &mut grid,
+            &mut document,
+            initial.cards[0].side_selector.center(),
+        );
+        let popover = opened.cards[0].side_popover.as_ref().unwrap();
+        let opposite = popover
+            .opposite
+            .expect("source menu must expose the opposite-side toggle");
+        let mirror = popover
+            .mirror
+            .expect("source menu must expose the mirror toggle");
+        assert_eq!(opposite.opposite, CanonicalView::Bottom);
+        assert!(opposite.enabled);
+        assert!(!opposite.checked);
+        assert!(!mirror.enabled);
+        assert!(!mirror.checked);
+
+        click(&context, &mut grid, &mut document, opposite.rect.center());
+
+        assert!(
+            document
+                .source(CanonicalView::Top)
+                .unwrap()
+                .supplies_opposite()
+        );
+        assert!(
+            document
+                .to_model()
+                .resolve()
+                .chart(CanonicalView::Bottom)
+                .is_some()
+        );
+
+        let (_, paired_closed) = run_frame(&context, &mut grid, &mut document, Vec::new());
+        let paired = click(
+            &context,
+            &mut grid,
+            &mut document,
+            paired_closed.cards[0].side_selector.center(),
+        );
+        let mirror = paired.cards[0]
+            .side_popover
+            .as_ref()
+            .unwrap()
+            .mirror
+            .unwrap();
+        assert!(mirror.enabled);
+        assert!(!mirror.checked);
+        click(&context, &mut grid, &mut document, mirror.rect.center());
+        assert!(
+            document
+                .source(CanonicalView::Top)
+                .unwrap()
+                .mirrors_opposite()
+        );
+
+        let (_, mirrored_closed) = run_frame(&context, &mut grid, &mut document, Vec::new());
+        let mirrored = click(
+            &context,
+            &mut grid,
+            &mut document,
+            mirrored_closed.cards[0].side_selector.center(),
+        );
+        let opposite = mirrored.cards[0]
+            .side_popover
+            .as_ref()
+            .unwrap()
+            .opposite
+            .unwrap();
+        click(&context, &mut grid, &mut document, opposite.rect.center());
+        assert!(
+            !document
+                .source(CanonicalView::Top)
+                .unwrap()
+                .supplies_opposite()
+        );
+        assert!(
+            document
+                .source(CanonicalView::Top)
+                .unwrap()
+                .mirrors_opposite()
+        );
+        assert!(
+            document
+                .to_model()
+                .resolve()
+                .chart(CanonicalView::Bottom)
+                .is_none()
+        );
+
+        let (_, unpaired_closed) = run_frame(&context, &mut grid, &mut document, Vec::new());
+        let unpaired = click(
+            &context,
+            &mut grid,
+            &mut document,
+            unpaired_closed.cards[0].side_selector.center(),
+        );
+        let popover = unpaired.cards[0].side_popover.as_ref().unwrap();
+        let opposite = popover.opposite.unwrap();
+        let mirror = popover.mirror.unwrap();
+        assert!(!opposite.checked);
+        assert!(!mirror.enabled);
+        assert!(mirror.checked);
+
+        click(&context, &mut grid, &mut document, opposite.rect.center());
+        assert!(
+            document
+                .source(CanonicalView::Top)
+                .unwrap()
+                .supplies_opposite()
+        );
+        assert!(
+            document
+                .source(CanonicalView::Top)
+                .unwrap()
+                .mirrors_opposite()
+        );
+    }
+
+    #[test]
+    fn add_menu_disables_a_side_already_supplied_by_the_toggle() {
+        let context = egui::Context::default();
+        let mut document =
+            EditorDocument::new(Bounds::new(32, 32, 32).unwrap(), CanonicalView::Front);
+        document
+            .set_source_opposite(CanonicalView::Front, true)
+            .unwrap();
+        let mut grid = SourceGridState::default();
+
+        let (_, initial) = run_frame(&context, &mut grid, &mut document, Vec::new());
+        let opened = click(
+            &context,
+            &mut grid,
+            &mut document,
+            initial.add_button.unwrap().center(),
+        );
+        let chooser = opened.add_popover.unwrap();
+
+        assert!(!side_target(&chooser, CanonicalView::Front).enabled);
+        assert!(!side_target(&chooser, CanonicalView::Back).enabled);
+        assert!(side_target(&chooser, CanonicalView::Right).enabled);
+    }
+
+    #[test]
     fn source_cards_pack_in_display_order_with_header_controls_outside_the_canvases() {
         let context = egui::Context::default();
         let mut document =
             EditorDocument::new(Bounds::new(32, 32, 32).unwrap(), CanonicalView::Front);
+        document
+            .set_source_opposite(CanonicalView::Front, false)
+            .unwrap();
         for view in [
             CanonicalView::Bottom,
             CanonicalView::Back,
@@ -1003,6 +1246,45 @@ mod tests {
             !document.undo(),
             "reassignment creates one undo entry after prior history is cleared by the test boundary"
         );
+    }
+
+    #[test]
+    fn paired_source_reassignment_disables_a_target_whose_opposite_is_owned() {
+        let context = egui::Context::default();
+        let bounds = Bounds::new(2, 2, 2).unwrap();
+        let mut document = document_from_charts(
+            bounds,
+            vec![
+                Chart::from_rgba(CanonicalView::Front, 2, 2, vec![EMPTY_RGBA; 4])
+                    .unwrap()
+                    .with_opposite_assignment(),
+                Chart::from_rgba(CanonicalView::Left, 2, 2, vec![EMPTY_RGBA; 4]).unwrap(),
+            ],
+        );
+        let mut grid = SourceGridState::default();
+
+        let (_, initial) = run_frame(&context, &mut grid, &mut document, Vec::new());
+        let front = initial
+            .cards
+            .iter()
+            .find(|card| card.view == CanonicalView::Front)
+            .unwrap();
+        let opened = click(
+            &context,
+            &mut grid,
+            &mut document,
+            front.side_selector.center(),
+        );
+        let chooser = opened
+            .cards
+            .iter()
+            .find(|card| card.view == CanonicalView::Front)
+            .unwrap()
+            .side_popover
+            .as_ref()
+            .unwrap();
+
+        assert!(!side_target(chooser, CanonicalView::Right).enabled);
     }
 
     #[test]

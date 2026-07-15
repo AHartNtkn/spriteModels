@@ -9,9 +9,12 @@ fn document_with_front_pixels(pixels: Vec<[u8; 4]>) -> EditorDocument {
 }
 
 #[test]
-fn preview_resolution_derives_back_directly_from_the_document_model() {
+fn preview_resolution_uses_an_explicit_opposite_assignment() {
     let pixels = vec![[17, 31, 47, 0], [71, 83, 97, 251]];
-    let document = document_with_front_pixels(pixels.clone());
+    let mut document = document_with_front_pixels(pixels.clone());
+    document
+        .set_source_opposite(CanonicalView::Front, true)
+        .unwrap();
 
     let resolved = document.model().resolve();
 
@@ -22,7 +25,7 @@ fn preview_resolution_derives_back_directly_from_the_document_model() {
 }
 
 #[test]
-fn preview_resolution_prefers_an_explicit_opposite_chart() {
+fn preview_resolution_keeps_separate_explicit_opposite_sources_distinct() {
     let front_pixels = vec![[1, 2, 3, 251], [5, 6, 7, 252]];
     let back_pixels = vec![[101, 102, 103, 253], [105, 106, 107, 254]];
     let mut document = document_with_front_pixels(front_pixels.clone());

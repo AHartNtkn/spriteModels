@@ -20,9 +20,14 @@ impl AuthoredModel {
         }
 
         charts.sort_by_key(|chart| chart.view().rank());
-        for adjacent in charts.windows(2) {
-            if adjacent[0].view() == adjacent[1].view() {
-                return Err(ModelError::DuplicateView(adjacent[0].view()));
+        let mut assigned = [false; 6];
+        for chart in &charts {
+            for view in chart.assigned_views() {
+                let occupied = &mut assigned[usize::from(view.rank())];
+                if *occupied {
+                    return Err(ModelError::DuplicateView(view));
+                }
+                *occupied = true;
             }
         }
         for chart in &charts {
@@ -49,6 +54,48 @@ impl AuthoredModel {
             .binary_search_by_key(&view.rank(), |chart| chart.view().rank())
             .ok()
             .map(|index| &self.charts[index])
+    }
+
+    pub fn source_assigned_to(&self, view: CanonicalView) -> Option<&Chart> {
+        self.charts
+            .iter()
+            .find(|chart| chart.assigned_views().any(|assigned| assigned == view))
+    }
+
+    pub fn set_opposite_assignment(
+        &mut self,
+        view: CanonicalView,
+        enabled: bool,
+    ) -> Result<(), ModelError> {
+        let Some(index) = self.charts.iter().position(|chart| chart.view() == view) else {
+            return Err(ModelError::MissingView(view));
+        };
+        let mut charts = self.charts.clone();
+        charts[index] = if enabled {
+            charts[index].clone().with_opposite_assignment()
+        } else {
+            charts[index].clone().without_opposite_assignment()
+        };
+        *self = Self::new(self.bounds, charts)?;
+        Ok(())
+    }
+
+    pub fn set_opposite_mirror(
+        &mut self,
+        view: CanonicalView,
+        enabled: bool,
+    ) -> Result<(), ModelError> {
+        let Some(index) = self.charts.iter().position(|chart| chart.view() == view) else {
+            return Err(ModelError::MissingView(view));
+        };
+        let mut charts = self.charts.clone();
+        charts[index] = if enabled {
+            charts[index].clone().with_mirrored_opposite()
+        } else {
+            charts[index].clone().without_mirrored_opposite()
+        };
+        *self = Self::new(self.bounds, charts)?;
+        Ok(())
     }
 
     pub fn add_chart(&mut self, chart: Chart) -> Result<(), ModelError> {
@@ -94,22 +141,31 @@ impl AuthoredModel {
             return Err(ModelError::MissingView(view));
         };
         let (width, height) = chart.dimensions();
-        self.replace_chart(Chart::from_rgba(view, width, height, rgba)?)
+        let replacement = Chart::from_rgba(view, width, height, rgba)?.with_assignments_from(chart);
+        self.replace_chart(replacement)
     }
 
     pub fn resolve(&self) -> ResolvedCharts {
         let mut charts = Vec::with_capacity(6);
-        for rank in 0..6 {
-            let view = CanonicalView::from_rank(rank).expect("canonical ranks 0..6 are defined");
-            let Some(source) = self.chart(view).or_else(|| self.chart(view.opposite())) else {
-                continue;
-            };
+        for source in &self.charts {
             let (width, height) = source.dimensions();
             charts.push(
-                Chart::from_rgba(view, width, height, source.rgba().to_vec())
+                Chart::from_rgba(source.view(), width, height, source.rgba().to_vec())
                     .expect("resolved charts preserve validated pixel dimensions"),
             );
+            if source.supplies_opposite() {
+                let rgba = if source.mirrors_opposite() {
+                    mirrored_opposite_rgba(source)
+                } else {
+                    source.rgba().to_vec()
+                };
+                charts.push(
+                    Chart::from_rgba(source.view().opposite(), width, height, rgba)
+                        .expect("resolved charts preserve validated pixel dimensions"),
+                );
+            }
         }
+        charts.sort_by_key(|chart| chart.view().rank());
         ResolvedCharts {
             bounds: self.bounds,
             charts,
@@ -208,8 +264,11 @@ impl AuthoredModel {
                     });
                 }
                 Chart::from_rgba(to, actual.0, actual.1, source.rgba().to_vec())?
+                    .with_assignments_from(source)
             }
-            ReassignMode::RecreateEmpty => empty_chart(self.bounds, to)?,
+            ReassignMode::RecreateEmpty => {
+                empty_chart(self.bounds, to)?.with_assignments_from(source)
+            }
         };
 
         let mut charts = self.charts.clone();
@@ -218,6 +277,28 @@ impl AuthoredModel {
         *self = replacement;
         Ok(())
     }
+}
+
+fn mirrored_opposite_rgba(source: &Chart) -> Vec<[u8; 4]> {
+    let (width, height) = source.dimensions();
+    let mut mirrored = Vec::with_capacity(source.rgba().len());
+    for y in 0..height {
+        for x in 0..width {
+            let (source_x, source_y) = match source.view() {
+                CanonicalView::Front
+                | CanonicalView::Back
+                | CanonicalView::Left
+                | CanonicalView::Right => (width - 1 - x, y),
+                CanonicalView::Top | CanonicalView::Bottom => (x, height - 1 - y),
+            };
+            mirrored.push(
+                source
+                    .rgba_at(source_x, source_y)
+                    .expect("mirrored coordinates remain inside the source"),
+            );
+        }
+    }
+    mirrored
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

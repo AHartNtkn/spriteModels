@@ -22,8 +22,7 @@ pub struct WarpCoefficients {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InverseWarpLine {
-    source_x: [Ratio<i64>; 2],
-    source_y: [Ratio<i64>; 2],
+    variables: [[Ratio<i64>; 2]; 3],
     depth: [Ratio<i64>; 2],
 }
 
@@ -79,53 +78,84 @@ impl WarpCoefficients {
         screen_x: Ratio<i64>,
         screen_y: Ratio<i64>,
     ) -> Option<InverseWarpLine> {
-        let [[a, b, translate_x], [c, d, translate_y]] = &self.screen;
-        let determinant = *a * *d - *b * *c;
-        if determinant == Ratio::from_integer(0) {
-            return None;
-        }
-
-        let target_x = screen_x - *translate_x;
-        let target_y = screen_y - *translate_y;
-        let source_x = [
-            (*d * target_x - *b * target_y) / determinant,
-            (-*d * self.parallax[0] + *b * self.parallax[1]) / determinant,
+        let columns = [
+            [self.screen[0][0], self.screen[1][0]],
+            [self.screen[0][1], self.screen[1][1]],
+            self.parallax,
         ];
-        let source_y = [
-            (-*c * target_x + *a * target_y) / determinant,
-            (*c * self.parallax[0] - *a * self.parallax[1]) / determinant,
+        let target = [screen_x - self.screen[0][2], screen_y - self.screen[1][2]];
+        let zero = Ratio::from_integer(0);
+        let (first, second, free, determinant, _) = [(0, 1, 2), (0, 2, 1), (1, 2, 0)]
+            .into_iter()
+            .filter_map(|(first, second, free)| {
+                let determinant =
+                    columns[first][0] * columns[second][1] - columns[second][0] * columns[first][1];
+                let magnitude = if determinant < zero {
+                    -determinant
+                } else {
+                    determinant
+                };
+                (magnitude != zero).then_some((first, second, free, determinant, magnitude))
+            })
+            .reduce(|best, candidate| {
+                if candidate.4 > best.4 {
+                    candidate
+                } else {
+                    best
+                }
+            })?;
+
+        let mut variables = [[zero; 2]; 3];
+        variables[free][1] = Ratio::from_integer(1);
+        variables[first] = [
+            (target[0] * columns[second][1] - columns[second][0] * target[1]) / determinant,
+            (-columns[free][0] * columns[second][1] + columns[second][0] * columns[free][1])
+                / determinant,
+        ];
+        variables[second] = [
+            (columns[first][0] * target[1] - target[0] * columns[first][1]) / determinant,
+            (-columns[first][0] * columns[free][1] + columns[free][0] * columns[first][1])
+                / determinant,
         ];
         let depth = [
-            self.depth_plane[0] * source_x[0]
-                + self.depth_plane[1] * source_y[0]
-                + self.depth_plane[2],
-            self.depth_plane[0] * source_x[1]
-                + self.depth_plane[1] * source_y[1]
-                + self.depth_relief,
+            self.depth_plane[0] * variables[0][0]
+                + self.depth_plane[1] * variables[1][0]
+                + self.depth_plane[2]
+                + self.depth_relief * variables[2][0],
+            self.depth_plane[0] * variables[0][1]
+                + self.depth_plane[1] * variables[1][1]
+                + self.depth_relief * variables[2][1],
         ];
 
-        Some(InverseWarpLine {
-            source_x,
-            source_y,
-            depth,
-        })
+        Some(InverseWarpLine { variables, depth })
     }
 }
 
 impl InverseWarpLine {
-    pub fn source_at(&self, relief: Ratio<i64>) -> SourcePoint {
+    /// Evaluates the source coordinates at the shared affine-line parameter.
+    pub fn source_at(&self, parameter: Ratio<i64>) -> SourcePoint {
         SourcePoint::new(
-            self.source_x[0] + self.source_x[1] * relief,
-            self.source_y[0] + self.source_y[1] * relief,
+            self.variables[0][0] + self.variables[0][1] * parameter,
+            self.variables[1][0] + self.variables[1][1] * parameter,
         )
     }
 
-    pub fn depth_at(&self, relief: Ratio<i64>) -> Ratio<i64> {
-        self.depth[0] + self.depth[1] * relief
+    pub fn depth_at(&self, parameter: Ratio<i64>) -> Ratio<i64> {
+        self.depth[0] + self.depth[1] * parameter
     }
 
-    pub fn source_coefficients(&self) -> [[Ratio<i64>; 2]; 2] {
-        [self.source_x, self.source_y]
+    pub fn relief_at(&self, parameter: Ratio<i64>) -> Ratio<i64> {
+        self.variables[2][0] + self.variables[2][1] * parameter
+    }
+
+    /// Returns `[constant, slope]` for source x, source y, and relief, in that order.
+    pub fn variable_coefficients(&self) -> [[Ratio<i64>; 2]; 3] {
+        self.variables
+    }
+
+    /// Returns `[constant, slope]` for transient camera depth.
+    pub fn depth_coefficients(&self) -> [Ratio<i64>; 2] {
+        self.depth
     }
 }
 

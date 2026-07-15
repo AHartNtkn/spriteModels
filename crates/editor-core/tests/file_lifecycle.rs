@@ -50,6 +50,7 @@ fn excessive_relief_import_leaves_model_and_history_unchanged() {
     let source_path = directory.path().join("too-deep.png");
     write_rgba_png(&source_path, 1, 1, &[[9, 8, 7, 250]]);
     let mut document = EditorDocument::new(Bounds::new(1, 1, 1).unwrap(), VIEW);
+    document.set_source_opposite(VIEW, false).unwrap();
     document.add_source(CanonicalView::Back).unwrap();
     assert!(document.undo());
     let before_model = document.to_model();
@@ -117,6 +118,31 @@ fn save_and_reopen_preserve_exact_authored_bytes_and_mark_the_document_clean() {
     assert_eq!(pixels(&reopened), authored);
     assert_eq!(reopened.path(), Some(package_path.as_path()));
     assert!(!reopened.is_dirty());
+}
+
+#[test]
+fn importing_pixels_preserves_both_opposite_side_bits() {
+    let directory = tempdir().unwrap();
+    let source_path = directory.path().join("source.png");
+    let authored = [[17, 31, 47, 255], [99, 88, 77, 193]];
+    write_rgba_png(&source_path, 2, 1, &authored);
+    let mut document = EditorDocument::new(Bounds::new(2, 1, 63).unwrap(), VIEW);
+    document.set_source_opposite(VIEW, true).unwrap();
+    document.set_source_mirror(VIEW, true).unwrap();
+
+    assert!(document.source(VIEW).unwrap().supplies_opposite());
+    assert!(document.source(VIEW).unwrap().mirrors_opposite());
+    document.import_source_png(VIEW, &source_path).unwrap();
+
+    assert!(document.source(VIEW).unwrap().supplies_opposite());
+    assert!(document.source(VIEW).unwrap().mirrors_opposite());
+    assert!(
+        document
+            .to_model()
+            .resolve()
+            .chart(CanonicalView::Back)
+            .is_some()
+    );
 }
 
 #[test]

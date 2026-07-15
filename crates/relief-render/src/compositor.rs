@@ -5,7 +5,9 @@ use relief_core::{
 use thiserror::Error;
 
 use crate::{
-    FragmentKey, FrameBuffer, TargetView, framebuffer::commit_fragment, presets::TargetExtents,
+    FragmentKey, FrameBuffer, TargetView,
+    framebuffer::commit_fragment,
+    presets::{FacingCoefficients, TargetExtents},
 };
 
 const ROOT_SCALE: i64 = 1 << 24;
@@ -37,7 +39,7 @@ pub enum RenderError {
 
 #[derive(Clone, Debug)]
 struct Preimage {
-    relief: Ratio<i64>,
+    parameter: Ratio<i64>,
     source_x: u32,
     source_y: u32,
 }
@@ -51,6 +53,13 @@ struct ReliefTerms {
 #[derive(Clone, Copy, Debug)]
 struct ReliefPatch {
     corners: [ReliefTerms; 4],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReliefSample {
+    terms: ReliefTerms,
+    relief_x: f64,
+    relief_y: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -103,14 +112,44 @@ impl PreparedRelief {
         self.cells[(y * self.width + x) as usize].is_some()
     }
 
-    fn terms_at(&self, source_x: u32, source_y: u32, x: f64, y: f64) -> ReliefTerms {
+    fn quadrants_at(&self, source_x: u32, source_y: u32, x: f64, y: f64) -> Vec<usize> {
+        let local_x = (x - f64::from(source_x)).clamp(0.0, 1.0);
+        let local_y = (y - f64::from(source_y)).clamp(0.0, 1.0);
+        let horizontal: &[usize] = if (local_x - 0.5).abs() <= COORDINATE_EPSILON {
+            &[0, 1]
+        } else if local_x < 0.5 {
+            &[0]
+        } else {
+            &[1]
+        };
+        let vertical: &[usize] = if (local_y - 0.5).abs() <= COORDINATE_EPSILON {
+            &[0, 1]
+        } else if local_y < 0.5 {
+            &[0]
+        } else {
+            &[1]
+        };
+        vertical
+            .iter()
+            .flat_map(|bottom| horizontal.iter().map(move |right| right + 2 * bottom))
+            .collect()
+    }
+
+    fn sample_patch(
+        &self,
+        source_x: u32,
+        source_y: u32,
+        quadrant: usize,
+        x: f64,
+        y: f64,
+    ) -> ReliefSample {
         let patches = self.cells[(source_y * self.width + source_x) as usize]
             .expect("only foreground cells reach analytic evaluation");
         let local_x = (x - f64::from(source_x)).clamp(0.0, 1.0);
         let local_y = (y - f64::from(source_y)).clamp(0.0, 1.0);
-        let right = local_x > 0.5;
-        let bottom = local_y > 0.5;
-        let patch = patches[usize::from(right) + 2 * usize::from(bottom)];
+        let right = quadrant % 2 == 1;
+        let bottom = quadrant / 2 == 1;
+        let patch = patches[quadrant];
         let u = if right {
             2.0 * local_x - 1.0
         } else {
@@ -127,9 +166,23 @@ impl PreparedRelief {
                 + values[2] * (1.0 - u) * v
                 + values[3] * u * v
         };
-        ReliefTerms {
-            weighted: interpolate(patch.corners.map(|terms| terms.weighted)),
-            total: interpolate(patch.corners.map(|terms| terms.total)),
+        let derivative_u =
+            |values: [f64; 4]| (values[1] - values[0]) * (1.0 - v) + (values[3] - values[2]) * v;
+        let derivative_v =
+            |values: [f64; 4]| (values[2] - values[0]) * (1.0 - u) + (values[3] - values[1]) * u;
+        let weighted_values = patch.corners.map(|terms| terms.weighted);
+        let total_values = patch.corners.map(|terms| terms.total);
+        let weighted = interpolate(weighted_values);
+        let total = interpolate(total_values);
+        let weighted_x = 2.0 * derivative_u(weighted_values);
+        let weighted_y = 2.0 * derivative_v(weighted_values);
+        let total_x = 2.0 * derivative_u(total_values);
+        let total_y = 2.0 * derivative_v(total_values);
+        let denominator = total * total;
+        ReliefSample {
+            terms: ReliefTerms { weighted, total },
+            relief_x: (weighted_x * total - weighted * total_x) / denominator,
+            relief_y: (weighted_y * total - weighted * total_y) / denominator,
         }
     }
 }
@@ -161,15 +214,18 @@ pub fn render_model(
     let prepared: Vec<_> = charts
         .charts()
         .iter()
-        .filter_map(|chart| {
-            request
-                .target
-                .warp_coefficients(chart.view(), bounds)
-                .map(|warp| {
-                    let field = ReliefField::new(chart);
-                    let maximum_relief = f64::from(chart.view().maximum_inward_depth(bounds));
-                    (chart, PreparedRelief::new(&field), warp, maximum_relief)
-                })
+        .map(|chart| {
+            let warp = request.target.warp_coefficients(chart.view(), bounds);
+            let facing = request.target.facing_coefficients(chart.view(), bounds);
+            let field = ReliefField::new(chart);
+            let maximum_relief = f64::from(chart.view().maximum_inward_depth(bounds));
+            (
+                chart,
+                PreparedRelief::new(&field),
+                warp,
+                facing,
+                maximum_relief,
+            )
         })
         .collect();
 
@@ -178,12 +234,12 @@ pub fn render_model(
             let screen_x = Ratio::new(2 * i64::from(x) + 1, 2) - offset_x;
             let screen_y = Ratio::new(2 * i64::from(y) + 1, 2) - offset_y;
 
-            for (chart, relief, warp, maximum_relief) in &prepared {
+            for (chart, relief, warp, facing, maximum_relief) in &prepared {
                 let Some(line) = warp.inverse_line(screen_x, screen_y) else {
                     continue;
                 };
 
-                for preimage in solve_preimages(relief, &line, *maximum_relief) {
+                for preimage in solve_preimages(relief, &line, *facing, *maximum_relief) {
                     let Some(DecodedTexel::Relief { rgb, .. }) =
                         chart.texel_at(preimage.source_x, preimage.source_y)
                     else {
@@ -194,7 +250,7 @@ pub fn render_model(
                         x,
                         y,
                         FragmentKey {
-                            depth: line.depth_at(preimage.relief),
+                            depth: line.depth_at(preimage.parameter),
                             chart_rank: chart.view().rank(),
                             source_y: preimage.source_y,
                             source_x: preimage.source_x,
@@ -223,17 +279,62 @@ fn projected_extents(
 fn solve_preimages(
     field: &PreparedRelief,
     line: &InverseWarpLine,
+    facing: FacingCoefficients,
     maximum_relief: f64,
 ) -> Vec<Preimage> {
-    let [[x_offset, x_slope], [y_offset, y_slope]] = line.source_coefficients();
-    let x_offset = ratio_to_f64(x_offset);
-    let x_slope = ratio_to_f64(x_slope);
-    let y_offset = ratio_to_f64(y_offset);
-    let y_slope = ratio_to_f64(y_slope);
+    let coefficients = line
+        .variable_coefficients()
+        .map(|[offset, slope]| [ratio_to_f64(offset), ratio_to_f64(slope)]);
+    let [
+        [x_offset, x_slope],
+        [y_offset, y_slope],
+        [relief_offset, relief_slope],
+    ] = coefficients;
     let (width, height) = (field.width, field.height);
-    let mut boundaries = vec![0.0, maximum_relief];
-    add_grid_crossings(&mut boundaries, x_offset, x_slope, width, maximum_relief);
-    add_grid_crossings(&mut boundaries, y_offset, y_slope, height, maximum_relief);
+    let mut parameter_range = [f64::NEG_INFINITY, f64::INFINITY];
+    if !clip_affine_range(
+        &mut parameter_range,
+        x_offset,
+        x_slope,
+        0.0,
+        f64::from(width),
+    ) || !clip_affine_range(
+        &mut parameter_range,
+        y_offset,
+        y_slope,
+        0.0,
+        f64::from(height),
+    ) || !clip_affine_range(
+        &mut parameter_range,
+        relief_offset,
+        relief_slope,
+        0.0,
+        maximum_relief,
+    ) {
+        return Vec::new();
+    }
+    let [range_start, range_end] = parameter_range;
+    if !range_start.is_finite() || !range_end.is_finite() {
+        return Vec::new();
+    }
+
+    let mut boundaries = vec![range_start, range_end];
+    add_grid_crossings(
+        &mut boundaries,
+        x_offset,
+        x_slope,
+        width,
+        range_start,
+        range_end,
+    );
+    add_grid_crossings(
+        &mut boundaries,
+        y_offset,
+        y_slope,
+        height,
+        range_start,
+        range_end,
+    );
     boundaries.sort_by(f64::total_cmp);
     boundaries.dedup_by(|left, right| (*left - *right).abs() <= COORDINATE_EPSILON);
 
@@ -253,44 +354,113 @@ fn solve_preimages(
                 if !field.is_foreground(source_x, source_y) {
                     continue;
                 }
-                let values = [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0].map(|unit| {
-                    let relief = start + (end - start) * unit;
-                    let x = x_offset + x_slope * relief;
-                    let y = y_offset + y_slope * relief;
-                    let terms = field.terms_at(source_x, source_y, x, y);
-                    relief * terms.total - terms.weighted
-                });
-                let polynomial = interpolate_unit_cubic(values);
+                for quadrant in field.quadrants_at(source_x, source_y, middle_x, middle_y) {
+                    let values = [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0].map(|unit| {
+                        let parameter = start + (end - start) * unit;
+                        let x = x_offset + x_slope * parameter;
+                        let y = y_offset + y_slope * parameter;
+                        let relief = relief_offset + relief_slope * parameter;
+                        let sample = field.sample_patch(source_x, source_y, quadrant, x, y);
+                        relief * sample.terms.total - sample.terms.weighted
+                    });
+                    let polynomial = interpolate_unit_cubic(values);
 
-                for unit in roots_in_unit_interval(polynomial) {
-                    let relief = start + (end - start) * unit;
-                    let x = x_offset + x_slope * relief;
-                    let y = y_offset + y_slope * relief;
-                    if x < f64::from(source_x) - COORDINATE_EPSILON
-                        || x > f64::from(source_x) + 1.0 + COORDINATE_EPSILON
-                        || y < f64::from(source_y) - COORDINATE_EPSILON
-                        || y > f64::from(source_y) + 1.0 + COORDINATE_EPSILON
-                    {
-                        continue;
-                    }
-                    let candidate = Preimage {
-                        relief: quantized_ratio(relief),
-                        source_x,
-                        source_y,
-                    };
-                    if !preimages.iter().any(|existing: &Preimage| {
-                        existing.source_x == source_x
-                            && existing.source_y == source_y
-                            && (ratio_to_f64(existing.relief) - relief).abs() <= 1.0e-6
-                    }) {
-                        preimages.push(candidate);
+                    for unit in roots_in_unit_interval(polynomial) {
+                        let parameter = start + (end - start) * unit;
+                        let x = x_offset + x_slope * parameter;
+                        let y = y_offset + y_slope * parameter;
+                        let relief = relief_offset + relief_slope * parameter;
+                        if x < f64::from(source_x) - COORDINATE_EPSILON
+                            || x > f64::from(source_x) + 1.0 + COORDINATE_EPSILON
+                            || y < f64::from(source_y) - COORDINATE_EPSILON
+                            || y > f64::from(source_y) + 1.0 + COORDINATE_EPSILON
+                            || relief < -COORDINATE_EPSILON
+                            || relief > maximum_relief + COORDINATE_EPSILON
+                        {
+                            continue;
+                        }
+                        if !branch_faces_camera(field, source_x, source_y, quadrant, facing, x, y) {
+                            continue;
+                        }
+                        preimages.push(Preimage {
+                            parameter: quantized_ratio(parameter),
+                            source_x,
+                            source_y,
+                        });
                     }
                 }
             }
         }
     }
 
+    preimages.sort_by(|left, right| {
+        (left.source_y, left.source_x)
+            .cmp(&(right.source_y, right.source_x))
+            .then_with(|| left.parameter.cmp(&right.parameter))
+    });
+    preimages.dedup_by(|left, right| {
+        left.source_x == right.source_x
+            && left.source_y == right.source_y
+            && (ratio_to_f64(left.parameter) - ratio_to_f64(right.parameter)).abs() <= 1.0e-7
+    });
     preimages
+}
+
+fn branch_faces_camera(
+    field: &PreparedRelief,
+    source_x: u32,
+    source_y: u32,
+    quadrant: usize,
+    facing: FacingCoefficients,
+    x: f64,
+    y: f64,
+) -> bool {
+    let evaluate = |x: f64, y: f64| {
+        let sample = field.sample_patch(source_x, source_y, quadrant, x, y);
+        facing.evaluate(sample.relief_x, sample.relief_y)
+    };
+    let value = evaluate(x, y);
+    if value > POLYNOMIAL_EPSILON {
+        return true;
+    }
+    if value < -POLYNOMIAL_EPSILON {
+        return false;
+    }
+
+    let right = quadrant % 2 == 1;
+    let bottom = quadrant / 2 == 1;
+    let x_min = f64::from(source_x) + if right { 0.5 } else { 0.0 };
+    let x_max = x_min + 0.5;
+    let y_min = f64::from(source_y) + if bottom { 0.5 } else { 0.0 };
+    let y_max = y_min + 0.5;
+    let step = 1.0e-7;
+    [
+        ((x - step).max(x_min), y),
+        ((x + step).min(x_max), y),
+        (x, (y - step).max(y_min)),
+        (x, (y + step).min(y_max)),
+    ]
+    .into_iter()
+    .any(|(probe_x, probe_y)| {
+        (probe_x != x || probe_y != y) && evaluate(probe_x, probe_y) > POLYNOMIAL_EPSILON
+    })
+}
+
+fn clip_affine_range(
+    range: &mut [f64; 2],
+    offset: f64,
+    slope: f64,
+    minimum: f64,
+    maximum: f64,
+) -> bool {
+    if slope.abs() <= COORDINATE_EPSILON {
+        return offset >= minimum - COORDINATE_EPSILON && offset <= maximum + COORDINATE_EPSILON;
+    }
+    let first = (minimum - offset) / slope;
+    let second = (maximum - offset) / slope;
+    range[0] = range[0].max(first.min(second));
+    range[1] = range[1].min(first.max(second));
+    range[0] <= range[1] + COORDINATE_EPSILON
 }
 
 fn add_grid_crossings(
@@ -298,16 +468,17 @@ fn add_grid_crossings(
     offset: f64,
     slope: f64,
     extent: u32,
-    maximum_relief: f64,
+    parameter_start: f64,
+    parameter_end: f64,
 ) {
     if slope.abs() <= COORDINATE_EPSILON {
         return;
     }
     for half_step in 0..=extent * 2 {
         let coordinate = f64::from(half_step) * 0.5;
-        let relief = (coordinate - offset) / slope;
-        if relief > 0.0 && relief < maximum_relief {
-            boundaries.push(relief);
+        let parameter = (coordinate - offset) / slope;
+        if parameter > parameter_start && parameter < parameter_end {
+            boundaries.push(parameter);
         }
     }
 }
@@ -465,7 +636,9 @@ fn quantized_ratio(value: f64) -> Ratio<i64> {
 #[cfg(test)]
 mod tests {
     use num_rational::Ratio;
-    use relief_core::{CanonicalView, Chart, ReliefField, WarpCoefficients};
+    use relief_core::{Bounds, CanonicalView, Chart, ReliefField, WarpCoefficients};
+
+    use crate::{CameraBasis, TargetView};
 
     use super::{
         PreparedRelief, interpolate_unit_cubic, ratio_to_f64, roots_in_unit_interval,
@@ -517,17 +690,55 @@ mod tests {
             .inverse_line(Ratio::new(3, 4), Ratio::new(1, 2))
             .unwrap();
 
-        let preimages = solve_preimages(&prepared, &line, 16.0);
+        let facing = TargetView::front()
+            .facing_coefficients(CanonicalView::Front, Bounds::new(3, 1, 4).unwrap());
+        let preimages = solve_preimages(&prepared, &line, facing, 16.0);
         let locations: Vec<_> = preimages
             .iter()
             .map(|preimage| {
                 (
                     preimage.source_x,
-                    (ratio_to_f64(preimage.relief) * 1_000.0).round() / 1_000.0,
+                    (ratio_to_f64(line.relief_at(preimage.parameter)) * 1_000.0).round() / 1_000.0,
                 )
             })
             .collect();
 
         assert_eq!(locations, vec![(1, 4.0), (2, 12.0), (2, 16.0)]);
+    }
+
+    #[test]
+    fn locally_reversed_fold_branch_does_not_supply_color() {
+        let chart = Chart::from_rgba(
+            CanonicalView::Front,
+            3,
+            1,
+            vec![[1, 0, 0, 239], [2, 0, 0, 255], [3, 0, 0, 239]],
+        )
+        .unwrap();
+        let prepared = PreparedRelief::new(&ReliefField::new(&chart));
+        let zero = Ratio::from_integer(0);
+        let target = TargetView::from_camera(CameraBasis::new(
+            [Ratio::from_integer(1), zero, Ratio::from_integer(-1)],
+            [zero, Ratio::from_integer(1), zero],
+            [Ratio::from_integer(1), zero, Ratio::from_integer(1)],
+        ));
+        let bounds = Bounds::new(3, 1, 4).unwrap();
+        let warp = target.warp_coefficients(CanonicalView::Front, bounds);
+        let line = warp
+            .inverse_line(Ratio::new(3, 4), Ratio::new(1, 2))
+            .unwrap();
+        let facing = target.facing_coefficients(CanonicalView::Front, bounds);
+
+        let locations: Vec<_> = solve_preimages(&prepared, &line, facing, 16.0)
+            .iter()
+            .map(|preimage| {
+                (
+                    preimage.source_x,
+                    (ratio_to_f64(line.relief_at(preimage.parameter)) * 1_000.0).round() / 1_000.0,
+                )
+            })
+            .collect();
+
+        assert_eq!(locations, vec![(1, 4.0), (2, 16.0)]);
     }
 }

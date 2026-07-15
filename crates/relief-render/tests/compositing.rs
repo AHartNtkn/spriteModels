@@ -42,9 +42,9 @@ fn explicit_opposites_never_bleed_through_each_other() {
 }
 
 #[test]
-fn one_authored_front_is_visible_as_a_derived_back_observation() {
+fn one_explicit_opposite_source_is_visible_as_a_back_observation() {
     let bounds = Bounds::new(2, 2, 2).unwrap();
-    let front = solid(bounds, CanonicalView::Front, [7, 11, 13, 255]);
+    let front = solid(bounds, CanonicalView::Front, [7, 11, 13, 255]).with_opposite_assignment();
     let resolved = AuthoredModel::new(bounds, vec![front]).unwrap().resolve();
     let request = RenderRequest::new(8, 8, TargetView::back());
     let rear = render_model(&resolved, &request).unwrap();
@@ -53,7 +53,7 @@ fn one_authored_front_is_visible_as_a_derived_back_observation() {
         .iter()
         .enumerate()
         .find(|(_, pixel)| **pixel == [7, 11, 13, 255]);
-    let (index, _) = visible.expect("derived Back observation must render");
+    let (index, _) = visible.expect("explicit Back observation must render");
     let x = index as u32 % rear.width();
     let y = index as u32 / rear.width();
     assert_eq!(rear.owner_at(x, y).unwrap().view, CanonicalView::Back);

@@ -108,6 +108,34 @@ impl EditorDocument {
         self.state.model.chart(view)
     }
 
+    pub fn side_is_assigned(&self, view: CanonicalView) -> bool {
+        self.state.model.source_assigned_to(view).is_some()
+    }
+
+    pub fn set_source_opposite(
+        &mut self,
+        view: CanonicalView,
+        enabled: bool,
+    ) -> Result<(), EditorError> {
+        self.ensure_no_active_stroke()?;
+        let before = self.state.clone();
+        self.state.model.set_opposite_assignment(view, enabled)?;
+        self.finish_command(before);
+        Ok(())
+    }
+
+    pub fn set_source_mirror(
+        &mut self,
+        view: CanonicalView,
+        enabled: bool,
+    ) -> Result<(), EditorError> {
+        self.ensure_no_active_stroke()?;
+        let before = self.state.clone();
+        self.state.model.set_opposite_mirror(view, enabled)?;
+        self.finish_command(before);
+        Ok(())
+    }
+
     pub fn add_source(&mut self, view: CanonicalView) -> Result<(), EditorError> {
         self.ensure_no_active_stroke()?;
         let before = self.state.clone();
@@ -121,6 +149,17 @@ impl EditorDocument {
         self.ensure_no_active_stroke()?;
         let before = self.state.clone();
         let view = source.view();
+        let previous = self.state.model.chart(view);
+        let source = if previous.is_some_and(Chart::supplies_opposite) {
+            source.with_opposite_assignment()
+        } else {
+            source.without_opposite_assignment()
+        };
+        let source = if previous.is_some_and(Chart::mirrors_opposite) {
+            source.with_mirrored_opposite()
+        } else {
+            source.without_mirrored_opposite()
+        };
         self.state.model.replace_chart(source)?;
         self.state.selection = view;
         self.finish_command(before);

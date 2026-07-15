@@ -9,7 +9,7 @@ use png::{BitDepth, ColorType, Compression, Encoder, Filter};
 use relief_core::{AuthoredModel, Chart};
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
-use crate::{CanonicalViewName, ManifestV1, PackageError};
+use crate::{CanonicalViewName, ManifestV1, PackageError, SourceV1};
 
 pub fn save_writer<W: Write + Seek>(
     model: &AuthoredModel,
@@ -23,10 +23,14 @@ pub fn save_writer<W: Write + Seek>(
         format: "depthsprite".to_owned(),
         version: 1,
         bounds_pixels: [bounds.width(), bounds.height(), bounds.depth()],
-        views: model
+        sources: model
             .charts()
             .iter()
-            .map(|chart| chart.view().into())
+            .map(|chart| SourceV1 {
+                view: chart.view().into(),
+                opposite: chart.supplies_opposite(),
+                mirror: chart.mirrors_opposite(),
+            })
             .collect(),
     };
     let mut manifest_bytes =

@@ -16,6 +16,8 @@ fn new_document_owns_one_empty_source_and_is_clean() {
     assert_eq!(sources[0].view(), CanonicalView::Front);
     assert_eq!(sources[0].dimensions(), (2, 3));
     assert_eq!(sources[0].rgba(), &[EMPTY_RGBA; 6]);
+    assert!(!sources[0].supplies_opposite());
+    assert!(!sources[0].mirrors_opposite());
     assert_eq!(document.model(), &document.to_model());
     assert_eq!(document.selected_view(), CanonicalView::Front);
     assert!(!document.is_dirty());
@@ -24,7 +26,6 @@ fn new_document_owns_one_empty_source_and_is_clean() {
 #[test]
 fn sources_stay_in_canonical_order_and_a_seventh_is_refused() {
     let mut document = EditorDocument::new(bounds(), CanonicalView::Front);
-
     for view in [
         CanonicalView::Bottom,
         CanonicalView::Back,

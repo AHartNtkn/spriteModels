@@ -21,11 +21,21 @@ pub fn load_reader<R: Read + Seek>(reader: R) -> Result<AuthoredModel, PackageEr
         .map_err(|error| PackageError::Manifest(error.to_string()))?;
     let bounds = manifest.validate()?;
 
-    let mut charts = Vec::with_capacity(manifest.views.len());
-    for view_name in manifest.views {
-        let entry = view_name.entry_name();
+    let mut charts = Vec::with_capacity(manifest.sources.len());
+    for source in manifest.sources {
+        let entry = source.view.entry_name();
         let bytes = read_entry(&mut archive, entry)?;
-        charts.push(decode_chart(entry, &bytes, view_name.into())?);
+        let chart = decode_chart(entry, &bytes, source.view.into())?;
+        let chart = if source.opposite {
+            chart.with_opposite_assignment()
+        } else {
+            chart
+        };
+        charts.push(if source.mirror {
+            chart.with_mirrored_opposite()
+        } else {
+            chart
+        });
     }
     Ok(AuthoredModel::new(bounds, charts)?)
 }

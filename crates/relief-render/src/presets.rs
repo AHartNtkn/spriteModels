@@ -35,6 +35,19 @@ pub(crate) struct TargetExtents {
     pub(crate) max_y: Ratio<i64>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FacingCoefficients {
+    constant: f64,
+    relief_x: f64,
+    relief_y: f64,
+}
+
+impl FacingCoefficients {
+    pub(crate) fn evaluate(self, relief_x: f64, relief_y: f64) -> f64 {
+        self.constant + self.relief_x * relief_x + self.relief_y * relief_y
+    }
+}
+
 impl TargetView {
     pub fn from_camera(camera: CameraBasis) -> Self {
         Self { camera }
@@ -108,27 +121,31 @@ impl TargetView {
         ))
     }
 
-    pub fn is_front_facing(&self, view: CanonicalView) -> bool {
-        let unit_bounds = Bounds::new(1, 1, 1).expect("unit bounds are valid");
-        let inward = rational_vector(view.frame(unit_bounds).inward);
-        dot(&self.camera.depth, &inward) > ratio_zero()
-    }
-
-    pub fn warp_coefficients(
-        &self,
-        view: CanonicalView,
-        bounds: Bounds,
-    ) -> Option<WarpCoefficients> {
+    pub fn warp_coefficients(&self, view: CanonicalView, bounds: Bounds) -> WarpCoefficients {
         let frame = view.frame(bounds);
-        let inward = rational_vector(frame.inward);
-        if dot(&self.camera.depth, &inward) <= ratio_zero() {
-            return None;
-        }
-        Some(compose(&self.camera, frame))
+        compose(&self.camera, frame)
     }
 
     pub(crate) fn framing_extents(&self, bounds: Bounds) -> TargetExtents {
         camera_extents(&self.camera, bounds)
+    }
+
+    pub(crate) fn facing_coefficients(
+        &self,
+        view: CanonicalView,
+        bounds: Bounds,
+    ) -> FacingCoefficients {
+        let frame = view.frame(bounds);
+        let source_x = rational_vector(frame.source_u);
+        let source_y = rational_vector(frame.source_v);
+        let inward = rational_vector(frame.inward);
+        FacingCoefficients {
+            constant: ratio_to_f64(dot(&self.camera.depth, &inward)),
+            relief_x: -ratio_to_f64(dot(&self.camera.depth, &source_x))
+                / RELIEF_UNITS_PER_PIXEL as f64,
+            relief_y: -ratio_to_f64(dot(&self.camera.depth, &source_y))
+                / RELIEF_UNITS_PER_PIXEL as f64,
+        }
     }
 }
 
@@ -221,4 +238,8 @@ fn rational_vector(vector: [i64; 3]) -> Vector {
 
 fn ratio_zero() -> Ratio<i64> {
     Ratio::from_integer(0)
+}
+
+fn ratio_to_f64(value: Ratio<i64>) -> f64 {
+    *value.numer() as f64 / *value.denom() as f64
 }

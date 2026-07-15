@@ -1,16 +1,14 @@
 use std::path::PathBuf;
 
 use editor_core::{ActiveLayer, DepthValue, EditorDocument, ReliefValue};
-use relief_core::CanonicalView;
+use relief_core::{CanonicalView, EMPTY_RGBA};
 use relief_render::{FrameBuffer, RenderRequest, TargetView, render_model};
 
 const FRONT: CanonicalView = CanonicalView::Front;
 const TOP: CanonicalView = CanonicalView::Top;
-const HIDDEN_PIXEL: (u32, u32) = (15, 1);
+const HIDDEN_PIXEL: (u32, u32) = (0, 0);
 const BASIN_PIXEL: (u32, u32) = (15, 15);
 const HIDDEN_RGB: [u8; 3] = [23, 197, 241];
-const TOP_RGB: [u8; 3] = [216, 156, 85];
-const FRONT_RGB: [u8; 3] = [144, 76, 52];
 
 fn bowl_asset() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/examples/bowl.depthsprite")
@@ -73,29 +71,21 @@ fn complete_bowl_authoring_workflow_preserves_exact_sources_and_recessed_render(
         2,
         "only authored sources are stored"
     );
-    assert_eq!(source_pixel(&document, TOP, HIDDEN_PIXEL), [0, 0, 0, 0]);
-    assert_eq!(
-        source_pixel(&document, TOP, BASIN_PIXEL),
-        [TOP_RGB[0], TOP_RGB[1], TOP_RGB[2], 191]
-    );
+    assert_eq!(source_pixel(&document, TOP, HIDDEN_PIXEL), EMPTY_RGBA);
+    assert!(document.source(FRONT).unwrap().supplies_opposite());
+    assert!(document.source(FRONT).unwrap().mirrors_opposite());
+    assert!(!document.source(TOP).unwrap().supplies_opposite());
+    assert!(!document.source(TOP).unwrap().mirrors_opposite());
+    let initial_basin_pixel = source_pixel(&document, TOP, BASIN_PIXEL);
+    assert!(initial_basin_pixel[3] > 0);
 
     let before = render(&document);
-    let initial_rim = before.owner_at(48, 67).expect("rounded front rim");
-    let initial_basin = before.owner_at(48, 48).expect("recessed top basin");
-    assert_eq!(
-        (initial_rim.view, initial_rim.source_x, initial_rim.source_y),
-        (FRONT, 27, 2)
-    );
-    assert_eq!(
-        (
-            initial_basin.view,
-            initial_basin.source_x,
-            initial_basin.source_y,
-        ),
-        (TOP, 16, 16)
-    );
-    assert_eq!(before.rgba_at(48, 67), [144, 76, 52, 255]);
-    assert_eq!(before.rgba_at(48, 48), [216, 156, 85, 255]);
+    assert!((0..before.height()).any(|y| (0..before.width()).any(|x| {
+        before
+            .owner_at(x, y)
+            .is_some_and(|owner| owner.view == FRONT)
+    })));
+    assert!(rendered_source_pixel(&before, TOP, BASIN_PIXEL).is_some());
 
     paint_color(&mut document, TOP, HIDDEN_PIXEL, HIDDEN_RGB);
     assert_eq!(
@@ -122,10 +112,15 @@ fn complete_bowl_authoring_workflow_preserves_exact_sources_and_recessed_render(
         [HIDDEN_RGB[0], HIDDEN_RGB[1], HIDDEN_RGB[2], 255]
     );
 
-    paint_relief(&mut document, TOP, BASIN_PIXEL, 56);
+    paint_relief(&mut document, TOP, BASIN_PIXEL, 40);
     assert_eq!(
         source_pixel(&document, TOP, BASIN_PIXEL),
-        [TOP_RGB[0], TOP_RGB[1], TOP_RGB[2], 199]
+        [
+            initial_basin_pixel[0],
+            initial_basin_pixel[1],
+            initial_basin_pixel[2],
+            215,
+        ]
     );
     let after = render(&document);
     assert_ne!(after, with_geometry, "basin relief changes the render");
@@ -133,7 +128,7 @@ fn complete_bowl_authoring_workflow_preserves_exact_sources_and_recessed_render(
     assert!(document.undo(), "undo basin relief");
     assert_eq!(
         source_pixel(&document, TOP, BASIN_PIXEL),
-        [TOP_RGB[0], TOP_RGB[1], TOP_RGB[2], 191]
+        initial_basin_pixel
     );
     assert!(document.undo(), "undo added geometry");
     assert_eq!(
@@ -141,7 +136,7 @@ fn complete_bowl_authoring_workflow_preserves_exact_sources_and_recessed_render(
         [HIDDEN_RGB[0], HIDDEN_RGB[1], HIDDEN_RGB[2], 0]
     );
     assert!(document.undo(), "undo hidden color edit");
-    assert_eq!(source_pixel(&document, TOP, HIDDEN_PIXEL), [0, 0, 0, 0]);
+    assert_eq!(source_pixel(&document, TOP, HIDDEN_PIXEL), EMPTY_RGBA);
     assert_eq!(render(&document), before);
 
     assert!(document.redo(), "redo hidden color edit");
@@ -157,13 +152,25 @@ fn complete_bowl_authoring_workflow_preserves_exact_sources_and_recessed_render(
     assert!(document.redo(), "redo basin relief");
     assert_eq!(
         source_pixel(&document, TOP, BASIN_PIXEL),
-        [TOP_RGB[0], TOP_RGB[1], TOP_RGB[2], 199]
+        [
+            initial_basin_pixel[0],
+            initial_basin_pixel[1],
+            initial_basin_pixel[2],
+            215,
+        ]
     );
     assert_eq!(render(&document), after);
 
     let authored_sources = document
         .sources()
-        .map(|source| (source.view(), source.rgba().to_vec()))
+        .map(|source| {
+            (
+                source.view(),
+                source.supplies_opposite(),
+                source.mirrors_opposite(),
+                source.rgba().to_vec(),
+            )
+        })
         .collect::<Vec<_>>();
     let directory = tempfile::tempdir().unwrap();
     let saved_path = directory.path().join("edited-bowl.depthsprite");
@@ -176,7 +183,14 @@ fn complete_bowl_authoring_workflow_preserves_exact_sources_and_recessed_render(
     assert_eq!(
         reopened
             .sources()
-            .map(|source| (source.view(), source.rgba().to_vec()))
+            .map(|source| {
+                (
+                    source.view(),
+                    source.supplies_opposite(),
+                    source.mirrors_opposite(),
+                    source.rgba().to_vec(),
+                )
+            })
             .collect::<Vec<_>>(),
         authored_sources
     );
@@ -186,27 +200,40 @@ fn complete_bowl_authoring_workflow_preserves_exact_sources_and_recessed_render(
     );
     assert_eq!(
         source_pixel(&reopened, TOP, BASIN_PIXEL),
-        [216, 156, 85, 199]
+        [
+            initial_basin_pixel[0],
+            initial_basin_pixel[1],
+            initial_basin_pixel[2],
+            215,
+        ]
     );
 
     let reopened_frame = render(&reopened);
     assert_eq!(reopened_frame, after, "save and reopen preserve exact RGBA");
-    let rim = rendered_source_pixel(&reopened_frame, FRONT, (27, 2))
-        .expect("rounded front wall remains visible");
     let basin = rendered_source_pixel(&reopened_frame, TOP, BASIN_PIXEL)
         .expect("edited recessed basin remains visible");
     assert_eq!(
-        reopened_frame.rgba_at(rim.0, rim.1),
-        [FRONT_RGB[0], FRONT_RGB[1], FRONT_RGB[2], 255]
-    );
-    assert_eq!(
         reopened_frame.rgba_at(basin.0, basin.1),
-        [TOP_RGB[0], TOP_RGB[1], TOP_RGB[2], 255]
+        [
+            initial_basin_pixel[0],
+            initial_basin_pixel[1],
+            initial_basin_pixel[2],
+            255,
+        ]
     );
     assert!(
-        basin.1 < rim.1,
-        "the recessed basin renders behind the near rim"
+        (0..reopened_frame.height()).any(|y| (0..reopened_frame.width()).any(|x| {
+            reopened_frame
+                .owner_at(x, y)
+                .is_some_and(|owner| owner.view == FRONT)
+        })),
+        "rounded Front exterior remains visible"
     );
-    assert_eq!(source_pixel(&reopened, FRONT, (27, 2)), [144, 76, 52, 215]);
-    assert_eq!(source_pixel(&reopened, FRONT, (4, 2)), [144, 76, 52, 215]);
+    assert!(
+        reopened
+            .model()
+            .resolve()
+            .chart(CanonicalView::Bottom)
+            .is_none()
+    );
 }

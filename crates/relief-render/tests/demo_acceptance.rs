@@ -123,12 +123,17 @@ fn foundational_block_authors_six_lit_zero_relief_charts() {
             "{:?} must carry a visible within-face light gradient",
             chart.view()
         );
-        let (upper_left, upper_left_relief) = authored_pixel(chart, 0, 0);
-        let (lower_right, lower_right_relief) = authored_pixel(chart, 15, 15);
-        assert_eq!(upper_left_relief, lower_right_relief);
+        let (bright, dark) = match chart.view() {
+            CanonicalView::Back | CanonicalView::Right => ((15, 0), (0, 15)),
+            CanonicalView::Bottom => ((0, 15), (15, 0)),
+            _ => ((0, 0), (15, 15)),
+        };
+        let (bright_rgb, bright_relief) = authored_pixel(chart, bright.0, bright.1);
+        let (dark_rgb, dark_relief) = authored_pixel(chart, dark.0, dark.1);
+        assert_eq!(bright_relief, dark_relief);
         assert!(
-            brightness(upper_left) > brightness(lower_right),
-            "{:?} must be brighter at upper-left than lower-right",
+            brightness(bright_rgb) > brightness(dark_rgb),
+            "{:?} must follow the world-directed bright-to-shadow diagonal",
             chart.view()
         );
     }
@@ -159,6 +164,10 @@ fn foundational_bowl_has_shallow_basin_narrowing_exterior_and_lighting() {
     );
     let front = model.chart(CanonicalView::Front).unwrap();
     let top = model.chart(CanonicalView::Top).unwrap();
+    assert!(front.supplies_opposite());
+    assert!(front.mirrors_opposite());
+    assert!(!top.supplies_opposite());
+    assert!(!top.mirrors_opposite());
     assert_eq!(front.dimensions(), (32, 12));
     assert_eq!(top.dimensions(), (32, 32));
 
@@ -386,7 +395,7 @@ fn opaque_is_connected(frame: &FrameBuffer) -> bool {
 }
 
 #[test]
-fn foundational_globe_renders_explicit_front_back_and_connected_oblique_silhouette() {
+fn foundational_globe_combines_explicit_front_back_into_a_connected_oblique_silhouette() {
     let model = load_path(asset("globe.depthsprite")).unwrap();
     let resolved = model.resolve();
     let front = render_model(&resolved, &RenderRequest::new(96, 96, TargetView::front())).unwrap();
@@ -399,20 +408,632 @@ fn foundational_globe_renders_explicit_front_back_and_connected_oblique_silhouet
 
     assert_frame_uses_explicit_chart(&front, model.chart(CanonicalView::Front).unwrap());
     assert_frame_uses_explicit_chart(&back, model.chart(CanonicalView::Back).unwrap());
+    let mut oblique_views = BTreeSet::new();
     for y in 0..oblique.height() {
         for x in 0..oblique.width() {
-            if oblique.rgba_at(x, y)[3] == 0 {
-                continue;
+            if let Some(owner) = oblique.owner_at(x, y) {
+                oblique_views.insert(owner.view);
             }
-            assert_eq!(
-                oblique.owner_at(x, y).unwrap().view,
-                CanonicalView::Front,
-                "the front-right-top globe view must not contain Back ownership"
-            );
         }
     }
+    assert!(oblique_views.contains(&CanonicalView::Front));
+    assert!(oblique_views.contains(&CanonicalView::Back));
     assert!(
         opaque_is_connected(&oblique),
         "the oblique globe silhouette must be one eight-connected region"
+    );
+}
+
+fn views(model: &relief_core::AuthoredModel) -> Vec<CanonicalView> {
+    model.charts().iter().map(Chart::view).collect()
+}
+
+#[derive(Clone, Copy)]
+struct GyroscopeProjection {
+    radius_u: i32,
+    radius_v: i32,
+    direction_u: i32,
+    direction_v: i32,
+    thickness: i32,
+    phase: i32,
+    draw_order: i32,
+}
+
+const GYROSCOPE_PROJECTIONS: [(CanonicalView, [GyroscopeProjection; 3]); 6] = [
+    (
+        CanonicalView::Front,
+        [
+            GyroscopeProjection {
+                radius_u: 21,
+                radius_v: 15,
+                direction_u: 4,
+                direction_v: 1,
+                thickness: 2,
+                phase: 1,
+                draw_order: 0,
+            },
+            GyroscopeProjection {
+                radius_u: 16,
+                radius_v: 10,
+                direction_u: 3,
+                direction_v: -2,
+                thickness: 2,
+                phase: 5,
+                draw_order: 2,
+            },
+            GyroscopeProjection {
+                radius_u: 10,
+                radius_v: 6,
+                direction_u: 1,
+                direction_v: 0,
+                thickness: 2,
+                phase: 9,
+                draw_order: 1,
+            },
+        ],
+    ),
+    (
+        CanonicalView::Back,
+        [
+            GyroscopeProjection {
+                radius_u: 20,
+                radius_v: 14,
+                direction_u: 3,
+                direction_v: -2,
+                thickness: 2,
+                phase: 7,
+                draw_order: 2,
+            },
+            GyroscopeProjection {
+                radius_u: 16,
+                radius_v: 11,
+                direction_u: 4,
+                direction_v: 1,
+                thickness: 2,
+                phase: 2,
+                draw_order: 0,
+            },
+            GyroscopeProjection {
+                radius_u: 9,
+                radius_v: 6,
+                direction_u: 1,
+                direction_v: 1,
+                thickness: 2,
+                phase: 11,
+                draw_order: 1,
+            },
+        ],
+    ),
+    (
+        CanonicalView::Left,
+        [
+            GyroscopeProjection {
+                radius_u: 21,
+                radius_v: 13,
+                direction_u: 2,
+                direction_v: 3,
+                thickness: 2,
+                phase: 4,
+                draw_order: 1,
+            },
+            GyroscopeProjection {
+                radius_u: 15,
+                radius_v: 11,
+                direction_u: 1,
+                direction_v: -3,
+                thickness: 2,
+                phase: 8,
+                draw_order: 0,
+            },
+            GyroscopeProjection {
+                radius_u: 10,
+                radius_v: 5,
+                direction_u: 1,
+                direction_v: 0,
+                thickness: 2,
+                phase: 12,
+                draw_order: 2,
+            },
+        ],
+    ),
+    (
+        CanonicalView::Right,
+        [
+            GyroscopeProjection {
+                radius_u: 20,
+                radius_v: 15,
+                direction_u: 1,
+                direction_v: -3,
+                thickness: 2,
+                phase: 10,
+                draw_order: 0,
+            },
+            GyroscopeProjection {
+                radius_u: 16,
+                radius_v: 9,
+                direction_u: 2,
+                direction_v: 3,
+                thickness: 2,
+                phase: 3,
+                draw_order: 2,
+            },
+            GyroscopeProjection {
+                radius_u: 9,
+                radius_v: 6,
+                direction_u: 0,
+                direction_v: 1,
+                thickness: 2,
+                phase: 14,
+                draw_order: 1,
+            },
+        ],
+    ),
+    (
+        CanonicalView::Top,
+        [
+            GyroscopeProjection {
+                radius_u: 19,
+                radius_v: 16,
+                direction_u: 3,
+                direction_v: 1,
+                thickness: 2,
+                phase: 6,
+                draw_order: 2,
+            },
+            GyroscopeProjection {
+                radius_u: 16,
+                radius_v: 10,
+                direction_u: 1,
+                direction_v: 3,
+                thickness: 2,
+                phase: 12,
+                draw_order: 1,
+            },
+            GyroscopeProjection {
+                radius_u: 10,
+                radius_v: 6,
+                direction_u: 2,
+                direction_v: -1,
+                thickness: 2,
+                phase: 1,
+                draw_order: 0,
+            },
+        ],
+    ),
+    (
+        CanonicalView::Bottom,
+        [
+            GyroscopeProjection {
+                radius_u: 21,
+                radius_v: 14,
+                direction_u: 1,
+                direction_v: 3,
+                thickness: 2,
+                phase: 13,
+                draw_order: 1,
+            },
+            GyroscopeProjection {
+                radius_u: 15,
+                radius_v: 11,
+                direction_u: 3,
+                direction_v: -1,
+                thickness: 2,
+                phase: 4,
+                draw_order: 0,
+            },
+            GyroscopeProjection {
+                radius_u: 9,
+                radius_v: 5,
+                direction_u: 1,
+                direction_v: 2,
+                thickness: 2,
+                phase: 7,
+                draw_order: 2,
+            },
+        ],
+    ),
+];
+
+fn gyroscope_ring_at(x: i32, y: i32, projections: &[GyroscopeProjection; 3]) -> Option<usize> {
+    let centered_x = 2 * x + 1 - 48;
+    let centered_y = 2 * y + 1 - 48;
+    projections
+        .iter()
+        .enumerate()
+        .filter(|(_, projection)| {
+            let u = projection.direction_u * centered_x + projection.direction_v * centered_y;
+            let v = -projection.direction_v * centered_x + projection.direction_u * centered_y;
+            let norm = projection.direction_u.pow(2) + projection.direction_v.pow(2);
+            let radius_u = 2 * projection.radius_u;
+            let radius_v = 2 * projection.radius_v;
+            let metric = i64::from(u).pow(2) * 4096 / i64::from(norm * radius_u.pow(2))
+                + i64::from(v).pow(2) * 4096 / i64::from(norm * radius_v.pow(2));
+            let band = 8192 * i64::from(projection.thickness)
+                / i64::from(projection.radius_u.min(projection.radius_v));
+            (metric - 4096).abs() <= band
+        })
+        .max_by_key(|(_, projection)| projection.draw_order)
+        .map(|(ring, _)| ring)
+}
+
+fn gyroscope_family(rgb: [u8; 3]) -> usize {
+    if rgb[0] > rgb[1] && rgb[0] > rgb[2] {
+        0
+    } else if rgb[1] > rgb[0] && rgb[1] > rgb[2] {
+        1
+    } else {
+        assert!(
+            rgb[2] > rgb[0] && rgb[2] > rgb[1],
+            "invalid ring color {rgb:?}"
+        );
+        2
+    }
+}
+
+fn target(view: CanonicalView) -> TargetView {
+    match view {
+        CanonicalView::Front => TargetView::front(),
+        CanonicalView::Right => TargetView::right(),
+        CanonicalView::Back => TargetView::back(),
+        CanonicalView::Left => TargetView::left(),
+        CanonicalView::Top => TargetView::top(),
+        CanonicalView::Bottom => TargetView::bottom(),
+    }
+}
+
+fn owner_color_distribution(
+    frame: &FrameBuffer,
+) -> std::collections::BTreeMap<(CanonicalView, usize), usize> {
+    let mut distribution = std::collections::BTreeMap::new();
+    for y in 0..frame.height() {
+        for x in 0..frame.width() {
+            let Some(owner) = frame.owner_at(x, y) else {
+                continue;
+            };
+            let rgb = frame.rgba_at(x, y);
+            *distribution
+                .entry((owner.view, gyroscope_family([rgb[0], rgb[1], rgb[2]])))
+                .or_default() += 1;
+        }
+    }
+    distribution
+}
+
+fn owner_views_touch(frame: &FrameBuffer, first: CanonicalView, second: CanonicalView) -> bool {
+    for y in 0..frame.height() {
+        for x in 0..frame.width() {
+            if frame.owner_at(x, y).map(|owner| owner.view) != Some(first) {
+                continue;
+            }
+            for dy in -1..=1_i32 {
+                for dx in -1..=1_i32 {
+                    let neighbor_x = x as i32 + dx;
+                    let neighbor_y = y as i32 + dy;
+                    if neighbor_x >= 0
+                        && neighbor_y >= 0
+                        && frame
+                            .owner_at(neighbor_x as u32, neighbor_y as u32)
+                            .map(|owner| owner.view)
+                            == Some(second)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn has_two_axis_relief(chart: &Chart) -> bool {
+    let (width, height) = chart.dimensions();
+    (0..height)
+        .filter(|&y| row_reliefs(chart, y).len() >= 3)
+        .count()
+        >= 3
+        && (0..width)
+            .filter(|&x| column_reliefs(chart, x).len() >= 3)
+            .count()
+            >= 3
+}
+
+#[test]
+fn ambitious_gyroscope_authors_exact_asymmetric_ring_observations() {
+    let gyroscope = load_path(asset("gyroscope.depthsprite")).unwrap();
+    assert_eq!(gyroscope.bounds(), Bounds::new(48, 48, 48).unwrap());
+    assert_eq!(
+        views(&gyroscope),
+        vec![
+            CanonicalView::Front,
+            CanonicalView::Right,
+            CanonicalView::Back,
+            CanonicalView::Left,
+            CanonicalView::Top,
+            CanonicalView::Bottom,
+        ]
+    );
+    for (a, b) in [
+        (CanonicalView::Front, CanonicalView::Back),
+        (CanonicalView::Left, CanonicalView::Right),
+        (CanonicalView::Top, CanonicalView::Bottom),
+    ] {
+        assert_ne!(
+            gyroscope.chart(a).unwrap().rgba(),
+            gyroscope.chart(b).unwrap().rgba()
+        );
+    }
+
+    for (view, projections) in GYROSCOPE_PROJECTIONS {
+        let chart = gyroscope.chart(view).unwrap();
+        let mut families = BTreeSet::new();
+        let mut empty = 0;
+        assert!(
+            projections
+                .iter()
+                .all(|projection| (0..16).contains(&projection.phase))
+        );
+        for y in 0..48_i32 {
+            for x in 0..48_i32 {
+                let actual = chart.texel_at(x as u32, y as u32).unwrap();
+                match (gyroscope_ring_at(x, y, &projections), actual) {
+                    (None, DecodedTexel::Background) => empty += 1,
+                    (Some(expected), DecodedTexel::Relief { rgb, eighths }) => {
+                        assert_eq!(
+                            gyroscope_family(rgb),
+                            expected,
+                            "{view:?} ring at ({x}, {y})"
+                        );
+                        assert!(eighths <= 192);
+                        families.insert(expected);
+                    }
+                    (expected, actual) => panic!(
+                        "{view:?} source topology at ({x}, {y}) expected {expected:?}, got {actual:?}"
+                    ),
+                }
+            }
+        }
+        assert_eq!(families, BTreeSet::from([0, 1, 2]));
+        assert!(empty > 0, "{view:?} must preserve alpha-empty gaps");
+        assert!(reliefs(chart).len() >= 8, "{view:?} must vary ring relief");
+    }
+}
+
+#[test]
+fn ambitious_gyroscope_opposite_renders_preserve_distinct_ownership_and_color() {
+    let gyroscope = load_path(asset("gyroscope.depthsprite")).unwrap();
+    let resolved = gyroscope.resolve();
+    for (a, b) in [
+        (CanonicalView::Front, CanonicalView::Back),
+        (CanonicalView::Left, CanonicalView::Right),
+        (CanonicalView::Top, CanonicalView::Bottom),
+    ] {
+        let first = render_model(&resolved, &RenderRequest::new(96, 96, target(a))).unwrap();
+        let second = render_model(&resolved, &RenderRequest::new(96, 96, target(b))).unwrap();
+        let first_distribution = owner_color_distribution(&first);
+        let second_distribution = owner_color_distribution(&second);
+        assert!(first_distribution.keys().any(|(view, _)| *view == a));
+        assert!(second_distribution.keys().any(|(view, _)| *view == b));
+        assert!(
+            first_distribution.keys().all(|(view, _)| *view != b),
+            "the opposite-facing {b:?} image must not bleed into the {a:?} target"
+        );
+        assert!(
+            second_distribution.keys().all(|(view, _)| *view != a),
+            "the opposite-facing {a:?} image must not bleed into the {b:?} target"
+        );
+        assert_ne!(first_distribution, second_distribution);
+    }
+}
+
+#[test]
+fn ambitious_tent_authors_entrance_curvature_and_connected_landmarks() {
+    let tent = load_path(asset("tent.depthsprite")).unwrap();
+    assert_eq!(tent.bounds(), Bounds::new(48, 28, 36).unwrap());
+    assert_eq!(
+        views(&tent),
+        vec![
+            CanonicalView::Front,
+            CanonicalView::Right,
+            CanonicalView::Top
+        ]
+    );
+    let front = tent.chart(CanonicalView::Front).unwrap();
+    assert!(front.supplies_opposite());
+    assert!(
+        tent.chart(CanonicalView::Right)
+            .unwrap()
+            .supplies_opposite()
+    );
+    assert!(!tent.chart(CanonicalView::Top).unwrap().supplies_opposite());
+    assert!(tent.resolve().chart(CanonicalView::Back).is_some());
+    assert!(tent.resolve().chart(CanonicalView::Left).is_some());
+    assert!(tent.resolve().chart(CanonicalView::Bottom).is_none());
+    assert!(
+        !foreground(front, 24, 24),
+        "the entrance center must be alpha-empty"
+    );
+    assert!(
+        foreground(front, 24, 14),
+        "fabric must surround the entrance above"
+    );
+    assert!(
+        foreground(front, 17, 24),
+        "fabric must surround the entrance on the left"
+    );
+    assert!(
+        foreground(front, 31, 24),
+        "fabric must surround the entrance on the right"
+    );
+    assert!(
+        foreground(front, 20, 22),
+        "the foreground flap must remain separate from the entrance void"
+    );
+    for view in [CanonicalView::Right, CanonicalView::Top] {
+        assert!(
+            has_two_axis_relief(tent.chart(view).unwrap()),
+            "{view:?} must vary relief along both axes"
+        );
+    }
+
+    let oblique = render_model(
+        &tent.resolve(),
+        &RenderRequest::new(128, 96, TargetView::isometric()),
+    )
+    .unwrap();
+    assert!(opaque_is_connected(&oblique));
+    assert!(
+        owner_views_touch(&oblique, CanonicalView::Front, CanonicalView::Top),
+        "Front eave must meet the Top roof"
+    );
+    assert!(
+        owner_views_touch(&oblique, CanonicalView::Right, CanonicalView::Top),
+        "Right eave must meet the Top roof"
+    );
+}
+
+fn dome_rib(rgb: [u8; 3]) -> bool {
+    rgb[0] > rgb[1] && rgb[1] > rgb[2].saturating_add(20)
+}
+
+fn dome_window(rgb: [u8; 3]) -> bool {
+    rgb[1].saturating_sub(rgb[0]) >= 14 && rgb[2].saturating_sub(rgb[1]) >= 14
+}
+
+#[test]
+fn ambitious_dome_authors_ribs_relief_and_connected_crown_drum() {
+    let dome = load_path(asset("dome.depthsprite")).unwrap();
+    assert_eq!(dome.bounds(), Bounds::new(48, 32, 48).unwrap());
+    assert_eq!(
+        views(&dome),
+        vec![
+            CanonicalView::Front,
+            CanonicalView::Right,
+            CanonicalView::Top
+        ]
+    );
+    assert!(
+        dome.chart(CanonicalView::Front)
+            .unwrap()
+            .supplies_opposite()
+    );
+    assert!(
+        dome.chart(CanonicalView::Right)
+            .unwrap()
+            .supplies_opposite()
+    );
+    assert!(!dome.chart(CanonicalView::Top).unwrap().supplies_opposite());
+    assert!(dome.resolve().chart(CanonicalView::Back).is_some());
+    assert!(dome.resolve().chart(CanonicalView::Left).is_some());
+    assert!(dome.resolve().chart(CanonicalView::Bottom).is_none());
+    for view in [
+        CanonicalView::Front,
+        CanonicalView::Right,
+        CanonicalView::Top,
+    ] {
+        let chart = dome.chart(view).unwrap();
+        assert!(
+            has_two_axis_relief(chart),
+            "{view:?} must vary relief along both axes"
+        );
+        let rib_pixels = chart
+            .texels()
+            .filter(|texel| matches!(texel, DecodedTexel::Relief { rgb, .. } if dome_rib(*rgb)))
+            .count();
+        assert!(
+            rib_pixels >= 24,
+            "{view:?} must repeat the architectural rib palette"
+        );
+    }
+    assert!(
+        !dome
+            .chart(CanonicalView::Top)
+            .unwrap()
+            .texels()
+            .any(|texel| matches!(texel, DecodedTexel::Relief { rgb, .. } if dome_window(rgb))),
+        "windows must not appear on the shell Top"
+    );
+    for view in [CanonicalView::Front, CanonicalView::Right] {
+        let chart = dome.chart(view).unwrap();
+        let window_rows = (0..32)
+            .flat_map(|y| {
+                (0..48).filter_map(move |x| match chart.texel_at(x, y) {
+                    Some(DecodedTexel::Relief { rgb, .. }) if dome_window(rgb) => Some(y),
+                    _ => None,
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !window_rows.is_empty(),
+            "{view:?} drum must contain windows"
+        );
+        assert!(
+            window_rows.iter().all(|&y| y >= 20),
+            "{view:?} windows must remain on the drum"
+        );
+    }
+    assert!(
+        reliefs(dome.chart(CanonicalView::Top).unwrap())
+            .iter()
+            .all(|&value| value <= 128)
+    );
+    for view in [CanonicalView::Front, CanonicalView::Right] {
+        assert!(
+            reliefs(dome.chart(view).unwrap())
+                .iter()
+                .all(|&value| value <= 192)
+        );
+    }
+
+    let oblique = render_model(
+        &dome.resolve(),
+        &RenderRequest::new(128, 112, TargetView::isometric()),
+    )
+    .unwrap();
+    let owners = (0..oblique.height())
+        .flat_map(|y| {
+            (0..oblique.width()).filter_map({
+                let oblique = &oblique;
+                move |x| oblique.owner_at(x, y)
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(!owners.is_empty());
+    assert!(
+        owners
+            .iter()
+            .all(|owner| owner.view != CanonicalView::Bottom),
+        "the Top-only dome must never invent a Bottom observation"
+    );
+    for view in [
+        CanonicalView::Front,
+        CanonicalView::Right,
+        CanonicalView::Top,
+    ] {
+        assert!(
+            owners.iter().any(|owner| owner.view == view),
+            "oblique render must retain {view:?} ownership"
+        );
+    }
+    for view in [CanonicalView::Front, CanonicalView::Right] {
+        assert!(
+            owners
+                .iter()
+                .any(|owner| owner.view == view && owner.source_y < 20),
+            "{view:?} must own crown pixels"
+        );
+        assert!(
+            owners
+                .iter()
+                .any(|owner| owner.view == view && owner.source_y >= 20),
+            "{view:?} must own drum pixels"
+        );
+        assert!(
+            owner_views_touch(&oblique, view, CanonicalView::Top),
+            "{view:?} crown must connect to Top shell ownership"
+        );
+    }
+    assert!(
+        opaque_is_connected(&oblique),
+        "crown and drum must form one connected rendered silhouette"
     );
 }

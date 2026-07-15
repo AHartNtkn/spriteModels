@@ -55,11 +55,19 @@ impl From<CanonicalView> for CanonicalViewName {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct SourceV1 {
+    pub view: CanonicalViewName,
+    pub opposite: bool,
+    pub mirror: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestV1 {
     pub format: String,
     pub version: u32,
     pub bounds_pixels: [u32; 3],
-    pub views: Vec<CanonicalViewName>,
+    pub sources: Vec<SourceV1>,
 }
 
 impl ManifestV1 {

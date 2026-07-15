@@ -23,9 +23,12 @@ relief, decreasing nonzero alpha moves inward, and alpha zero means the pixel is
 empty. RGB remains stored beneath an empty pixel so geometry can be removed and
 restored without losing its color.
 
-One source also supplies its missing opposite side. For example, Front supplies
-Back until a distinct Back source is added; adding the opposite replaces that
-fallback.
+Each source always supplies its named side. Its **Also Opposite** toggle controls
+whether the same PNG also supplies the compatible opposite side. With the toggle
+off, that opposite remains absent unless it has its own source. **Mirror Opposite**
+optionally reflects the paired observation through the model midpoint plane while
+keeping color and depth registered. Both toggles begin off; disabling Also Opposite
+remembers the mirror choice.
 
 ## Authoring workflow
 
@@ -34,10 +37,11 @@ Use **File → New** to start a model, **File → Open** to open a `.depthsprite
 Open, and Quit ask whether to save, discard, or cancel when there are unsaved
 changes.
 
-Source cards fill the canonical three-by-two grid. Use **Add Sprite** to create the
-next source. A source card's menu can **Import PNG…** to replace it with a
-same-sized RGBA image or **Remove** it; removing an authored opposite restores the
-remaining source's fallback.
+Source cards fill the canonical three-by-two grid. Use **Add Sprite** to choose an
+unassigned canonical side. Open a card's side menu to reassign it or toggle **Also
+Opposite**; a paired card is labeled, for example, `Front + Back`. A card's menu
+can **Import PNG…** to replace it with a same-sized RGBA image or **Remove** it.
+Painting, importing, saving, and reopening preserve the side assignment.
 
 Each source card places its color canvas above its depth canvas. Both canvases use
 the same pixel coordinates, zoom, and pan. The color canvas shows stored RGB even

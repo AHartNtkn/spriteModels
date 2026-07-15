@@ -404,6 +404,10 @@ mod tests {
     fn real_frame_observes_every_rendered_workspace_widget_and_ratio() {
         let context = egui::Context::default();
         let mut app = DepthSpriteApp::from_startup_path(None);
+        app.shell
+            .document
+            .set_source_opposite(CanonicalView::Front, false)
+            .unwrap();
         for view in layout::CANONICAL_SOURCE_ORDER.into_iter().skip(1) {
             app.shell.document.add_source(view).unwrap();
         }

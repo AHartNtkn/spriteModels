@@ -228,3 +228,71 @@ fn reassignment_is_exactly_one_undo_step_and_tracks_the_selected_source() {
     assert_eq!(document.selected_view(), CanonicalView::Back);
     assert!(!document.can_redo());
 }
+
+#[test]
+fn opposite_side_toggle_is_exactly_one_undoable_command() {
+    let mut document = document(2, 1, vec![[1, 2, 3, 255]; 2]);
+    let before_revision = document.revision();
+
+    document.set_source_opposite(FRONT, true).unwrap();
+
+    assert_eq!(document.revision(), before_revision + 1);
+    assert!(document.source(FRONT).unwrap().supplies_opposite());
+    assert!(
+        document
+            .to_model()
+            .resolve()
+            .chart(CanonicalView::Back)
+            .is_some()
+    );
+    assert!(document.undo());
+    assert!(!document.source(FRONT).unwrap().supplies_opposite());
+    assert!(
+        document
+            .to_model()
+            .resolve()
+            .chart(CanonicalView::Back)
+            .is_none()
+    );
+    assert!(!document.can_undo());
+    assert!(document.redo());
+    assert!(document.source(FRONT).unwrap().supplies_opposite());
+}
+
+#[test]
+fn mirror_and_opposite_are_independent_undoable_commands() {
+    let mut document = document(2, 1, vec![[1, 2, 3, 255]; 2]);
+    let before_revision = document.revision();
+
+    document.set_source_opposite(FRONT, true).unwrap();
+    document.set_source_mirror(FRONT, true).unwrap();
+    document.set_source_opposite(FRONT, false).unwrap();
+
+    let source = document.source(FRONT).unwrap();
+    assert!(!source.supplies_opposite());
+    assert!(source.mirrors_opposite());
+    assert!(
+        document
+            .to_model()
+            .resolve()
+            .chart(CanonicalView::Back)
+            .is_none()
+    );
+    assert_eq!(document.revision(), before_revision + 3);
+
+    assert!(document.undo());
+    assert!(document.source(FRONT).unwrap().supplies_opposite());
+    assert!(document.source(FRONT).unwrap().mirrors_opposite());
+    assert!(document.undo());
+    assert!(document.source(FRONT).unwrap().supplies_opposite());
+    assert!(!document.source(FRONT).unwrap().mirrors_opposite());
+    assert!(document.undo());
+    assert!(!document.source(FRONT).unwrap().supplies_opposite());
+    assert!(!document.source(FRONT).unwrap().mirrors_opposite());
+
+    assert!(document.redo());
+    assert!(document.redo());
+    assert!(document.redo());
+    assert!(!document.source(FRONT).unwrap().supplies_opposite());
+    assert!(document.source(FRONT).unwrap().mirrors_opposite());
+}

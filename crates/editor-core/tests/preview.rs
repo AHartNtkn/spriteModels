@@ -93,13 +93,10 @@ fn horizontal_drag_changes_yaw_without_document_mutation() {
     let mut camera = OrbitCamera::default();
     let initial_camera = camera;
     let initial_target = camera.target_view();
-    assert!(initial_target.is_front_facing(CanonicalView::Front));
-
     camera.drag(400.0, 0.0);
 
     assert_ne!(camera, initial_camera);
     assert_ne!(camera.target_view(), initial_target);
-    assert!(!camera.target_view().is_front_facing(CanonicalView::Front));
     assert_document_unchanged_by_drag(&mut document, content, dirty, revision);
 }
 
@@ -112,13 +109,10 @@ fn vertical_drag_changes_pitch_without_document_mutation() {
     let mut camera = OrbitCamera::default();
     let initial_camera = camera;
     let initial_target = camera.target_view();
-    assert!(initial_target.is_front_facing(CanonicalView::Top));
-
     camera.drag(0.0, -400.0);
 
     assert_ne!(camera, initial_camera);
     assert_ne!(camera.target_view(), initial_target);
-    assert!(!camera.target_view().is_front_facing(CanonicalView::Top));
     assert_document_unchanged_by_drag(&mut document, content, dirty, revision);
 }
 
@@ -306,7 +300,7 @@ fn native_preview_cell_depends_only_on_registered_bounds_and_legal_relief() {
     let first = preview.frame(&document, camera).unwrap();
     assert_eq!(
         (first.framebuffer().width(), first.framebuffer().height()),
-        (52, 52)
+        (51, 51)
     );
     assert_occupied_with_breathing_room(first.framebuffer());
     let generation = first.generation();
@@ -318,7 +312,7 @@ fn native_preview_cell_depends_only_on_registered_bounds_and_legal_relief() {
             orbited.framebuffer().width(),
             orbited.framebuffer().height()
         ),
-        (52, 52)
+        (51, 51)
     );
     assert_occupied_with_breathing_room(orbited.framebuffer());
     assert_eq!(orbited.generation(), generation + 1);

@@ -2,7 +2,7 @@ use std::error::Error;
 
 use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart, EMPTY_RGBA};
 
-use crate::pixel::{integer_sqrt, mask_boundary, rgba, shade};
+use crate::pixel::{directional_light, integer_sqrt, mask_boundary, rgba, shade};
 
 const SIZE: i32 = 48;
 const RADIUS: i32 = 48;
@@ -83,7 +83,7 @@ fn hemisphere_pixels(view: CanonicalView) -> Vec<[u8; 4]> {
                 (CanonicalView::Back, true) => BACK_LAND,
                 _ => unreachable!("the globe authors only Front and Back"),
             };
-            let directional = (48 - x + 48 - y) / 6;
+            let directional = directional_light(view, 48, 48, x, y);
             let grid_light = if grid { 18 } else { 0 };
             pixels.push(rgba(
                 shade(base, 12 + directional + grid_light, relief),
