@@ -5,7 +5,9 @@
 An `AuthoredModel` is a bundle of one to six oriented RGBA images. Those images are
 the complete authored model. Rendering directly resamples them into a target view
 to produce a pseudo-3D impression. The only persistent spatial information is each
-image's unique canonical side and shared integer bounds `(width, height, depth)`.
+image's primary canonical side, whether that same PNG also supplies its compatible
+opposite, whether that opposite is geometrically mirrored, and shared integer
+bounds `(width, height, depth)`.
 Every bound is in `1..=63`.
 
 `relief-core` owns `AuthoredModel`, its bounds, canonical chart frames, validation,
@@ -72,23 +74,42 @@ back. Image `u` increases rightward and image `v` downward:
 | top | `+x` | `+z` | `+y` |
 | bottom | `+x` | `-z` | `-y` |
 
-These signed frames are the authority for registration, fallback orientation, and
-synchronized edge resizing. Bounds register image planes; they do not assert that
-the enclosed box is occupied. Each chart remains an independent two-dimensional
-source domain.
+These signed frames are the authority for registration, opposite-side orientation,
+and synchronized edge resizing. Bounds register image planes; they do not assert
+that the enclosed box is occupied. Each chart remains an independent
+two-dimensional source domain.
 
 ## Authored and resolved charts
 
-Authored charts are the PNG evidence stored in the model. `AuthoredModel::resolve`
-produces a `ResolvedCharts` observation set in canonical rank order. For each side,
-the explicit authored chart wins. If that side is absent and its opposite is
-authored, the opposite RGBA is observed through the requested side's canonical
-frame without flipping or rewriting its pixels. If neither side is authored, that
-axis contributes no observation.
+Authored charts are the PNG evidence stored in the model. Each source has one
+primary side and two independent opposite-side bits: **Also Opposite** determines
+whether it supplies the compatible opposite observation, and **Mirror Opposite**
+determines how that observation is registered. Mirror Opposite has no rendering
+effect while Also Opposite is disabled. A source cannot claim a side already
+assigned to another source.
 
-`ResolvedCharts` has read-only iteration and is the only chart collection accepted
-by the renderer. Resolution never adds authored charts to the document or package.
-An explicit opposite replaces only its own derived observation.
+With Mirror Opposite disabled, resolution preserves the existing direct-reuse
+behavior: unchanged RGBA is observed through the opposite canonical frame. With
+Mirror Opposite enabled, resolution reflects the authored surface through the
+model midpoint plane. The primary and opposite canonical frames determine the
+required raster transform:
+
+```text
+front <-> back:  opposite(u, v) = source(width  - 1 - u, v)
+left  <-> right: opposite(u, v) = source(width  - 1 - u, v)
+top   <-> bottom: opposite(u, v) = source(u, height - 1 - v)
+```
+
+The transform applies to complete RGBA texels, so color, alpha relief, silhouette,
+and baked lighting remain registered. It does not create a second authored PNG or
+introduce renderer-specific geometry.
+
+`AuthoredModel::resolve` expands only those assignments into a `ResolvedCharts`
+observation set in canonical rank order. An absent side remains absent; the
+presence of its opposite does not infer it. Thus one Front source may explicitly
+supply Front+Back, while one Top source may remain Top-only. `ResolvedCharts` has
+read-only iteration and is the only chart collection accepted by the renderer.
+Resolution never adds authored charts or copied PNGs to the document or package.
 
 ## Continuous relief within a chart
 
@@ -135,36 +156,43 @@ the current frame. Both can be evaluated without constructing world geometry.
 
 ## Exhaustive inverse sampling
 
-Rendering is output-first. For every output pixel center `s` and eligible chart,
-the renderer solves `W(p) = s` and retains every solution.
+Rendering is output-first. For every output pixel center `s` and every resolved
+chart, the renderer solves `W(p) = s` and retains every solution.
 
-Write the nonhomogeneous part of `H` as an invertible `2 × 2` matrix `A` and a
-translation `b`. For a fixed output sample, inversion of the flat transform gives
-a source line parameterized by relief:
+Write the projected equation as two affine constraints in `(x, y, h)`. When the
+combined coefficient matrix has rank two, its solution is an affine line. Select
+the pair with the greatest absolute determinant, using `(x,y)`, `(x,h)`, `(y,h)`
+as the stable tie order, and solve it as affine functions of the remaining
+parameter:
 
 ```text
-p(h) = A^-1 (s - b - e h)
-     = p0 + d h
+(x(t), y(t), h(t)) = c0 + c1 t
 ```
 
-The chart-specific range `0 <= h <= h_max(i)` and intersections of `p(h)` with
-source cell boundaries and tent-kernel break lines divide the search into analytic
-intervals. On each interval, `N(p(h))` and `D(p(h))` are polynomials of degree at
-most two. Every preimage is therefore a real root in the interval of:
+This definition does not require the flat source-image basis to remain invertible.
+A curved chart can therefore retain projected area at a canonical edge-on view.
+If the combined mapping has rank below two, it has no two-dimensional projected
+support and contributes no output samples.
+
+The chart domain, `0 <= h <= h_max(i)`, source-cell boundaries, and tent-kernel
+break lines divide the affine line into analytic intervals. On each interval,
+substitution into the normalized relief equation yields:
 
 ```text
-Q(h) = h D(p(h)) - N(p(h))
+Q(t) = h(t) D(x(t), y(t)) - N(x(t), y(t))
 ```
 
 `Q` has degree at most three. The solver retains ordinary roots, repeated roots at
-fold tangencies, and roots on interval endpoints. A root on a shared source-cell
-boundary is evaluated against every foreground cell closure that owns that point.
-Duplicate roots are removed only within the same source texel; distinct roots in
-one texel remain distinct preimages. If `Q` is identically zero on an interval,
-`Z(p(h))` is linear there, so the interval endpoint with minimum depth is sufficient
-for that texel's compositing candidate.
+fold tangencies, and roots on interval endpoints. A root on a shared source-cell or
+tent-quadrant boundary is evaluated against every foreground closure incident to
+that point. Duplicate roots are removed only within the same source texel and
+analytic branch; distinct roots remain distinct preimages. If `Q` is identically
+zero on an interval, transient depth is linear there, so the minimum-depth valid
+endpoint is sufficient for that texel's compositing candidate.
 
-The finite interval for chart `i` is `0 <= h <= h_max(i)`. The prototype
+The finite parameter interval is the intersection of `0 <= x <= width`,
+`0 <= y <= height`, and `0 <= h <= h_max(i)` along the affine line. A constant
+coordinate outside its legal range empties the interval. The prototype
 reconstructs each interval polynomial at fixed nodes, partitions it
 at derivative roots, and bisects every sign-changing monotone span. Critical points
 are tested directly so tangent roots are retained. Resolved relief is quantized to
@@ -172,15 +200,30 @@ are tested directly so tangent roots are retained. Resolved relief is quantized 
 precision rule affects only root representation; it does not change the warp or
 replace it with another rendering representation.
 
-## Color ownership and compositing
+## Transformed-image orientation and compositing
 
-Each retained preimage produces the key:
+The colored side of a sprite is intrinsic to the local transformed image. For a
+canonical chart frame `(O,U,V,N)`, the unnormalized oriented local normal covector
+at a differentiable relief location is:
+
+```text
+q(x,y) = N - U (dh/dx)/8 - V (dh/dy)/8
+```
+
+A preimage supplies its source color when `q` faces the camera. At a tent-gradient
+boundary, every incident analytic sector is evaluated; the boundary is included
+when it lies in the closure of at least one locally front-facing sector. This keeps
+silhouette samples without exposing a finite-area reverse side. It is part of
+direct transformed-image sampling, not a chart-wide eligibility or culling step.
+
+Each locally valid preimage produces the key:
 
 ```text
 (Z, chart_rank, source_y, source_x)
 ```
 
-The lexicographically smallest key owns the output pixel. The owning source texel
+The lexicographically smallest key owns the output pixel. Canonical chart rank is
+only an exact-depth deterministic tie; it never controls visibility. The owning source texel
 supplies RGB unchanged. At an exact source-cell edge or corner, the stable source
 coordinates select the lowest nearest texel. An output pixel with no preimage is
 transparent black.
@@ -189,30 +232,40 @@ This rule preserves multiple preimages under folds, lets the nearer portion of a
 relief image occlude a farther portion, makes overlap independent of chart loading
 order, and prevents camera motion from inventing or blending colors.
 
-Before inverse sampling, a resolved chart is eligible only when its canonical
-inward normal faces the camera. It contributes no candidates from the opposite
-hemisphere and is also culled when exactly edge-on. A fallback observation is
-front-facing through its requested canonical side; it is not the backside of its
-source chart. Regions without an eligible resolved observation remain transparent.
+There is no whole-chart camera eligibility. Opposing resolved observations can
+contribute complementary locally facing regions to the same output frame. A flat
+sprite viewed from its reverse side supplies no valid colored sample; a curved
+sprite can remain locally visible around its transformed silhouette. Regions with
+no valid preimage remain transparent.
 
 ## Two-sprite rounded bowl
 
-The reference bowl uses a top chart and a front chart. In the top chart, the rim
-has low inward relief, the inner wall increases continuously, and the basin floor
-has the greatest inward relief. The front chart supplies the rounded exterior and
-near rim.
+The reference bowl uses a Top-only chart and one Front chart explicitly assigned
+to Front+Back, derived from compatible rounded profiles. There is no Bottom
+observation. With rim radius `R`, exterior height `H`, and radial coordinate
+`r`, the exterior follows `H sqrt(1 - (r/R)^2)`. The Front mask therefore follows
+the elliptical row radius `R sqrt(1 - (y/H)^2)`, and its inward relief is computed
+directly from that row radius rather than normalizing every row back to `R`.
 
-In an elevated oblique view, the top chart's relief warp moves the basin farther
-than the rim. Exhaustive preimage sampling retains the fold around the near rim,
-and transient depth lets that rim hide the farther basin where appropriate. The
-front chart supplies the exterior pixels. The result is a rounded, recessed bowl
-made from two transformed images.
+The Top cavity uses a shallower concentric profile with depth `B < H`. Its rim and
+the Front exterior meet at the common outer radius, while the cavity remains
+strictly inside the exterior at every interior radius. The encoded, interpolated
+fields—not merely the generator formula at texel centers—must preserve that
+separation.
+
+In an elevated oblique view, exhaustive sampling and transient depth let the near
+rim hide the farther basin where appropriate while Front supplies the exterior.
+The result is a rounded, recessed bowl made from two transformed images without a
+conical side or an internal Top/Front crossing.
 
 ## File and editor integration
 
 A `.depthsprite` is one ZIP file containing `manifest.json` and the declared
-canonical PNGs under `views/`. The manifest records format version, integer bounds,
-and present sides. The PNG contents remain the model authority.
+canonical PNGs under `views/`. The version-2 manifest records integer bounds,
+each source's primary side, its explicit opposite-side boolean, and its independent
+mirror-opposite boolean. The PNG contents remain the model authority. The current
+schema names those source fields `opposite` and `mirror`; it does not retain the
+older one-bit `symmetric` representation.
 
 The editor changes RGB and alpha in those source images. It can assign or reassign
 canonical sides and can change a model dimension by inserting or removing an image
@@ -231,6 +284,11 @@ dominant model viewport is always derived from the current source sprites.
 - Bounds and maximum inward depth are enforced by model construction, package
   loading, PNG import, editing, resizing, and saving.
 - Explicit opposite charts at maximum inward depth meet exactly at the midplane.
+- A single-side source resolves only its primary side; enabling its opposite
+  assignment resolves both sides from one stored PNG and survives edit/save/reopen.
+- Direct opposite reuse keeps unchanged raster coordinates, while mirrored
+  opposite reuse reverses `u` for Front/Back and Left/Right and reverses `v` for
+  Top/Bottom. Both modes remain distinct through edit, undo, save, and reopen.
 - All 24 chart-edge operations preserve signed-world-edge registration across
   every affected chart.
 - Inverting `W` recovers the source point as a function of relief.
@@ -238,7 +296,8 @@ dominant model viewport is always derived from the current source sprites.
 - A tangent fold retains its repeated preimage.
 - Exact source-cell ties choose the lowest nearest texel.
 - Transient depth chooses the correct source when relief preimages overlap.
-- An individual chart produces no pixels from behind, while its resolved opposite
-  observation remains visible from the opposite hemisphere.
-- The two-chart bowl shows both its front rim and recessed top basin.
+- An individual observation produces no pixels from its reverse side.
+- The two-source bowl resolves mirrored Front+Back and Top only, shows matching
+  world-directed lighting across its exterior pair, and shows its front rim and
+  recessed top basin without a Bottom surface.
 - The editor preview, save, and reopen path renders through this compositor.

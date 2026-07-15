@@ -21,7 +21,9 @@ fixture-only chart interpretation or rendering path.
 - Cross-sections determine relief in both source axes wherever the intended form
   curves in both axes.
 - One upper-left-front light direction controls all baked RGB shading in an asset.
-  Lighting never changes alpha or adds a renderer lighting model.
+  The response is deliberately high-contrast and saturated, but curved forms keep
+  a graduated value ramp with enough intermediate values to expose their changing
+  slope. Lighting never changes alpha or adds a renderer lighting model.
 - Shared landmarks and rendered connectivity, rather than matching canvas extents,
   establish seams between charts.
 - Equal generator inputs produce byte-identical `.depthsprite` packages.
@@ -29,11 +31,11 @@ fixture-only chart interpretation or rendering path.
 ## Lit flat block
 
 `block.depthsprite` is the non-relief control. It contains six explicit canonical
-charts so its world-fixed lighting remains coherent on every side rather than being
-mirrored through fallback. Every foreground texel has zero relief. Top-facing
-surfaces are brightest, front and left are intermediate, and surfaces facing away
-from the light are darker. Restrained within-face gradients make orbit motion
-legible without suggesting curvature.
+charts so its world-fixed lighting remains coherent on every side. Every
+foreground texel has zero relief. Top-facing surfaces are brightest, front and
+left are intermediate, and surfaces facing away from the light are darker.
+Restrained within-face gradients make orbit motion legible without suggesting
+curvature.
 
 The block proves canonical placement, explicit six-side assignment, backface
 eligibility, and the visual difference between baked color and relief.
@@ -42,8 +44,8 @@ eligibility, and the visual difference between baked color and relief.
 
 `bowl.depthsprite` contains exactly two authored charts:
 
-- Top, `32×32`;
-- Front, `32×12`.
+- Top-only, `32×32`;
+- mirrored Front+Back, `32×12`, stored as one PNG.
 
 Bounds are `[32, 12, 32]`. The front image height is the actual exterior silhouette
 height. Foreground occupies its first and last rows, so no transparent strip can
@@ -52,15 +54,19 @@ separate the exterior from the rim.
 The Top chart is a circular domain. Its outer rim has zero or near-zero inward
 relief, the inner wall descends continuously, and the basin floor reaches the
 greatest intended bowl depth without crossing the model midpoint. Its warm ceramic
-RGB has an upper-left highlight, lower-right falloff, identifiable rim band, and
-modest depth darkening.
+RGB has an upper-left highlight, lower-right falloff, identifiable rim band, deep
+shadow, and a strong continuous value ramp that makes the cavity readable in a
+still image.
 
 The Front mask is built row by row from a vertical bowl profile. The rim fills the
 first row at full projected width; rows narrow smoothly to bottom-center foreground
 on the final row. Each row has its own elliptical horizontal cross-section, so
 inward relief varies horizontally and vertically. The front rim uses the same
-radius and near-front landmark as the Top rim. A standard elevated oblique render
-must show connected rim ownership, a recessed basin, and a rounded exterior.
+radius and near-front landmark as the Top rim. Its opposite assignment uses true
+midpoint-plane mirroring, so the baked directional gradient has the same world
+orientation on both exterior observations rather than rotating with unchanged
+raster coordinates. A standard elevated oblique render must show connected rim
+ownership, a recessed basin, and a rounded exterior. No Bottom observation exists.
 
 ## Two-sided globe
 
@@ -70,10 +76,10 @@ the projected center and increases radially to the maximum inward depth at the
 silhouette band, so opposite surfaces meet without a gap and never cross.
 
 The charts carry different but geographically corresponding continent and ocean
-patterns, one coherent light gradient, latitude/longitude accents, and a shallow
-inset feature kept inside the silhouette. Opposite target views must visibly use
-their explicit chart rather than fallback. Oblique views must retain a continuous
-outline without exposing either chart from behind.
+patterns, coherent high-contrast light gradients, latitude/longitude accents, and
+a shallow inset feature kept inside the silhouette. Opposite target views must
+visibly use their explicit chart. Oblique views must retain a continuous outline
+without exposing either chart from behind.
 
 ## Six-sided gyroscope
 
@@ -84,7 +90,7 @@ own projected ellipses, interruptions, overlap order, hub placement, and baked
 lighting. A shared landmark table keeps ring identity, tilt direction, pivot
 locations, and near/far ordering coherent across the six observations.
 
-No gyroscope side uses opposite fallback. Front/Back, Left/Right, and Top/Bottom
+Every gyroscope side is separately authored. Front/Back, Left/Right, and Top/Bottom
 views must show meaningfully different overlaps. Annular relief varies across ring
 width and around visible arcs to give each band curvature. Transparent gaps between
 rings remain empty. Oblique renders prove transient occlusion between eligible
@@ -92,10 +98,10 @@ charts while back-facing charts contribute nothing.
 
 ## Curved cloth tent
 
-`tent.depthsprite` has bounds `[48, 28, 36]` and three authored charts: Front,
-Right, and Top. Derived opposites provide the remaining observation sectors. The
-Front chart provides a peaked entrance, opening, and hanging flap; Right provides a
-curved side wall; Top provides the ridge and roof planes.
+`tent.depthsprite` has bounds `[48, 28, 36]` and three authored PNGs: Front+Back,
+Right+Left, and Top-only. The Front chart provides a peaked entrance, opening, and
+hanging flap; Right provides a curved side wall; Top provides the ridge and roof
+planes. There is no Bottom.
 
 Relief uses broad roof curvature plus restrained ridge-to-eave sag, seam ridges,
 and fabric folds rather than flat triangular fills. Stripes and stitching cross
@@ -105,10 +111,10 @@ standard elevated oblique views.
 
 ## Architectural dome
 
-`dome.depthsprite` has bounds `[48, 32, 48]` and three authored charts: Front,
-Right, and Top. Derived opposites complete the rotational coverage. The side charts
-provide the hemispherical profile, drum, windows, and vertical ribs. Top provides
-the radial roof panels, crown, and matching rib endpoints.
+`dome.depthsprite` has bounds `[48, 32, 48]` and three authored PNGs: Front+Back,
+Right+Left, and Top-only. The side charts provide the hemispherical profile, drum,
+windows, and vertical ribs. Top provides the radial roof panels, crown, and
+matching rib endpoints. There is no Bottom.
 
 Cross-section relief produces a curved shell rather than a flat disk. Repeated ribs
 and panel colors make registration errors visible. Standard oblique renders must
@@ -134,10 +140,10 @@ fixtures, or examples. Its workflow is:
 3. Derive raster dimensions and signed edge mappings from model bounds.
 4. Construct tight masks and shared landmarks without global padding.
 5. Derive relief from explicit cross-sections without exceeding maximum inward depth.
-6. Add restrained baked RGB lighting that exposes the intended form.
+6. Add high-contrast baked RGB lighting with graduated form shading on curves.
 7. Generate the package deterministically through the repository fixture path.
 8. Inspect color, depth, and several rendered target views.
-9. Reject disconnected seams, unintentional fallback symmetry, ambiguous
+9. Reject disconnected seams, unintended opposite assignments, flat-looking
    curvature, rear-facing bleed, or source-only validation.
 
 The reference explains canonical axes, synchronized dimension changes, alpha and
@@ -151,15 +157,19 @@ instead of restating a competing contract.
 
 - Every package satisfies core bounds, canonical dimensions, uniqueness, and
   chart-specific relief limits.
-- Explicit opposites override derived observations without changing other sides.
-- A resolved chart renders only from its intended hemisphere.
+- Every resolved side comes from an explicit single-side or opposite-pair assignment.
+- The bowl resolves mirrored Front+Back and Top with no Bottom.
+- A resolved chart contributes only where its locally transformed colored side
+  faces the camera; opposing charts may contribute complementary regions in one
+  frame.
 - Save and reopen preserve only authored charts and reproduce the same observations.
 
 ### Source evidence
 
 - The block has six explicit lit charts and zero relief everywhere.
 - Bowl Front rows 0 and 11 contain foreground, its relief varies in representative
-  rows and columns, and both charts contain a deliberate RGB range.
+  rows and columns, both charts contain a strong graduated RGB range rather than a
+  few flat bands, and the resolved Back is the exact canonical mirror of Front.
 - Globe Front and Back are both explicit, geographically distinguishable, and
   reach the midplane at their silhouette bands.
 - Gyroscope charts are all explicit, opposite pairs differ, rings remain annular,
@@ -171,7 +181,8 @@ instead of restating a competing contract.
 ### Rendered evidence
 
 - The block remains flat while its baked lighting makes orbit changes legible.
-- The bowl contains basin, rim, and exterior ownership with a connected rim.
+- The bowl contains basin, rim, and rounded exterior ownership with a connected
+  rim, no internal Top/Front crossing, and no conical silhouette through orbit.
 - Globe hemispheres meet without a transparent gap or backface contribution.
 - Gyroscope opposite views show distinct overlaps and oblique views resolve ring
   occlusion without rear-facing bleed.

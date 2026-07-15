@@ -15,7 +15,9 @@ provides orbit and zoom inspection.
 The document owns one core `AuthoredModel` plus editing state. The model contains:
 
 - integer bounds `(width, height, depth)`, each in `1..=63`;
-- one to six raw RGBA source charts explicitly assigned to unique canonical sides.
+- one to six raw RGBA source charts, each assigned to one canonical side, with
+  independent bits for also supplying and geometrically mirroring its compatible
+  opposite.
 
 The editing state contains:
 
@@ -28,10 +30,12 @@ The editing state contains:
 Raw RGBA is authoritative. RGB remains stored when alpha is zero, so removing a
 surface sample and adding it again preserves its authored color.
 
-The canonical display order is Front, Right, Top, Back, Left, Bottom. An assigned
-source supplies its own side. When its opposite is absent, the core model derives
-an observation through the opposite canonical frame. A distinct opposite source
-overrides that observation. Derived observations are not document sprites.
+The canonical display order is Front, Right, Top, Back, Left, Bottom. Every source
+supplies its primary side. Its explicit **Also Opposite** toggle determines whether
+the same PNG also supplies the opposite side. **Mirror Opposite** independently
+chooses geometric midpoint-plane reflection instead of direct opposite-frame
+reuse. An unchecked source never gains an opposite observation implicitly. No two
+sources may claim the same side.
 
 ## File lifecycle
 
@@ -93,20 +97,28 @@ source canvases and source-card controls.
 ## Source management
 
 A compact **Add Sprite** control sits below the packed cards. It opens a chooser
-containing the six canonical side names; occupied sides are unavailable. Selecting
+containing the six canonical side names; sides owned either primarily or through
+an opposite assignment are unavailable. Selecting
 a side creates a correctly sized `[255, 0, 255, 0]` chart for that exact side.
 
-The side name in each card header is also a selector. Reassignment to an unoccupied
-side is one undoable command. When old and new canonical dimensions match, exact
+The side name in each card header is also a selector. Its first control is **Also
+Opposite**. Enabling it assigns the same PNG to the compatible opposite and changes
+the header to, for example, `Front + Back`. The control is unavailable when another
+source owns that opposite. A second **Mirror Opposite** checkbox is enabled only
+while Also Opposite is enabled. It defaults off; when checked, the resolved
+opposite reverses the canonical-frame-derived image axis for a true geometric
+reflection. Each checkbox is an independent undoable command and never changes
+authored RGBA. Reassignment to an unoccupied side is one undoable command. When old
+and new canonical dimensions match, exact
 RGBA pixels are preserved. When they differ, the editor offers to recreate that
 one chart empty at the required dimensions and states that its pixels will be
 discarded. It never silently stretches, crops, or interpolates the chart.
 
 A card can import or replace its chart from an RGBA PNG of the required dimensions,
-or remove its authored side. Removing an explicit opposite causes the core model
-to derive that observation from the remaining side immediately. Card headers
-display only their assigned side; fallback resolution does not add status text to
-the grid. The sole remaining authored side cannot be removed.
+or remove its source. Import, painting, and replacement preserve both opposite-side
+bits. Removing a separately authored opposite leaves that side absent unless the
+remaining source is explicitly toggled to supply it. The sole remaining authored
+source cannot be removed.
 
 ## Dimension editing
 
@@ -216,8 +228,12 @@ document.
 Headless tests prove:
 
 - raw RGB survives alpha-zero chart construction, save, and reopen;
-- one source resolves to its opposing observation with canonical orientation;
-- a distinct opposite source replaces the derived observation;
+- a single-side source resolves only its primary observation;
+- the explicit opposite toggle resolves both compatible observations from one PNG,
+  is undoable, survives editing and save/reopen, and rejects assignment conflicts;
+- the mirror toggle is available only for an opposite pair, is independently
+  undoable, survives editing and save/reopen, and reverses the mathematically
+  required raster axis without altering the authored PNG;
 - Add Sprite creates the explicitly selected unoccupied side;
 - reassignment preserves matching pixels and requires explicit recreation for a
   dimension mismatch;
@@ -237,10 +253,10 @@ Headless tests prove:
   edit-save-reopen cycle.
 
 A realistic application check proves the top-menu lifecycle, vertical tools,
-progressive two-by-three source grid, explicit side chooser and selector, compact
-edge resizing, color-over-depth composition, shared canvas coordinates, minimum
-3× model-to-canvas dimensions, color selection and painting, immediate preview
-updates, and read-only model interaction.
+progressive two-by-three source grid, explicit side chooser, opposite and mirror
+toggles and selector, compact edge resizing, color-over-depth composition, shared
+canvas coordinates, minimum 3× model-to-canvas dimensions, color selection and
+painting, immediate preview updates, and read-only model interaction.
 
 ## Acceptance
 
