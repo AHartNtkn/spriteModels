@@ -34,8 +34,8 @@ The canonical display order is Front, Right, Top, Back, Left, Bottom. Every sour
 supplies its primary side. Its explicit **Also Opposite** toggle determines whether
 the same PNG also supplies the opposite side. **Mirror Opposite** independently
 chooses geometric midpoint-plane reflection instead of direct opposite-frame
-reuse. An unchecked source never gains an opposite observation implicitly. No two
-sources may claim the same side.
+reuse. Both bits begin false. An unchecked source never gains an opposite
+observation implicitly. No two sources may claim the same side.
 
 ## File lifecycle
 
@@ -107,12 +107,13 @@ the header to, for example, `Front + Back`. The control is unavailable when anot
 source owns that opposite. A second **Mirror Opposite** checkbox is enabled only
 while Also Opposite is enabled. It defaults off; when checked, the resolved
 opposite reverses the canonical-frame-derived image axis for a true geometric
-reflection. Each checkbox is an independent undoable command and never changes
-authored RGBA. Reassignment to an unoccupied side is one undoable command. When old
-and new canonical dimensions match, exact
-RGBA pixels are preserved. When they differ, the editor offers to recreate that
-one chart empty at the required dimensions and states that its pixels will be
-discarded. It never silently stretches, crops, or interpolates the chart.
+reflection. Disabling Also Opposite disables but does not clear Mirror Opposite;
+reenabling it restores the remembered mirror behavior. Each checkbox is an
+independent undoable command and never changes authored RGBA. Reassignment to an
+unoccupied side is one undoable command. When old and new canonical dimensions
+match, exact RGBA pixels are preserved. When they differ, the editor offers to
+recreate that one chart empty at the required dimensions and states that its pixels
+will be discarded. It never silently stretches, crops, or interpolates the chart.
 
 A card can import or replace its chart from an RGBA PNG of the required dimensions,
 or remove its source. Import, painting, and replacement preserve both opposite-side
@@ -234,6 +235,8 @@ Headless tests prove:
 - the mirror toggle is available only for an opposite pair, is independently
   undoable, survives editing and save/reopen, and reverses the mathematically
   required raster axis without altering the authored PNG;
+- new sources begin with both bits false, and disabling opposite reuse retains the
+  dormant mirror bit;
 - Add Sprite creates the explicitly selected unoccupied side;
 - reassignment preserves matching pixels and requires explicit recreation for a
   dimension mismatch;

@@ -85,8 +85,9 @@ Authored charts are the PNG evidence stored in the model. Each source has one
 primary side and two independent opposite-side bits: **Also Opposite** determines
 whether it supplies the compatible opposite observation, and **Mirror Opposite**
 determines how that observation is registered. Mirror Opposite has no rendering
-effect while Also Opposite is disabled. A source cannot claim a side already
-assigned to another source.
+effect while Also Opposite is disabled, but its stored value is retained. Both bits
+are false for a newly created source. A source cannot claim a side already assigned
+to another source.
 
 With Mirror Opposite disabled, resolution preserves the existing direct-reuse
 behavior: unchanged RGBA is observed through the opposite canonical frame. With
@@ -261,11 +262,9 @@ conical side or an internal Top/Front crossing.
 ## File and editor integration
 
 A `.depthsprite` is one ZIP file containing `manifest.json` and the declared
-canonical PNGs under `views/`. The version-2 manifest records integer bounds,
-each source's primary side, its explicit opposite-side boolean, and its independent
-mirror-opposite boolean. The PNG contents remain the model authority. The current
-schema names those source fields `opposite` and `mirror`; it does not retain the
-older one-bit `symmetric` representation.
+canonical PNGs under `views/`. Its version-1 manifest records integer bounds. Each
+source entry contains the required fields `view`, `opposite`, and `mirror`. The PNG
+contents remain the model authority.
 
 The editor changes RGB and alpha in those source images. It can assign or reassign
 canonical sides and can change a model dimension by inserting or removing an image
@@ -289,6 +288,8 @@ dominant model viewport is always derived from the current source sprites.
 - Direct opposite reuse keeps unchanged raster coordinates, while mirrored
   opposite reuse reverses `u` for Front/Back and Left/Right and reverses `v` for
   Top/Bottom. Both modes remain distinct through edit, undo, save, and reopen.
+- New sources begin with both assignment bits false. Disabling and reenabling
+  opposite reuse retains the source's mirror selection.
 - All 24 chart-edge operations preserve signed-world-edge registration across
   every affected chart.
 - Inverting `W` recovers the source point as a function of relief.
