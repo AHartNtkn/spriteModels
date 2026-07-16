@@ -34,9 +34,33 @@ thiserror = "=2.0.18"
 zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+criterion = { version = "=0.5.1", default-features = false, features = ["cargo_bench_support"] }
 depthsprite-format = { path = "crates/depthsprite-format" }
 editor-core = { path = "crates/editor-core" }
+fixture-gen = { path = "crates/fixture-gen" }
+png.workspace = true
 relief-core = { path = "crates/relief-core" }
 relief-render = { path = "crates/relief-render" }
 tempfile.workspace = true
 zip.workspace = true
+
+[[bench]]
+name = "render"
+harness = false
+
+# Rendering is compute-heavy; run the render crates optimized inside the
+# otherwise-debug test profile so the golden-image suite finishes quickly.
+# Optimization level does not alter Rust floating-point semantics, so hashes
+# are identical across profiles.
+[profile.test.package.relief-core]
+opt-level = 2
+[profile.test.package.relief-render]
+opt-level = 2
+[profile.test.package.editor-core]
+opt-level = 2
+[profile.test.package.fixture-gen]
+opt-level = 2
+
+# Profiling builds need symbols on top of release optimization.
+[profile.release]
+debug = "line-tables-only"
