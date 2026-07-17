@@ -54,6 +54,58 @@ Closing, opening, or replacing a document with unsaved changes presents Save,
 Discard, and Cancel choices. A failed file operation leaves the current document
 unchanged and reports the specific error in the application.
 
+## 3D model import
+
+**File → Import 3D Model…** opens the native file picker filtered to
+`.gltf`/`.glb`. Cancelling the picker leaves the editor untouched. A load
+failure — malformed glTF, an unsupported extension, an undecodable texture,
+or a scene with no triangle geometry — reports the file path and the
+underlying error through the same file-operation error dialog Open and Save
+use, and the import dialog never opens.
+
+A successful load opens a modal import dialog with two equal square
+viewports side by side: *Source Mesh* on the left renders the loaded scene
+with the dialog's own lighting; *Converted Preview* on the right renders the
+in-progress `AuthoredModel` through the same preview path as the main model
+viewport. Both viewports share one orbit camera: plain drag orbits it and
+the wheel zooms it, in either viewport, identically to the main model
+viewport. Ctrl+drag in the Source Mesh viewport instead rotates the model
+itself (an arcball drag about the camera's screen right and down axes)
+relative to the capture axes and triggers reconversion; Ctrl+drag in the
+Converted Preview viewport still orbits the camera. Any change to the model
+rotation, side modes, longest axis, or lighting recomputes the Converted
+Preview; camera orbit and zoom never do.
+
+Below the viewports, four settings groups configure the conversion:
+
+- **Orientation** — a Snap to 90° button rotates the model to its nearest
+  axis-aligned orientation; four preset buttons (Z-up → Y-up, Flip X, Flip Y,
+  Flip Z) each compose one additional fixed rotation onto the current one.
+- **Sides** — three rows (Front/Back, Left/Right, Top/Bottom), each holding
+  one independent mode selector per side. A side's mode is Capture, From
+  opposite, From opposite mirrored, or Off, defaulting to Capture on all six
+  sides. From opposite and From opposite mirrored are offered for a side only
+  while its paired side's mode is Capture, so a pair can never hold two From
+  opposite sides at once; setting a side to any mode other than Capture
+  resets a paired From-opposite side back to Off.
+- **Bounds** — a longest-axis slider ranging `1..=63`, defaulting to 63, with
+  a live `W × H × D` readout of the bounds the current rotation and axis
+  setting would produce.
+- **Lighting** — azimuth (`−180°..=180°`, default −35°), elevation
+  (`−90°..=90°`, default 35°), and ambient (`0.0..=1.0`, default 0.25)
+  sliders.
+
+Conversion geometry, sampling, and side-mode semantics follow
+`docs/superpowers/specs/2026-07-17-model-import-design.md`.
+
+The footer holds Cancel and Import. Import is disabled while the current
+settings fail to convert, for example every side set to Off. Cancel discards
+the dialog and its loaded scene; the current document is unaffected. Import
+takes the converted `AuthoredModel` through the same unsaved-changes prompt
+New and Open use, then replaces the current document with an untitled, dirty
+document holding the imported model. While an unsaved-changes prompt is
+pending for any reason, the import dialog does not render.
+
 ## Window composition
 
 The application uses a conventional top menu followed by one uninterrupted

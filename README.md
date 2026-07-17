@@ -37,6 +37,18 @@ Use **File → New** to start a model, **File → Open** to open a `.depthsprite
 Open, and Quit ask whether to save, discard, or cancel when there are unsaved
 changes.
 
+**File → Import 3D Model…** converts a glTF/GLB file into a new model. The
+import dialog shows the source mesh and the converted result side by side
+with a shared orbit camera (drag to orbit, wheel to zoom). Ctrl+drag the
+mesh to rotate the model relative to the capture sides; buttons snap the
+rotation to 90° or apply axis presets. Each side can capture, supply itself
+from its opposite side (optionally mirrored), or be omitted, with the
+constraint that a side can only be supplied from its opposite while that
+opposite side is captured. A slider sets the longest model axis in pixels,
+and the baked light's azimuth, elevation, and ambient level are adjustable.
+Importing replaces the current document (prompting for unsaved changes) with
+an untitled model.
+
 Source cards fill the canonical three-by-two grid. Use **Add Sprite** to choose an
 unassigned canonical side. Open a card's side menu to reassign it or toggle **Also
 Opposite**; a paired card is labeled, for example, `Front + Back`. A card's menu
