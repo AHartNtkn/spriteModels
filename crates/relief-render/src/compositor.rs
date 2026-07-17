@@ -832,9 +832,18 @@ mod tests {
     use crate::{CameraBasis, TargetView};
 
     use super::{
-        PreparedRelief, RenderScratch, interpolate_unit_cubic, ratio_to_f64,
+        Bounded, PreparedRelief, RenderScratch, interpolate_unit_cubic, ratio_to_f64,
         roots_in_unit_interval, solve_preimages,
     };
+
+    #[test]
+    #[should_panic(expected = "Bounded<_, 2> capacity exceeded")]
+    fn bounded_push_beyond_capacity_panics_loudly() {
+        let mut bounded = Bounded::<u32, 2>::new();
+        bounded.push(1);
+        bounded.push(2);
+        bounded.push(3);
+    }
 
     #[test]
     fn scalar_solver_retains_three_preimages_of_a_fold() {
