@@ -4,7 +4,7 @@ use relief_render::FrameBuffer;
 
 const FIT_FRACTION: f32 = 0.9;
 const DEFAULT_ZOOM_MILLI: u32 = 1_000;
-const ZOOM_MILLI_PER_UNIT: f64 = 100.0;
+const ZOOM_EXPONENT_PER_POINT: f64 = 0.002;
 const MIN_ZOOM_MILLI: u32 = 250;
 const MAX_ZOOM_MILLI: u32 = 4_000;
 
@@ -135,10 +135,11 @@ impl ModelView {
         if !wheel_delta.is_finite() {
             return;
         }
-        let delta = i128::from((f64::from(wheel_delta) * ZOOM_MILLI_PER_UNIT).round() as i64);
-        self.zoom_milli = (i128::from(self.zoom_milli) + delta)
-            .clamp(i128::from(MIN_ZOOM_MILLI), i128::from(MAX_ZOOM_MILLI))
-            as u32;
+        let zoom =
+            f64::from(self.zoom_milli) * (f64::from(wheel_delta) * ZOOM_EXPONENT_PER_POINT).exp();
+        self.zoom_milli =
+            zoom.round()
+                .clamp(f64::from(MIN_ZOOM_MILLI), f64::from(MAX_ZOOM_MILLI)) as u32;
     }
 }
 
@@ -224,5 +225,25 @@ mod tests {
             presentation_scale(egui::vec2(84.0, 84.0), egui::vec2(420.0, 420.0), 1_000),
             4
         );
+    }
+
+    #[test]
+    fn normalized_wheel_step_zooms_in_without_hitting_maximum() {
+        let mut model_view = ModelView::default();
+
+        model_view.zoom(40.0);
+
+        assert!(model_view.zoom_milli > DEFAULT_ZOOM_MILLI);
+        assert!(model_view.zoom_milli < MAX_ZOOM_MILLI);
+    }
+
+    #[test]
+    fn normalized_wheel_step_zooms_out_without_hitting_minimum() {
+        let mut model_view = ModelView::default();
+
+        model_view.zoom(-40.0);
+
+        assert!(model_view.zoom_milli < DEFAULT_ZOOM_MILLI);
+        assert!(model_view.zoom_milli > MIN_ZOOM_MILLI);
     }
 }

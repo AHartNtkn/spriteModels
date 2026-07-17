@@ -186,7 +186,7 @@ fn real_frames_fit_zoom_resize_reset_and_clip_without_texture_uploads() {
         &mut view,
         &document,
         MODEL,
-        vec![Event::PointerMoved(MODEL.center()), wheel(20.0)],
+        vec![Event::PointerMoved(MODEL.center()), wheel(200.0)],
     );
     assert!(
         model_texture_delta(&zoomed).is_none(),
