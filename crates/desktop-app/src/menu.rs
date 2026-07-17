@@ -4,6 +4,7 @@ use std::path::PathBuf;
 pub enum MenuAction {
     New,
     Open,
+    ImportModel,
     Save,
     SaveAs,
     Quit,
@@ -16,6 +17,7 @@ pub enum MenuAction {
 pub enum PendingDestructiveAction {
     New,
     Open(PathBuf),
+    Import(relief_core::AuthoredModel),
     Quit,
 }
 
@@ -49,7 +51,7 @@ pub struct MenuItem {
     pub action: MenuAction,
 }
 
-const FILE_ITEMS: [MenuItem; 5] = [
+const FILE_ITEMS: [MenuItem; 6] = [
     MenuItem {
         label: "New",
         action: MenuAction::New,
@@ -57,6 +59,10 @@ const FILE_ITEMS: [MenuItem; 5] = [
     MenuItem {
         label: "Open",
         action: MenuAction::Open,
+    },
+    MenuItem {
+        label: "Import 3D Model…",
+        action: MenuAction::ImportModel,
     },
     MenuItem {
         label: "Save",

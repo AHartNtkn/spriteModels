@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 editor-core = { path = "../editor-core" }
 eframe.workspace = true
+mesh-import = { path = "../mesh-import" }
 relief-core = { path = "../relief-core" }
 relief-render = { path = "../relief-render" }
 rfd.workspace = true

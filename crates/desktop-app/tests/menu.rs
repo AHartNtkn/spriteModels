@@ -3,7 +3,7 @@ use desktop_app::{
     menu::{MenuAction, MenuGroup, PendingDestructiveAction, UnsavedChoice, menu_items},
 };
 use editor_core::EditorDocument;
-use relief_core::{Bounds, CanonicalView};
+use relief_core::{AuthoredModel, Bounds, CanonicalView};
 
 fn document() -> EditorDocument {
     EditorDocument::new(Bounds::new(4, 3, 2).unwrap(), CanonicalView::Front)
@@ -32,6 +32,7 @@ fn top_menu_labels_map_to_the_complete_approved_action_set() {
         vec![
             ("New", MenuAction::New),
             ("Open", MenuAction::Open),
+            ("Import 3D Model…", MenuAction::ImportModel),
             ("Save", MenuAction::Save),
             ("Save As", MenuAction::SaveAs),
             ("Quit", MenuAction::Quit),
@@ -44,6 +45,18 @@ fn top_menu_labels_map_to_the_complete_approved_action_set() {
     assert_eq!(
         labels_and_actions(MenuGroup::View),
         vec![("Reset Model View", MenuAction::ResetView)]
+    );
+}
+
+#[test]
+fn file_menu_offers_import_between_open_and_save() {
+    let labels: Vec<&str> = menu_items(MenuGroup::File)
+        .iter()
+        .map(|item| item.label)
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["New", "Open", "Import 3D Model…", "Save", "Save As", "Quit"]
     );
 }
 
@@ -132,4 +145,42 @@ fn a_failed_save_keeps_the_pending_action_and_current_document() {
     assert!(shell.document().is_dirty());
     assert!(!shell.quit_requested());
     assert!(shell.file_error().is_some());
+}
+
+#[test]
+fn completing_an_import_replaces_the_document_with_a_dirty_untitled_one() {
+    let bounds = Bounds::new(4, 4, 4).unwrap();
+    let model = AuthoredModel::with_empty_chart(bounds, CanonicalView::Front).unwrap();
+    let mut shell = ShellState::new(EditorDocument::new(
+        Bounds::new(8, 8, 8).unwrap(),
+        CanonicalView::Front,
+    ));
+    shell.request_destructive(PendingDestructiveAction::Import(model));
+    // The starting document is clean, so the action completes immediately.
+    assert!(shell.pending_destructive_action().is_none());
+    assert_eq!(shell.document().bounds(), bounds);
+    assert!(shell.document().path().is_none());
+    assert!(shell.document().is_dirty());
+}
+
+#[test]
+fn import_over_a_dirty_document_waits_for_the_unsaved_prompt() {
+    let bounds = Bounds::new(4, 4, 4).unwrap();
+    let model = AuthoredModel::with_empty_chart(bounds, CanonicalView::Front).unwrap();
+    let mut shell = {
+        let mut document = EditorDocument::new(Bounds::new(8, 8, 8).unwrap(), CanonicalView::Front);
+        document
+            .set_source_opposite(CanonicalView::Front, false)
+            .unwrap();
+        document.add_source(CanonicalView::Back).unwrap();
+        assert!(document.is_dirty());
+        ShellState::new(document)
+    };
+    shell.request_destructive(PendingDestructiveAction::Import(model));
+    assert!(
+        shell.pending_destructive_action().is_some(),
+        "must prompt first"
+    );
+    shell.resolve_unsaved(UnsavedChoice::Discard, None);
+    assert_eq!(shell.document().bounds(), bounds);
 }

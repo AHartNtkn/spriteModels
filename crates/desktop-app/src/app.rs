@@ -115,6 +115,10 @@ impl ShellState {
         self.file_error = None;
     }
 
+    pub fn report_file_error(&mut self, message: String) {
+        self.file_error = Some(message);
+    }
+
     fn complete_destructive(&mut self, action: PendingDestructiveAction) {
         match action {
             PendingDestructiveAction::New => {
@@ -130,6 +134,10 @@ impl ShellState {
                     self.file_error = Some(format!("Could not open {}: {error}", path.display()));
                 }
             },
+            PendingDestructiveAction::Import(model) => {
+                self.document = EditorDocument::from_unsaved_model(model);
+                self.file_error = None;
+            }
             PendingDestructiveAction::Quit => {
                 self.quit_requested = true;
             }
@@ -142,6 +150,7 @@ pub struct DepthSpriteApp {
     palette: PaletteState,
     model_view: ModelView,
     source_grid: SourceGridState,
+    pending_import_scene: Option<(mesh_import::TriangleScene, String)>,
     #[cfg(test)]
     last_composition: Option<CompositionObservation>,
 }
@@ -163,6 +172,7 @@ impl DepthSpriteApp {
             palette,
             model_view: ModelView::default(),
             source_grid: SourceGridState::default(),
+            pending_import_scene: None,
             #[cfg(test)]
             last_composition: None,
         }
@@ -181,6 +191,23 @@ impl DepthSpriteApp {
                 if let Some(path) = pick_open_path() {
                     self.shell
                         .request_destructive(PendingDestructiveAction::Open(path));
+                }
+            }
+            MenuAction::ImportModel => {
+                if let Some(path) = pick_import_path() {
+                    match mesh_import::load_scene(&path) {
+                        Ok(scene) => {
+                            let label = path.file_name().map_or_else(
+                                || path.display().to_string(),
+                                |name| name.to_string_lossy().into_owned(),
+                            );
+                            self.pending_import_scene = Some((scene, label));
+                        }
+                        Err(error) => self.shell.report_file_error(format!(
+                            "Could not import {}: {error}",
+                            path.display()
+                        )),
+                    }
                 }
             }
             MenuAction::Save => {
@@ -253,6 +280,24 @@ impl DepthSpriteApp {
         });
         if dismiss {
             self.shell.dismiss_file_error();
+        }
+    }
+
+    fn show_import_modal(&mut self, context: &egui::Context) {
+        let Some((scene, _label)) = self.pending_import_scene.as_ref() else {
+            return;
+        };
+        let triangle_count = scene.triangles.len();
+        let mut cancel = false;
+        egui::Modal::new("import-model-modal".into()).show(context, |ui| {
+            ui.heading("Import 3D Model");
+            ui.label(format!("Triangles: {triangle_count}"));
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+        if cancel {
+            self.pending_import_scene = None;
         }
     }
 
@@ -337,6 +382,8 @@ impl eframe::App for DepthSpriteApp {
 
         if self.shell.file_error().is_some() {
             self.show_file_error_modal(&context);
+        } else if self.pending_import_scene.is_some() {
+            self.show_import_modal(&context);
         } else {
             self.show_unsaved_modal(&context);
         }
@@ -368,6 +415,12 @@ fn pick_save_path() -> Option<PathBuf> {
         .add_filter("DepthSprite", MODEL_FILTER)
         .set_file_name("untitled.depthsprite")
         .save_file()
+}
+
+fn pick_import_path() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("glTF", &["gltf", "glb"])
+        .pick_file()
 }
 
 fn to_egui(rect: Rect, origin: egui::Pos2) -> egui::Rect {
