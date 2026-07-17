@@ -5,6 +5,7 @@ use eframe::egui;
 use relief_core::{Bounds, CanonicalView};
 
 use crate::{
+    import_dialog::ImportDialogState,
     layout::{self, Rect, Size},
     menu::{MenuAction, PendingDestructiveAction, UnsavedChoice, show_menu_bar},
     model_view::ModelView,
@@ -150,7 +151,7 @@ pub struct DepthSpriteApp {
     palette: PaletteState,
     model_view: ModelView,
     source_grid: SourceGridState,
-    pending_import_scene: Option<(mesh_import::TriangleScene, String)>,
+    import_dialog: Option<ImportDialogState>,
     #[cfg(test)]
     last_composition: Option<CompositionObservation>,
 }
@@ -172,7 +173,7 @@ impl DepthSpriteApp {
             palette,
             model_view: ModelView::default(),
             source_grid: SourceGridState::default(),
-            pending_import_scene: None,
+            import_dialog: None,
             #[cfg(test)]
             last_composition: None,
         }
@@ -201,7 +202,7 @@ impl DepthSpriteApp {
                                 || path.display().to_string(),
                                 |name| name.to_string_lossy().into_owned(),
                             );
-                            self.pending_import_scene = Some((scene, label));
+                            self.import_dialog = Some(ImportDialogState::new(scene, label));
                         }
                         Err(error) => self.shell.report_file_error(format!(
                             "Could not import {}: {error}",
@@ -284,10 +285,11 @@ impl DepthSpriteApp {
     }
 
     fn show_import_modal(&mut self, context: &egui::Context) {
-        let Some((scene, _label)) = self.pending_import_scene.as_ref() else {
+        let Some(state) = self.import_dialog.as_mut() else {
             return;
         };
-        let triangle_count = scene.triangles.len();
+        state.ensure_converted();
+        let triangle_count = state.scene.triangles.len();
         let mut cancel = false;
         egui::Modal::new("import-model-modal".into()).show(context, |ui| {
             ui.heading("Import 3D Model");
@@ -297,7 +299,7 @@ impl DepthSpriteApp {
             }
         });
         if cancel {
-            self.pending_import_scene = None;
+            self.import_dialog = None;
         }
     }
 
@@ -382,7 +384,7 @@ impl eframe::App for DepthSpriteApp {
 
         if self.shell.file_error().is_some() {
             self.show_file_error_modal(&context);
-        } else if self.pending_import_scene.is_some() {
+        } else if self.import_dialog.is_some() {
             self.show_import_modal(&context);
         } else {
             self.show_unsaved_modal(&context);

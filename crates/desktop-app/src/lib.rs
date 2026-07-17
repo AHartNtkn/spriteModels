@@ -1,5 +1,6 @@
 pub mod app;
 pub mod canvas;
+mod import_dialog;
 pub mod layout;
 pub mod menu;
 pub mod model_view;
