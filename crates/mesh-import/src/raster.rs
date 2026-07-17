@@ -66,13 +66,14 @@ pub fn rasterize(scene: &TriangleScene, view: &View, lighting: &Lighting) -> Ras
         // negating the barycentric weights rather than culling.
         let flip = if area < 0.0 { -1.0 } else { 1.0 };
         area *= flip;
-        // Only skip exactly-zero area (degenerate triangle with no defined barycentric space).
-        // A triangle with any nonzero screen area has a well-defined parameterization;
-        // an absolute epsilon would silently cull thin-but-valid triangles.
-        if area == 0.0 {
+        let inv_area = 1.0 / area;
+        // Barycentric weights are only computable when the area reciprocal is finite.
+        // A zero or subnormal-small area has no representable parameterization in f32,
+        // and a non-finite reciprocal would let 0.0 × inf = NaN weights slip past the
+        // sign checks (NaN compares false) and silently write NaN depth.
+        if !inv_area.is_finite() {
             continue;
         }
-        let inv_area = 1.0 / area;
 
         let min_x = s0[0].min(s1[0]).min(s2[0]).floor().max(0.0) as usize;
         let max_x = (s0[0].max(s1[0]).max(s2[0]).ceil().max(0.0) as usize).min(width);
