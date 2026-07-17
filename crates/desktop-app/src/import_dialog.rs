@@ -437,7 +437,7 @@ mod tests {
             }
         }
         state.apply_preset(OrientationPreset::ZUpToYUp);
-        // -90 about X maps +z to -y (box up).
+        // +90 about X (this module's Rodrigues convention) maps +z to -y (box up).
         let r = state.settings.rotation;
         let mapped_z = [r[0][2], r[1][2], r[2][2]];
         assert!(
