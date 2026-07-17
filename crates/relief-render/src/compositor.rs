@@ -14,6 +14,88 @@ const ROOT_SCALE: i64 = 1 << 24;
 const COORDINATE_EPSILON: f64 = 1.0e-9;
 const POLYNOMIAL_EPSILON: f64 = 1.0e-10;
 
+/// A fixed-capacity, stack-allocated ordered collection for values whose
+/// cardinality is bounded by a small mathematical fact established at each
+/// call site (documented where the capacity `N` is chosen). Replaces
+/// heap-allocated `Vec`s in the per-pixel hot path with storage that never
+/// allocates. `push` beyond capacity is a programming error, not a runtime
+/// condition to degrade gracefully from: it means the documented bound does
+/// not actually hold, so it panics loudly rather than silently truncating.
+#[derive(Clone, Copy)]
+struct Bounded<T, const N: usize> {
+    items: [T; N],
+    len: usize,
+}
+
+impl<T: Copy + Default, const N: usize> Bounded<T, N> {
+    fn new() -> Self {
+        Self {
+            items: [T::default(); N],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, value: T) {
+        assert!(
+            self.len < N,
+            "Bounded<_, {N}> capacity exceeded: the documented bound for this call site does not hold"
+        );
+        self.items[self.len] = value;
+        self.len += 1;
+    }
+
+    fn extend(&mut self, values: impl Iterator<Item = T>) {
+        for value in values {
+            self.push(value);
+        }
+    }
+
+    fn as_slice(&self) -> &[T] {
+        &self.items[..self.len]
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.items[..self.len]
+    }
+
+    fn sort_by(&mut self, compare: impl FnMut(&T, &T) -> std::cmp::Ordering) {
+        self.as_mut_slice().sort_by(compare);
+    }
+
+    /// Same semantics as `Vec::dedup_by`: scans left to right, keeping the
+    /// first element of each run of consecutive elements for which
+    /// `same_bucket` returns `true`.
+    fn dedup_by(&mut self, mut same_bucket: impl FnMut(&T, &T) -> bool) {
+        let mut write = usize::from(self.len > 0);
+        for read in 1..self.len {
+            if same_bucket(&self.items[read], &self.items[write - 1]) {
+                continue;
+            }
+            self.items[write] = self.items[read];
+            write += 1;
+        }
+        self.len = write;
+    }
+}
+
+impl<T: Copy + Default, const N: usize> IntoIterator for Bounded<T, N> {
+    type Item = T;
+    type IntoIter = std::iter::Take<std::array::IntoIter<T, N>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.into_iter().take(self.len)
+    }
+}
+
+impl<'a, T: Copy + Default, const N: usize> IntoIterator for &'a Bounded<T, N> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenderRequest {
     width: u32,
@@ -112,7 +194,13 @@ impl PreparedRelief {
         self.cells[(y * self.width + x) as usize].is_some()
     }
 
-    fn quadrants_at(&self, source_x: u32, source_y: u32, x: f64, y: f64) -> Vec<usize> {
+    /// Bound: each axis independently matches either exactly one quadrant
+    /// half (the local coordinate is strictly on one side of the axis'
+    /// midline) or exactly two (the local coordinate is within
+    /// `COORDINATE_EPSILON` of the shared midline, touching both halves).
+    /// The horizontal and vertical matches combine multiplicatively (every
+    /// pair is emitted), so at most 2 * 2 = 4 quadrants are ever produced.
+    fn quadrants_at(&self, source_x: u32, source_y: u32, x: f64, y: f64) -> Bounded<usize, 4> {
         let local_x = (x - f64::from(source_x)).clamp(0.0, 1.0);
         let local_y = (y - f64::from(source_y)).clamp(0.0, 1.0);
         let horizontal: &[usize] = if (local_x - 0.5).abs() <= COORDINATE_EPSILON {
@@ -129,10 +217,13 @@ impl PreparedRelief {
         } else {
             &[1]
         };
-        vertical
-            .iter()
-            .flat_map(|bottom| horizontal.iter().map(move |right| right + 2 * bottom))
-            .collect()
+        let mut quadrants = Bounded::new();
+        for bottom in vertical {
+            for right in horizontal {
+                quadrants.push(right + 2 * bottom);
+            }
+        }
+        quadrants
     }
 
     fn sample_patch(
@@ -225,6 +316,20 @@ impl PreparedModel {
     }
 }
 
+/// Scratch buffers reused across every pixel x chart segment inside a single
+/// `render_model` call. `boundaries` and `preimages` are unbounded in the
+/// worst case (their length depends on chart width/height, not a small
+/// constant), so they remain heap `Vec`s rather than `Bounded` arrays — but
+/// allocated once per `render_model` call and only ever `.clear()`ed, a
+/// `Vec`'s backing storage stops reallocating once it reaches its
+/// steady-state capacity, unlike a fresh `Vec::new()` per pixel x chart x
+/// segment.
+#[derive(Default)]
+struct RenderScratch {
+    boundaries: Vec<f64>,
+    preimages: Vec<Preimage>,
+}
+
 pub fn render_model(
     prepared: &PreparedModel,
     request: &RenderRequest,
@@ -261,6 +366,8 @@ pub fn render_model(
         })
         .collect();
 
+    let mut scratch = RenderScratch::default();
+
     for y in 0..request.height {
         for x in 0..request.width {
             let screen_x = Ratio::new(2 * i64::from(x) + 1, 2) - offset_x;
@@ -271,7 +378,8 @@ pub fn render_model(
                     continue;
                 };
 
-                for preimage in solve_preimages(relief, &line, *facing, *maximum_relief) {
+                solve_preimages(&mut scratch, relief, &line, *facing, *maximum_relief);
+                for preimage in &scratch.preimages {
                     let Some(DecodedTexel::Relief { rgb, .. }) =
                         chart.texel_at(preimage.source_x, preimage.source_y)
                     else {
@@ -308,12 +416,25 @@ fn projected_extents(
         .map(|_| target.framing_extents(bounds))
 }
 
+/// Fills `scratch.preimages` with the preimages of `line` under `field`,
+/// using `scratch.boundaries` as working storage for the segment-boundary
+/// parameter set. Both buffers are cleared on entry and, on every return
+/// path, hold the complete result for this call (never a stale mix with a
+/// previous call) — the caller reads `scratch.preimages` after this returns.
 fn solve_preimages(
+    scratch: &mut RenderScratch,
     field: &PreparedRelief,
     line: &InverseWarpLine,
     facing: FacingCoefficients,
     maximum_relief: f64,
-) -> Vec<Preimage> {
+) {
+    let RenderScratch {
+        boundaries,
+        preimages,
+    } = scratch;
+    boundaries.clear();
+    preimages.clear();
+
     let coefficients = line
         .variable_coefficients()
         .map(|[offset, slope]| [ratio_to_f64(offset), ratio_to_f64(slope)]);
@@ -343,24 +464,18 @@ fn solve_preimages(
         0.0,
         maximum_relief,
     ) {
-        return Vec::new();
+        return;
     }
     let [range_start, range_end] = parameter_range;
     if !range_start.is_finite() || !range_end.is_finite() {
-        return Vec::new();
+        return;
     }
 
-    let mut boundaries = vec![range_start, range_end];
+    boundaries.push(range_start);
+    boundaries.push(range_end);
+    add_grid_crossings(boundaries, x_offset, x_slope, width, range_start, range_end);
     add_grid_crossings(
-        &mut boundaries,
-        x_offset,
-        x_slope,
-        width,
-        range_start,
-        range_end,
-    );
-    add_grid_crossings(
-        &mut boundaries,
+        boundaries,
         y_offset,
         y_slope,
         height,
@@ -370,7 +485,6 @@ fn solve_preimages(
     boundaries.sort_by(f64::total_cmp);
     boundaries.dedup_by(|left, right| (*left - *right).abs() <= COORDINATE_EPSILON);
 
-    let mut preimages = Vec::new();
     for window in boundaries.windows(2) {
         let start = window[0];
         let end = window[1];
@@ -435,7 +549,6 @@ fn solve_preimages(
             && left.source_y == right.source_y
             && (ratio_to_f64(left.parameter) - ratio_to_f64(right.parameter)).abs() <= 1.0e-7
     });
-    preimages
 }
 
 fn branch_faces_camera(
@@ -515,25 +628,38 @@ fn add_grid_crossings(
     }
 }
 
-fn containing_cells(coordinate: f64, extent: u32) -> Vec<u32> {
+/// Bound: `coordinate` addresses a 1-D grid of `extent` unit cells.
+/// It is either strictly interior to exactly one cell (1 result), or within
+/// `COORDINATE_EPSILON` of an integer boundary shared by exactly two
+/// adjacent cells (2 results) — except at the two extreme boundaries (`0`
+/// or `extent`), which border only one cell each. Hence at most 2 cells are
+/// ever produced by a single call. (`solve_preimages` calls this once for
+/// each of the two source axes and takes their Cartesian product, so a
+/// texel position touches at most 2 * 2 = 4 source cells overall.)
+fn containing_cells(coordinate: f64, extent: u32) -> Bounded<u32, 2> {
+    let mut cells = Bounded::new();
     if extent == 0
         || coordinate < -COORDINATE_EPSILON
         || coordinate > f64::from(extent) + COORDINATE_EPSILON
     {
-        return Vec::new();
+        return cells;
     }
 
     let rounded = coordinate.round();
     if (coordinate - rounded).abs() <= COORDINATE_EPSILON {
         let boundary = rounded.clamp(0.0, f64::from(extent)) as u32;
         match boundary {
-            0 => vec![0],
-            value if value == extent => vec![extent - 1],
-            value => vec![value - 1, value],
+            0 => cells.push(0),
+            value if value == extent => cells.push(extent - 1),
+            value => {
+                cells.push(value - 1);
+                cells.push(value);
+            }
         }
     } else {
-        vec![(coordinate.floor() as u32).min(extent - 1)]
+        cells.push((coordinate.floor() as u32).min(extent - 1));
     }
+    cells
 }
 
 fn interpolate_unit_cubic(values: [f64; 4]) -> [f64; 4] {
@@ -562,7 +688,29 @@ fn interpolate_unit_cubic(values: [f64; 4]) -> [f64; 4] {
     result
 }
 
-fn roots_in_unit_interval(mut polynomial: [f64; 4]) -> Vec<f64> {
+/// Bound on `partitions`: it holds the interval endpoints `{0, 1}` plus the
+/// roots of the polynomial's derivative that fall strictly inside `(0, 1)`
+/// — the polynomial's critical points, which split `[0, 1]` into monotonic
+/// pieces. A cubic's derivative is quadratic, which has at most 2 real
+/// roots (see `quadratic_roots`), so `partitions` holds at most 2 + 2 = 4
+/// values.
+///
+/// Bound on the returned roots: consider the `partitions.len() - 1` unit
+/// intervals `(partitions[i], partitions[i+1])` in order. A bisected root
+/// is only pushed for interval `i` when its left endpoint `partitions[i]`
+/// independently failed the direct zero-hit test (`left_value.abs() >
+/// tolerance` is required to proceed) — so charge that push to
+/// `partitions[i]`. A direct zero-hit push is charged to the point itself.
+/// Every push is thus charged to a distinct partition point (a point is
+/// charged at most once: either it is a direct hit, or — having failed
+/// that test — it anchors at most one bisected push for the interval
+/// starting there), so the number of entries pushed before the final
+/// `dedup_by` can never exceed `partitions.len()`, i.e. at most 4. This is
+/// a tighter, algorithm-specific bound than "a cubic has at most 3 roots":
+/// that fact constrains the polynomial's true zero set, not the number of
+/// *candidate* entries this tolerance-based procedure can push before
+/// `dedup_by` collapses coincident candidates.
+fn roots_in_unit_interval(mut polynomial: [f64; 4]) -> Bounded<f64, 4> {
     let scale = polynomial
         .iter()
         .fold(1.0_f64, |largest, value| largest.max(value.abs()));
@@ -573,12 +721,17 @@ fn roots_in_unit_interval(mut polynomial: [f64; 4]) -> Vec<f64> {
         degree -= 1;
     }
     if degree == 0 {
-        return (polynomial[0].abs() <= tolerance)
-            .then_some(vec![0.0, 1.0])
-            .unwrap_or_default();
+        let mut roots = Bounded::new();
+        if polynomial[0].abs() <= tolerance {
+            roots.push(0.0);
+            roots.push(1.0);
+        }
+        return roots;
     }
 
-    let mut partitions = vec![0.0, 1.0];
+    let mut partitions = Bounded::<f64, 4>::new();
+    partitions.push(0.0);
+    partitions.push(1.0);
     match degree {
         2 => {
             let critical = -polynomial[1] / (2.0 * polynomial[2]);
@@ -601,13 +754,13 @@ fn roots_in_unit_interval(mut polynomial: [f64; 4]) -> Vec<f64> {
     let evaluate = |value: f64| {
         polynomial[0] + value * (polynomial[1] + value * (polynomial[2] + value * polynomial[3]))
     };
-    let mut roots = Vec::new();
+    let mut roots = Bounded::<f64, 4>::new();
     for &point in &partitions {
         if evaluate(point).abs() <= tolerance {
             roots.push(point);
         }
     }
-    for interval in partitions.windows(2) {
+    for interval in partitions.as_slice().windows(2) {
         let mut left = interval[0];
         let mut right = interval[1];
         let mut left_value = evaluate(left);
@@ -640,21 +793,27 @@ fn roots_in_unit_interval(mut polynomial: [f64; 4]) -> Vec<f64> {
     roots
 }
 
-fn quadratic_roots(constant: f64, linear: f64, quadratic: f64) -> Vec<f64> {
+/// Bound: a quadratic (or, when the quadratic coefficient is negligible,
+/// linear) polynomial has at most 2 real roots — the fundamental theorem of
+/// algebra applied to a degree-2 polynomial. This function pushes at most
+/// the discriminant-derived pair `[(-b-root)/(2a), (-b+root)/(2a)]` when a
+/// real solution exists, or fewer when the polynomial degenerates.
+fn quadratic_roots(constant: f64, linear: f64, quadratic: f64) -> Bounded<f64, 2> {
+    let mut roots = Bounded::new();
     if quadratic.abs() <= POLYNOMIAL_EPSILON {
-        return (linear.abs() > POLYNOMIAL_EPSILON)
-            .then_some(vec![-constant / linear])
-            .unwrap_or_default();
+        if linear.abs() > POLYNOMIAL_EPSILON {
+            roots.push(-constant / linear);
+        }
+        return roots;
     }
     let discriminant = linear * linear - 4.0 * quadratic * constant;
     if discriminant < -POLYNOMIAL_EPSILON {
-        return Vec::new();
+        return roots;
     }
     let root = discriminant.max(0.0).sqrt();
-    vec![
-        (-linear - root) / (2.0 * quadratic),
-        (-linear + root) / (2.0 * quadratic),
-    ]
+    roots.push((-linear - root) / (2.0 * quadratic));
+    roots.push((-linear + root) / (2.0 * quadratic));
+    roots
 }
 
 fn ratio_to_f64(value: Ratio<i64>) -> f64 {
@@ -673,8 +832,8 @@ mod tests {
     use crate::{CameraBasis, TargetView};
 
     use super::{
-        PreparedRelief, interpolate_unit_cubic, ratio_to_f64, roots_in_unit_interval,
-        solve_preimages,
+        PreparedRelief, RenderScratch, interpolate_unit_cubic, ratio_to_f64,
+        roots_in_unit_interval, solve_preimages,
     };
 
     #[test]
@@ -683,10 +842,10 @@ mod tests {
             .map(|value| (value - 0.2) * (value - 0.5) * (value - 0.8));
         let roots = roots_in_unit_interval(interpolate_unit_cubic(values));
 
-        assert_eq!(roots.len(), 3);
-        assert!((roots[0] - 0.2).abs() < 1.0e-6);
-        assert!((roots[1] - 0.5).abs() < 1.0e-6);
-        assert!((roots[2] - 0.8).abs() < 1.0e-6);
+        assert_eq!(roots.as_slice().len(), 3);
+        assert!((roots.as_slice()[0] - 0.2).abs() < 1.0e-6);
+        assert!((roots.as_slice()[1] - 0.5).abs() < 1.0e-6);
+        assert!((roots.as_slice()[2] - 0.8).abs() < 1.0e-6);
     }
 
     #[test]
@@ -694,7 +853,7 @@ mod tests {
         let values = [0.25, 1.0 / 36.0, 1.0 / 36.0, 0.25];
         let roots = roots_in_unit_interval(interpolate_unit_cubic(values));
 
-        assert_eq!(roots, vec![0.5]);
+        assert_eq!(roots.as_slice(), [0.5]);
     }
 
     #[test]
@@ -724,8 +883,10 @@ mod tests {
 
         let facing = TargetView::front()
             .facing_coefficients(CanonicalView::Front, Bounds::new(3, 1, 4).unwrap());
-        let preimages = solve_preimages(&prepared, &line, facing, 16.0);
-        let locations: Vec<_> = preimages
+        let mut scratch = RenderScratch::default();
+        solve_preimages(&mut scratch, &prepared, &line, facing, 16.0);
+        let locations: Vec<_> = scratch
+            .preimages
             .iter()
             .map(|preimage| {
                 (
@@ -761,7 +922,10 @@ mod tests {
             .unwrap();
         let facing = target.facing_coefficients(CanonicalView::Front, bounds);
 
-        let locations: Vec<_> = solve_preimages(&prepared, &line, facing, 16.0)
+        let mut scratch = RenderScratch::default();
+        solve_preimages(&mut scratch, &prepared, &line, facing, 16.0);
+        let locations: Vec<_> = scratch
+            .preimages
             .iter()
             .map(|preimage| {
                 (
