@@ -6,7 +6,7 @@
 use editor_core::{EditorDocument, OrbitCamera, PreviewCache};
 use eframe::egui;
 use mesh_import::{
-    ImportSettings, Lighting, SideMode, TriangleScene, box_space_scene, convert, derived_bounds,
+    ImportSettings, Lighting, SideMode, TriangleScene, box_space_scene, convert_box_space,
     light_direction, rasterize,
 };
 use relief_core::{Bounds, CanonicalView};
@@ -33,8 +33,6 @@ pub(crate) enum OrientationPreset {
 pub(crate) struct ConvertedPreview {
     pub document: EditorDocument,
     pub preview: PreviewCache,
-    texture: Option<egui::TextureHandle>,
-    uploaded_generation: Option<u64>,
 }
 
 /// The mesh viewport rasterizes directly at screen resolution every frame it
@@ -73,6 +71,11 @@ pub(crate) struct ImportDialogState {
     pub camera: OrbitCamera,
     pub zoom_milli: u32,
     pub converted: Result<ConvertedPreview, String>,
+    /// Persistent across reconversion (unlike `ConvertedPreview`, which is
+    /// rebuilt every settings change) so the converted-viewport texture
+    /// handle is reused via `TextureHandle::set` instead of reallocated.
+    converted_texture: Option<egui::TextureHandle>,
+    converted_uploaded_generation: Option<u64>,
     last_settings: Option<ImportSettings>,
     conversions: u64,
     box_space: Result<(TriangleScene, Bounds), String>,
@@ -108,6 +111,8 @@ impl ImportDialogState {
             camera: OrbitCamera::default(),
             zoom_milli: 1_000,
             converted: Err(String::from("not yet converted")),
+            converted_texture: None,
+            converted_uploaded_generation: None,
             last_settings: None,
             conversions: 0,
             box_space: Err(String::from("not yet converted")),
@@ -139,24 +144,30 @@ impl ImportDialogState {
         }
         self.last_settings = Some(self.settings.clone());
         self.conversions += 1;
-        self.box_space = box_space_scene(
+        // A new conversion is landing: the converted-viewport texture (if
+        // any) now belongs to the previous model. `PreviewCache` generation
+        // counters restart at zero for the fresh `ConvertedPreview` below,
+        // so without this reset a stale texture could be mistaken for
+        // already matching the new frame's generation and never re-upload.
+        self.converted_uploaded_generation = None;
+        let box_space = box_space_scene(
             &self.scene,
             self.settings.rotation,
             self.settings.longest_axis_pixels,
-        )
-        .map_err(|error| error.to_string());
-        self.converted = match convert(&self.scene, &self.settings) {
-            Ok(model) => Ok(ConvertedPreview {
-                document: EditorDocument::from_model(model, None),
-                preview: PreviewCache::default(),
-                texture: None,
-                uploaded_generation: None,
-            }),
+        );
+        self.converted = match &box_space {
+            Ok((box_scene, bounds)) => convert_box_space(box_scene, *bounds, &self.settings)
+                .map(|model| ConvertedPreview {
+                    document: EditorDocument::from_model(model, None),
+                    preview: PreviewCache::default(),
+                })
+                .map_err(|error| error.to_string()),
             Err(error) => Err(error.to_string()),
         };
+        self.box_space = box_space.map_err(|error| error.to_string());
     }
 
-    pub fn take_converted_model(&mut self) -> Option<relief_core::AuthoredModel> {
+    pub fn converted_model(&mut self) -> Option<relief_core::AuthoredModel> {
         match &self.converted {
             Ok(converted) => Some(converted.document.to_model()),
             Err(_) => None,
@@ -267,7 +278,7 @@ impl ImportDialogState {
                     self.import_button_rect = import.rect;
                 }
                 if import.clicked()
-                    && let Some(model) = self.take_converted_model()
+                    && let Some(model) = self.converted_model()
                 {
                     outcome = ImportDialogOutcome::Import(model);
                 }
@@ -426,23 +437,23 @@ impl ImportDialogState {
             frame.framebuffer().width() as f32,
             frame.framebuffer().height() as f32,
         );
-        let image = (converted.uploaded_generation != Some(generation))
+        let image = (self.converted_uploaded_generation != Some(generation))
             .then(|| color_image(frame.framebuffer()));
         if let Some(image) = image {
-            if let Some(texture) = &mut converted.texture {
+            if let Some(texture) = &mut self.converted_texture {
                 texture.set(image, egui::TextureOptions::NEAREST);
             } else {
-                converted.texture = Some(ui.ctx().load_texture(
+                self.converted_texture = Some(ui.ctx().load_texture(
                     "depthsprite-import-converted-preview",
                     image,
                     egui::TextureOptions::NEAREST,
                 ));
             }
-            converted.uploaded_generation = Some(generation);
+            self.converted_uploaded_generation = Some(generation);
         }
         let scale = presentation_scale(native_size, rect.size(), zoom_milli);
         let image_rect = egui::Rect::from_center_size(rect.center(), native_size * scale as f32);
-        if let Some(texture) = &converted.texture {
+        if let Some(texture) = &self.converted_texture {
             ui.painter().with_clip_rect(rect).image(
                 texture.id(),
                 image_rect,
@@ -512,18 +523,14 @@ impl ImportDialogState {
             {
                 self.bounds_slider_rect = _slider.rect;
             }
-            let label = match derived_bounds(
-                &self.scene,
-                self.settings.rotation,
-                self.settings.longest_axis_pixels,
-            ) {
-                Ok(bounds) => format!(
+            let label = match &self.box_space {
+                Ok((_, bounds)) => format!(
                     "W {} × H {} × D {}",
                     bounds.width(),
                     bounds.height(),
                     bounds.depth()
                 ),
-                Err(error) => error.to_string(),
+                Err(error) => error.clone(),
             };
             #[cfg(test)]
             {
@@ -708,7 +715,7 @@ fn orthonormalized(m: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mesh_import::{Material, Triangle, TriangleScene};
+    use mesh_import::{Material, Triangle, TriangleScene, derived_bounds};
 
     fn quad_scene() -> TriangleScene {
         let tri = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| Triangle {
@@ -952,14 +959,14 @@ mod tests {
     fn import_outcome_carries_the_converted_model_and_cancel_carries_nothing() {
         let mut state = ImportDialogState::new(quad_scene(), "quad.glb".into());
         state.ensure_converted();
-        let model = state.take_converted_model().expect("conversion succeeded");
+        let model = state.converted_model().expect("conversion succeeded");
         assert_eq!(model.bounds().width(), 63);
 
         let mut broken = ImportDialogState::new(quad_scene(), "quad.glb".into());
         broken.settings.longest_axis_pixels = 0;
         broken.ensure_converted();
         assert!(
-            broken.take_converted_model().is_none(),
+            broken.converted_model().is_none(),
             "no model while conversion errors"
         );
     }
