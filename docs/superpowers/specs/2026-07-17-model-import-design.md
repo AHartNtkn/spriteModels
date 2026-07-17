@@ -59,9 +59,45 @@ face) becomes relief `h = round(8·d)` eighth-pixel units, clamped to
 `h_max = 4·L` where `L` is the opposing dimension. Alpha is `255 − h`, which is
 at least 3 for covered texels (`h_max ≤ 252`), so covered texels never collide
 with the empty encoding. Uncovered texels are alpha 0, RGB black. A hit past
-the midplane clamps to `h_max`, so opposing captures meet exactly at the
-midplane rather than leaving holes. A side with zero coverage becomes an empty
-chart, which `AuthoredModel` permits.
+the midplane (`d > h_max/8`) is **dropped** — the texel stays empty from that
+side. This is exact, not lossy: along each axis every surface point lies within
+reach of at least the nearer of the two opposing sides (`d_front > D/2 ⇔
+d_back < D/2`, the midplane boundary belonging to both), so geometry beyond one
+side's reach is precisely the geometry the opposite side captures. A chart is a
+height field of the surface visible from its side; a texel whose nearest hit is
+unreachable stays empty rather than encoding the occluded geometry behind it.
+A side with zero coverage becomes an empty chart, which `AuthoredModel`
+permits.
+
+## Surface ownership
+
+Full projections would store one surface region in up to six charts, so the
+same feature would be drawn several times and captured obliquely by sides that
+barely face it. Instead, each observed surface point is kept by exactly one
+side — the one that represents it best — plus a one-texel seam closure:
+
+- Every hit records the face normal `n̂` of its triangle and the observation
+  orientation `σ = sign(−n̂ · axis_S)` (+1: the front face; −1: the reverse
+  face, as when open-mesh interiors are observed two-sided).
+- Candidate owners for a hit are the enabled Capture sides `T` that observe
+  the **same oriented face** (`σ · (−n̂ · axis_T) > 0`), reach the point
+  (`d_T ≤ h_max_T/8`), and see it: its depth lies within the first-hit
+  interval of `T`'s reachability-filtered depth buffer at the projected
+  texel. That interval spans the buffer's local depth gradient times half a
+  texel plus one relief quantum — a derived bound, conservative toward
+  overlap, because consistently-placed overlap composites harmlessly while a
+  hole shows the background. The capturing side is always a candidate for its
+  own hit, so no seen-and-reachable point is orphaned when its ideal side is
+  occluded or disabled.
+- The owner is the candidate maximizing `σ · (−n̂ · axis_T)` — the side
+  viewing the surface most head-on, which maximizes texel density on that
+  surface. Exact ties resolve by canonical side rank.
+- After ownership filtering, each side dilates its kept texels by one texel
+  (4-neighborhood) into its own reachability-filtered hits. Tent
+  interpolation ends at the alpha-zero boundary, so a strict partition would
+  open sub-texel gaps where differently-owned regions abut; the closure ring
+  is the support the interpolation needs to meet the neighboring chart, and
+  it carries true geometry, so the overlap is consistent rather than doubled.
 
 **Color.** At the winning hit, interpolate UV and vertex color and compute base
 color per the glTF definition: `baseColorFactor × baseColorTexture(uv) ×
