@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use mesh_import::{ImportSettings, TriangleScene, convert, load_scene};
+use mesh_import::{ALL_VIEWS, ImportSettings, TriangleScene, convert, load_scene};
 use relief_core::{AuthoredModel, CanonicalView};
 
 fn fixture(name: &str) -> TriangleScene {
@@ -14,15 +14,6 @@ fn fixture(name: &str) -> TriangleScene {
     );
     load_scene(&path).unwrap_or_else(|error| panic!("{name} must load: {error}"))
 }
-
-const ALL_VIEWS: [CanonicalView; 6] = [
-    CanonicalView::Front,
-    CanonicalView::Back,
-    CanonicalView::Left,
-    CanonicalView::Right,
-    CanonicalView::Top,
-    CanonicalView::Bottom,
-];
 
 /// Format invariants every conversion must satisfy: chart dims match the
 /// bounds, and every texel is either empty (alpha 0) or has relief

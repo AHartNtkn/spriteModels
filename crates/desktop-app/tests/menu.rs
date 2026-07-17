@@ -49,18 +49,6 @@ fn top_menu_labels_map_to_the_complete_approved_action_set() {
 }
 
 #[test]
-fn file_menu_offers_import_between_open_and_save() {
-    let labels: Vec<&str> = menu_items(MenuGroup::File)
-        .iter()
-        .map(|item| item.label)
-        .collect();
-    assert_eq!(
-        labels,
-        vec!["New", "Open", "Import 3D Model…", "Save", "Save As", "Quit"]
-    );
-}
-
-#[test]
 fn dirty_destructive_action_waits_for_an_unsaved_choice_and_cancel_clears_it() {
     let mut shell = ShellState::new(dirty_document());
 

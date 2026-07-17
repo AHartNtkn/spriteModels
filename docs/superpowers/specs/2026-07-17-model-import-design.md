@@ -37,8 +37,9 @@ One new crate, `crates/mesh-import`, independent of the editor and UI:
   ImportError>`.
 
 `desktop-app` gains **File → Import 3D Model…** and a modal import dialog
-(`import_dialog.rs`). `editor-core` gains nothing: `EditorDocument::from_model`
-already accepts an `AuthoredModel`.
+(`import_dialog.rs`). `editor-core` gains `EditorDocument::from_unsaved_model`
+(an untitled, dirty-until-saved document for a freshly imported model) and
+`OrbitCamera::basis_f32` (a float camera basis for the mesh rasterizer).
 
 Dependencies: `mesh-import` → `relief-core`; `desktop-app` → `mesh-import`.
 New external crates (`mesh-import` only): `gltf` plus a PNG/JPEG decoder for
