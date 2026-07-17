@@ -48,14 +48,18 @@ fn slope_bound() -> f64 {
 /// depth we compare against.
 const HALF_TEXEL_DIAGONAL: f64 = FRAC_1_SQRT_2;
 
-/// `TOL = slope_bound * half_texel_diagonal + 2 * chord_bound`: the first
-/// term is the depth change induced by the worst-case lateral offset
-/// between the projected point and the texel center it is compared
-/// against, at the steepest admitted surface slope; the second is the
-/// tessellation's chord error, counted twice because it perturbs both the
-/// source reconstruction and the analytic normal used to admit the texel.
+/// `TOL = slope_bound * half_texel_diagonal + 2 * chord_bound / CONE_COS`:
+/// the first term is the depth change induced by the worst-case lateral
+/// offset between the projected point and the texel center it is compared
+/// against, at the steepest admitted surface slope. The second is the
+/// tessellation's chord error converted from a normal-direction gap to an
+/// along-ray depth error — a facet-to-sphere gap of `chord_bound` along the
+/// normal reads as `chord_bound / cos(theta)` along a view ray, and
+/// admission only guarantees `cos(theta) >= CONE_COS`; counted once per
+/// view because both views' rasterized surfaces deviate independently from
+/// the true sphere the reconstruction assumes.
 fn tolerance() -> f64 {
-    slope_bound() * HALF_TEXEL_DIAGONAL + 2.0 * chord_bound()
+    slope_bound() * HALF_TEXEL_DIAGONAL + 2.0 * chord_bound() / CONE_COS
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
