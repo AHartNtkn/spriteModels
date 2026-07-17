@@ -20,11 +20,13 @@ use crate::{
 
 const MODEL_DRAG_DEGREES_PER_POINT: f32 = 0.25; // same feel as camera orbit
 // The viewports scale up to fill the central region (see `show()`); this is
-// only the floor below which a 63px model stops being legible (4px/model-px,
-// matching the old fixed size) and below which the controls panel below it
-// would be crowded. It fits inside the 1280x800 minimum window (see
-// `layout::minimum_window_size`).
-const VIEWPORT_MIN_PX: f32 = 240.0;
+// only the floor below which they stop being useful. `longest_axis_pixels`
+// caps a model's longest side at 63 model-px; 4 screen-px per model-px is
+// the ratio the fixed-size predecessor (`VIEWPORT_SIZE = 360`) was chosen to
+// exceed, so 63 * 4 = 252 is the minimum below which the largest legal model
+// starts losing legible detail. It still fits inside the 1280x800 minimum
+// window (see `layout::minimum_window_size`).
+const VIEWPORT_MIN_PX: f32 = 252.0;
 /// Horizontal inner margin `Frame::central_panel`'s default frame applies on
 /// each side (`inner_margin(8)`), used by `show()` to size the guard that
 /// keeps the charts panel from starving the central region's viewports.
