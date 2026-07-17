@@ -230,3 +230,13 @@ globe/oblique 47.3 ms, gyroscope/front 59.5 ms, gyroscope/default_orbit
 faster than Task 2 across the board. Reviewer independently re-derived both
 exactness arguments (affine algebra term-by-term; merge order incl. -0.0/tie
 cases). Workspace tests green, goldens bit-identical, review approved.
+
+### Task 4 (fixed-point arithmetic) — commits 8435024, 81f8c78
+
+Controller-measured medians: globe/front 3.0 ms, globe/default_orbit 30.5 ms,
+globe/oblique 32.0 ms, gyroscope/front 53.7 ms, gyroscope/default_orbit
+69.0 ms, gyroscope/oblique 73.3 ms, orbit_sweep 354 ms. Reviewer re-derived
+all five exactness constraints; the reviewer's exhaustive editor-camera domain
+sweep (no legitimate input trips the 2^53 certification asserts) was committed
+as `editor_camera_domain_never_trips_fixed_point_certification` (42,768
+combinations). Workspace tests green, goldens bit-identical, review approved.
