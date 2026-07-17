@@ -1,16 +1,11 @@
-use std::{collections::VecDeque, path::Path};
+use std::collections::VecDeque;
 
-use depthsprite_format::load_path;
+use fixture_gen::globe_model;
 use relief_core::CanonicalView;
 use relief_render::{FrameBuffer, PreparedModel, RenderRequest, TargetView, render_model};
 
 fn globe() -> relief_core::AuthoredModel {
-    load_path(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("assets/examples/globe.depthsprite"),
-    )
-    .expect("the checked-in globe must load")
+    globe_model().expect("the generated globe must be valid")
 }
 
 fn opaque_count(frame: &FrameBuffer) -> usize {

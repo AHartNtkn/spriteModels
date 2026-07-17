@@ -628,6 +628,7 @@ name = "editor-core"
 version = "0.1.0"
 dependencies = [
  "depthsprite-format",
+ "fixture-gen",
  "num-rational",
  "png",
  "relief-core",
@@ -2383,6 +2384,7 @@ name = "relief-render"
 version = "0.1.0"
 dependencies = [
  "depthsprite-format",
+ "fixture-gen",
  "num-rational",
  "relief-core",
  "thiserror 2.0.18",

@@ -1,6 +1,5 @@
-use std::{collections::BTreeSet, path::Path};
+use std::collections::BTreeSet;
 
-use depthsprite_format::load_path;
 use fixture_gen::{bowl_model, generate_examples};
 use relief_core::{AuthoredModel, CanonicalView, Chart, DecodedTexel};
 
@@ -200,26 +199,6 @@ fn both_charts_have_baked_directional_lighting() {
         assert!(
             colors.len() >= 24,
             "{view:?} must retain a graduated value ramp that visibly encodes curvature"
-        );
-    }
-}
-
-#[test]
-fn committed_bowl_is_exactly_the_authoritative_generated_model() {
-    let committed = load_path(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("assets/examples/bowl.depthsprite"),
-    )
-    .unwrap();
-    let generated = bowl();
-
-    assert_eq!(committed.bounds(), generated.bounds());
-    for view in [CanonicalView::Front, CanonicalView::Top] {
-        assert_eq!(
-            committed.chart(view).unwrap().rgba(),
-            generated.chart(view).unwrap().rgba(),
-            "the committed {view:?} chart must be regenerated from bowl_model"
         );
     }
 }

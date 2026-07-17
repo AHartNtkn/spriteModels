@@ -1,15 +1,6 @@
-use std::path::{Path, PathBuf};
-
-use depthsprite_format::load_path;
+use fixture_gen::bowl_model;
 use relief_core::{CanonicalView, DecodedTexel};
 use relief_render::{FrameBuffer, PreparedModel, RenderRequest, TargetView, render_model};
-
-fn asset(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("assets/examples")
-        .join(name)
-}
 
 fn relief_at(model: &relief_core::AuthoredModel, view: CanonicalView, x: u32, y: u32) -> u8 {
     match model.chart(view).unwrap().texel_at(x, y) {
@@ -47,7 +38,7 @@ fn regions_touch(first: &[(u32, u32)], second: &[(u32, u32)]) -> bool {
 
 #[test]
 fn foundational_bowl_render_has_basin_rim_exterior_and_touching_ownership() {
-    let model = load_path(asset("bowl.depthsprite")).unwrap();
+    let model = bowl_model().unwrap();
     let prepared = PreparedModel::new(&model.resolve());
     let frame = render_model(
         &prepared,

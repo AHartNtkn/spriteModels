@@ -1,6 +1,6 @@
-use std::{io::Cursor, path::PathBuf};
+use std::io::Cursor;
 
-use depthsprite_format::{load_path, load_reader, save_writer};
+use depthsprite_format::{load_reader, save_writer};
 use editor_core::{
     ActiveLayer, DepthValue, EditorDocument, OrbitCamera, PreviewCache, ReliefValue,
 };
@@ -36,10 +36,7 @@ fn assert_occupied_with_breathing_room(frame: &FrameBuffer) {
 }
 
 fn bowl_document() -> EditorDocument {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("assets/examples/bowl.depthsprite");
-    EditorDocument::from_model(load_path(path).unwrap(), None)
+    EditorDocument::from_model(fixture_gen::bowl_model().unwrap(), None)
 }
 
 fn recolor(document: &mut EditorDocument, view: CanonicalView, rgb: [u8; 3]) {

@@ -13,5 +13,6 @@ relief-render = { path = "../relief-render" }
 thiserror.workspace = true
 
 [dev-dependencies]
+fixture-gen = { path = "../fixture-gen" }
 png.workspace = true
 tempfile.workspace = true
