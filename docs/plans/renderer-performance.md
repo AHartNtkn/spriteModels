@@ -290,3 +290,24 @@ all five exactness constraints; the reviewer's exhaustive editor-camera domain
 sweep (no legitimate input trips the 2^53 certification asserts) was committed
 as `editor_camera_domain_never_trips_fixed_point_certification` (42,768
 combinations). Workspace tests green, goldens bit-identical, review approved.
+
+### Task 5 (correctly-quantized root finding) — commit 58e7074
+
+User-approved golden regen: 14 hashes changed, all RGBA byte-identical
+(controller cmp-verified); only fragment depth rationals moved, 220 of
+~140k roots by exactly +-1 quantum, each provably at a rounding boundary the
+old bisection rounded arbitrarily. Solver: Newton safeguarded by bracket,
+converging in ray-parameter space (span bound 252 and step bound 33 derived
+from the clip bounds and enforced by always-on asserts). Reviewer re-derived
+the sign-check proof and both bounds; approved, no blocking findings. Bench:
+neutral within noise (globe/front -15%, rest +-3%); the payoff is deleting
+the 56-iteration loop ahead of Tasks 6-7.
+
+### Test/asset decoupling (user policy) — commit 8754f1d
+
+User ruling 2026-07-16: no test may reference assets/examples — assets are
+the user's artifacts, generators are disposable scaffolding, and nothing may
+check one against the other. Deleted the asset<->generator coupling tests,
+converted all behavior tests (renderer acceptance, editor preview/workflow,
+CLI round-trip) to fixture-gen inputs. Workspace fully green; goldens
+untouched.
