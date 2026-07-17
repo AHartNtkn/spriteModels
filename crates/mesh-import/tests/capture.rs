@@ -146,6 +146,31 @@ fn flat_quad_gives_depth_one_covered_relief_and_empty_edge_on_sides() {
     );
 }
 
+/// A scene with zero triangles has no geometry to fit a box around; both
+/// entry points that compute the fit must reject it loudly rather than
+/// silently succeeding with a degenerate 1x1x1 box.
+#[test]
+fn empty_scene_is_rejected_by_convert_and_derived_bounds() {
+    let empty = TriangleScene {
+        triangles: vec![],
+        materials: vec![],
+    };
+    assert!(
+        matches!(
+            derived_bounds(&empty, IDENTITY, 8),
+            Err(ImportError::NoTriangles)
+        ),
+        "derived_bounds on an empty scene must report NoTriangles"
+    );
+    assert!(
+        matches!(
+            mesh_import::convert(&empty, &settings(8)),
+            Err(ImportError::NoTriangles)
+        ),
+        "convert on an empty scene must report NoTriangles"
+    );
+}
+
 #[test]
 fn derived_bounds_ceil_and_floor_rules() {
     // Extents 1.0 x 0.5 x 0.26 at longest 8: width 8, height ceil(4)=4,

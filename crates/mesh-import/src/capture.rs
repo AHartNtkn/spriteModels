@@ -160,6 +160,9 @@ fn fit(
     if !(1..=63).contains(&longest_axis_pixels) {
         return Err(ImportError::LongestAxisRange(longest_axis_pixels));
     }
+    if scene.triangles.is_empty() {
+        return Err(ImportError::NoTriangles);
+    }
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
     for tri in &scene.triangles {
