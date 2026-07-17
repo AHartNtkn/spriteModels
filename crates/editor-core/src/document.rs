@@ -93,20 +93,23 @@ impl EditorDocument {
     }
 
     /// A document for a freshly imported model: untitled, and dirty because
-    /// no file holds this content yet. Its saved-state baseline is the empty
-    /// document so any nonempty import differs from "what is persisted".
+    /// no file holds this content yet. The saved-state baseline is an empty
+    /// chart on a deliberately different view, ensuring every import (including
+    /// all-empty models) is dirty until first saved. On save, saved_state is
+    /// fully replaced with the then-current state.
     pub fn from_unsaved_model(model: AuthoredModel) -> Self {
         let bounds = model.bounds();
-        let selection = model.charts()[0].view();
+        let imported_view = model.charts()[0].view();
         // Create empty saved_model with a different view to ensure it's always different
-        // from any imported model (even if imported model is empty)
-        let saved_view = match selection {
+        // from any imported model (even if imported model is empty). The selection
+        // in saved_state must name a chart that exists in saved_model.
+        let saved_view = match imported_view {
             CanonicalView::Front => CanonicalView::Top,
             _ => CanonicalView::Front,
         };
         let saved_model = AuthoredModel::with_empty_chart(bounds, saved_view)
             .expect("validated bounds always produce a valid empty chart");
-        let make_state = |model: AuthoredModel| DocumentState {
+        let make_state = |model: AuthoredModel, selection: CanonicalView| DocumentState {
             model,
             selection,
             active_layer: ActiveLayer::Color,
@@ -117,8 +120,8 @@ impl EditorDocument {
             ),
         };
         Self {
-            saved_state: make_state(saved_model),
-            state: make_state(model),
+            saved_state: make_state(saved_model, saved_view),
+            state: make_state(model, imported_view),
             undo: Vec::new(),
             redo: Vec::new(),
             stroke_before: None,
@@ -289,5 +292,39 @@ impl EditorDocument {
             revision: 0,
             render_identity: NEXT_RENDER_IDENTITY.fetch_add(1, Ordering::Relaxed),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsaved_model_selection_names_existing_chart() {
+        let bounds = Bounds::new(4, 4, 4).unwrap();
+        let model = AuthoredModel::with_empty_chart(bounds, CanonicalView::Front).unwrap();
+        let document = EditorDocument::from_unsaved_model(model);
+
+        // saved_state.selection must refer to a chart that exists in saved_state.model
+        assert!(
+            document
+                .saved_state
+                .model
+                .chart(document.saved_state.selection)
+                .is_some(),
+            "saved_state.selection '{:?}' must refer to an existing chart in saved_state.model",
+            document.saved_state.selection
+        );
+
+        // state.selection must refer to a chart that exists in state.model
+        assert!(
+            document
+                .state
+                .model
+                .chart(document.state.selection)
+                .is_some(),
+            "state.selection '{:?}' must refer to an existing chart in state.model",
+            document.state.selection
+        );
     }
 }
