@@ -311,3 +311,30 @@ check one against the other. Deleted the asset<->generator coupling tests,
 converted all behavior tests (renderer acceptance, editor preview/workflow,
 CLI round-trip) to fixture-gen inputs. Workspace fully green; goldens
 untouched.
+
+### Task 5 (correctly-quantized root finding) — commit 58e7074
+
+Respecified mid-task: the quantum is the RAY PARAMETER's (parameter = start +
+span*unit), not the cubic unit variable's; first draft in unit space failed 20
+goldens and was reworked. Final solver: Newton safeguarded by bisection,
+convergence when the bracket's parameter image fits a 2^-25 half-quantum,
+sign-verified quantum, span bound 252 and step bound 33 derived from the clip
+bounds and enforced by always-on asserts. Goldens: 14 hashes changed —
+byte-identical RGBA on all 24 scenarios (controller cmp-verified), only
+fragment depth rationals moved by +/-1 quantum on 220 of ~140k roots, all at
+rounding boundaries the old 56-iteration bisection rounded arbitrarily. USER
+APPROVED the regeneration 2026-07-16. Bench: neutral vs Task 4 within noise
+(same-session attribution: globe/front -15%, rest +/-3%). Review approved (no
+Critical/Important findings).
+
+### Interlude: test/asset decoupling — commit 8754f1d (user directive)
+
+The user hand-patched assets/examples/bowl.depthsprite (a0f7143) mid-pipeline
+and ruled: NO test may reference assets/examples; assets are user artifacts,
+generators are disposable and must never be checked against assets. Deleted
+the two asset<->generator coupling tests (bowl authority, reproducibility's
+committed-asset half); converted all seven behavior tests (relief-render
+acceptance/orbit, editor preview/workflow, e2e CLI) to fixture-gen model
+inputs (file-I/O tests save the generated model to a tempdir first). Verified
+divergence between patched asset and generator is exactly 30 Front-chart
+relief texels no converted assertion touches. Workspace fully green.
