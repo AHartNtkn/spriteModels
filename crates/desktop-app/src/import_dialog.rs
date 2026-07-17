@@ -1,17 +1,19 @@
-//! Import dialog state, recompute logic, and the modal UI: two
+//! Import dialog state, recompute logic, and the full-window UI: two
 //! camera-synced viewports (the raw mesh in box space, and the converted
-//! relief model), orientation/side/bounds/lighting settings, and the
-//! accept/cancel outcome consumed by `app.rs`.
+//! relief model), the generated per-side chart tiles, orientation/side/
+//! bounds/lighting settings, and the accept/cancel outcome consumed by
+//! `app.rs`.
 
 use editor_core::{EditorDocument, OrbitCamera, PreviewCache};
 use eframe::egui;
 use mesh_import::{
-    ImportSettings, Lighting, SideMode, TriangleScene, box_space_scene, convert_box_space,
-    light_direction, rasterize,
+    ALL_VIEWS, ImportSettings, Lighting, SideMode, TriangleScene, box_space_scene,
+    convert_box_space, light_direction, rasterize,
 };
 use relief_core::{Bounds, CanonicalView};
 
 use crate::{
+    canvas::{self, CanvasKind},
     model_view::{color_image, presentation_scale, zoom_step},
     source_grid::view_label,
 };
@@ -57,6 +59,25 @@ struct MeshViewportCache {
     texture: Option<egui::TextureHandle>,
 }
 
+/// One generated-chart panel cell for a Capture-side view: the color and
+/// relief textures uploaded from `canvas::display_pixels`, plus the chart's
+/// own pixel dimensions (which can differ per view).
+struct ChartTile {
+    view: CanonicalView,
+    dims: (u32, u32),
+    color: egui::TextureHandle,
+    relief: egui::TextureHandle,
+}
+
+/// Rebuilt only when `conversions` (the settings-change generation counter
+/// `ensure_converted` bumps) advances, so an idle frame reuses the uploaded
+/// textures instead of re-encoding and re-uploading every side every frame.
+#[derive(Default)]
+struct ChartTilesCache {
+    conversions: Option<u64>,
+    tiles: Vec<ChartTile>,
+}
+
 #[derive(Debug)]
 pub(crate) enum ImportDialogOutcome {
     KeepOpen,
@@ -80,6 +101,7 @@ pub(crate) struct ImportDialogState {
     conversions: u64,
     box_space: Result<(TriangleScene, Bounds), String>,
     mesh_viewport_cache: MeshViewportCache,
+    chart_tiles: ChartTilesCache,
     #[cfg(test)]
     pub(crate) mesh_viewport_rect: egui::Rect,
     #[cfg(test)]
@@ -100,6 +122,24 @@ pub(crate) struct ImportDialogState {
     /// Azimuth, elevation, ambient, in that order.
     #[cfg(test)]
     pub(crate) light_slider_rects: [egui::Rect; 3],
+    /// The sides that rendered an image tile in the generated-charts panel
+    /// this frame, in `ALL_VIEWS` order.
+    #[cfg(test)]
+    pub(crate) generated_chart_views: Vec<CanonicalView>,
+    /// The status note text for every side that rendered no tile this frame
+    /// (`FromOpposite`/`FromOppositeMirrored`/`Off`).
+    #[cfg(test)]
+    pub(crate) chart_status_notes: Vec<(CanonicalView, String)>,
+    /// Set when the generated-charts panel took the conversion-error path
+    /// instead of rendering per-side cells.
+    #[cfg(test)]
+    pub(crate) chart_panel_error: Option<String>,
+    /// Incremented once each time `rebuild_chart_tiles_cache` actually
+    /// rebuilds (as opposed to short-circuiting because `conversions` is
+    /// unchanged), so tests can assert the texture cache isn't churned on
+    /// idle frames.
+    #[cfg(test)]
+    pub(crate) chart_tile_cache_rebuilds: u64,
 }
 
 impl ImportDialogState {
@@ -117,6 +157,7 @@ impl ImportDialogState {
             conversions: 0,
             box_space: Err(String::from("not yet converted")),
             mesh_viewport_cache: MeshViewportCache::default(),
+            chart_tiles: ChartTilesCache::default(),
             #[cfg(test)]
             mesh_viewport_rect: egui::Rect::NOTHING,
             #[cfg(test)]
@@ -135,6 +176,14 @@ impl ImportDialogState {
             bounds_label_text: String::new(),
             #[cfg(test)]
             light_slider_rects: [egui::Rect::NOTHING; 3],
+            #[cfg(test)]
+            generated_chart_views: Vec::new(),
+            #[cfg(test)]
+            chart_status_notes: Vec::new(),
+            #[cfg(test)]
+            chart_panel_error: None,
+            #[cfg(test)]
+            chart_tile_cache_rebuilds: 0,
         }
     }
 
@@ -241,10 +290,15 @@ impl ImportDialogState {
         self.settings.rotation = multiply(rotation, self.settings.rotation);
     }
 
-    pub fn show(&mut self, context: &egui::Context) -> ImportDialogOutcome {
+    // eframe 0.35's `App::ui` (see `app.rs`) hands the whole app a `&mut
+    // egui::Ui`, not a `&Context`; `egui::CentralPanel::show` in this egui
+    // version only accepts `&mut Ui` (unlike `egui::Modal::show`, which took
+    // `&Context`), so the fill-window panel is driven from the root `Ui`
+    // `app.rs` already threads through everywhere else.
+    pub fn show(&mut self, ui: &mut egui::Ui) -> ImportDialogOutcome {
         self.ensure_converted();
         let mut outcome = ImportDialogOutcome::KeepOpen;
-        egui::Modal::new("import-3d-model-modal".into()).show(context, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.heading(format!("Import 3D Model — {}", self.file_label));
             ui.horizontal(|ui| {
                 let mesh_rect = allocate_viewport(ui, "import-mesh-viewport");
@@ -258,6 +312,17 @@ impl ImportDialogState {
                     self.mesh_viewport_rect = mesh_rect;
                     self.converted_viewport_rect = converted_rect;
                 }
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt("import-generated-charts-scroll")
+                    // The two viewports and settings rows below have a fixed
+                    // footprint; the charts panel is the only element meant
+                    // to take up whatever width remains, so its scroll area
+                    // must not auto-shrink to its content's width.
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        self.show_generated_charts_panel(ui);
+                    });
             });
             ui.separator();
             self.show_settings(ui);
@@ -579,13 +644,232 @@ impl ImportDialogState {
                 }
             });
     }
+
+    /// Renders one labeled cell per `ALL_VIEWS` side: the generated color
+    /// and relief chart tiles for Capture sides, or a greyed status note for
+    /// sides that borrow from their opposite or are turned off.
+    fn show_generated_charts_panel(&mut self, ui: &mut egui::Ui) {
+        self.rebuild_chart_tiles_cache(ui.ctx());
+        let cells = match &self.converted {
+            Err(message) => {
+                let message = message.clone();
+                ui.colored_label(egui::Color32::LIGHT_RED, &message);
+                #[cfg(test)]
+                {
+                    self.generated_chart_views.clear();
+                    self.chart_status_notes.clear();
+                    self.chart_panel_error = Some(message);
+                }
+                return;
+            }
+            Ok(converted) => ALL_VIEWS
+                .into_iter()
+                .map(|view| (view, self.resolve_chart_cell(&converted.document, view)))
+                .collect::<Vec<_>>(),
+        };
+        #[cfg(test)]
+        {
+            self.generated_chart_views.clear();
+            self.chart_status_notes.clear();
+            self.chart_panel_error = None;
+        }
+        for (view, cell) in &cells {
+            #[cfg(test)]
+            match &cell.content {
+                ChartCellContent::Tile { .. } => self.generated_chart_views.push(*view),
+                ChartCellContent::Note(note) => {
+                    self.chart_status_notes.push((*view, note.clone()));
+                }
+            }
+            #[cfg(not(test))]
+            let _ = view;
+            render_chart_cell(ui, cell);
+        }
+    }
+
+    /// Builds the display content for one side: an image tile when
+    /// `document.source(view)` holds a generated chart (a Capture side), or
+    /// a status note naming why it has none otherwise.
+    fn resolve_chart_cell(&self, document: &EditorDocument, view: CanonicalView) -> ChartCell {
+        let opposite = view.opposite();
+        if let Some(chart) = document.source(view) {
+            let mut header = view_label(view).to_string();
+            if chart.supplies_opposite() {
+                header.push_str(" → ");
+                header.push_str(view_label(opposite));
+                if chart.mirrors_opposite() {
+                    header.push_str(" (mirrored)");
+                }
+            }
+            let tile = self
+                .chart_tiles
+                .tiles
+                .iter()
+                .find(|tile| tile.view == view)
+                .expect(
+                    "rebuild_chart_tiles_cache ran earlier this frame and builds a tile for \
+                     every view with a Capture-side chart, which is exactly the condition \
+                     just checked above",
+                );
+            ChartCell {
+                header,
+                content: ChartCellContent::Tile {
+                    color: tile.color.clone(),
+                    relief: tile.relief.clone(),
+                    dims: tile.dims,
+                },
+            }
+        } else {
+            let header = view_label(view).to_string();
+            let note = match self.settings.side_modes.get(view) {
+                SideMode::FromOpposite => format!("from {}", view_label(opposite)),
+                SideMode::FromOppositeMirrored => {
+                    format!("from {} (mirrored)", view_label(opposite))
+                }
+                SideMode::Off => "off".to_string(),
+                SideMode::Capture => unreachable!(
+                    "convert_box_space stores a chart for every Capture-mode view \
+                     (see mesh_import::convert_box_space), so a Capture side with no stored \
+                     chart would mean the converter's own invariant was violated"
+                ),
+            };
+            ChartCell {
+                header,
+                content: ChartCellContent::Note(note),
+            }
+        }
+    }
+
+    /// Reuploads only the sides whose conversion actually changed. Keyed on
+    /// `conversions`, the same settings-change generation counter
+    /// `ensure_converted` bumps exactly once per settings change, so an idle
+    /// frame (unchanged settings) is a single integer comparison instead of
+    /// re-encoding and re-uploading six pairs of textures.
+    fn rebuild_chart_tiles_cache(&mut self, ctx: &egui::Context) {
+        if self.chart_tiles.conversions == Some(self.conversions) {
+            return;
+        }
+        self.chart_tiles.conversions = Some(self.conversions);
+        #[cfg(test)]
+        {
+            self.chart_tile_cache_rebuilds += 1;
+        }
+        let mut previous = std::mem::take(&mut self.chart_tiles.tiles);
+        // A conversion error leaves `tiles` empty (nothing to reuse); the
+        // panel shows the error text instead of any cell.
+        let Ok(converted) = &self.converted else {
+            return;
+        };
+        let document = &converted.document;
+        for view in ALL_VIEWS {
+            let Some(chart) = document.source(view) else {
+                continue;
+            };
+            let dims = chart.dimensions();
+            let color_pixels = canvas::display_pixels(document, view, CanvasKind::Color);
+            let relief_pixels = canvas::display_pixels(document, view, CanvasKind::Depth);
+            let color_image =
+                egui::ColorImage::new([dims.0 as usize, dims.1 as usize], color_pixels);
+            let relief_image =
+                egui::ColorImage::new([dims.0 as usize, dims.1 as usize], relief_pixels);
+            if let Some(index) = previous.iter().position(|tile| tile.view == view) {
+                let mut tile = previous.remove(index);
+                tile.color.set(color_image, egui::TextureOptions::NEAREST);
+                tile.relief.set(relief_image, egui::TextureOptions::NEAREST);
+                tile.dims = dims;
+                self.chart_tiles.tiles.push(tile);
+            } else {
+                let color = ctx.load_texture(
+                    format!("depthsprite-import-chart-color-{view:?}"),
+                    color_image,
+                    egui::TextureOptions::NEAREST,
+                );
+                let relief = ctx.load_texture(
+                    format!("depthsprite-import-chart-relief-{view:?}"),
+                    relief_image,
+                    egui::TextureOptions::NEAREST,
+                );
+                self.chart_tiles.tiles.push(ChartTile {
+                    view,
+                    dims,
+                    color,
+                    relief,
+                });
+            }
+        }
+    }
+}
+
+/// ~96px: with the import slider's max (`longest_axis_pixels` clamps to 63,
+/// see `show_settings`), a tile at this target is a legible multi-inch
+/// on-screen size without one side's pair of tiles dominating the scroll
+/// panel. The floor in `paint_chart_tile` keeps the upscale an integer
+/// multiple of the source pixels so NEAREST sampling stays crisp instead of
+/// blurring at a fractional scale.
+const CHART_TILE_TARGET_PX: f32 = 96.0;
+/// Vertical gap between one side's header+tiles and the next in the scroll
+/// list, matching the `ui.separator()` spacing used elsewhere in this
+/// dialog's settings rows.
+const CHART_CELL_SPACING: f32 = 8.0;
+
+enum ChartCellContent {
+    Tile {
+        color: egui::TextureHandle,
+        relief: egui::TextureHandle,
+        dims: (u32, u32),
+    },
+    Note(String),
+}
+
+struct ChartCell {
+    header: String,
+    content: ChartCellContent,
+}
+
+fn render_chart_cell(ui: &mut egui::Ui, cell: &ChartCell) {
+    ui.label(egui::RichText::new(&cell.header).strong());
+    match &cell.content {
+        ChartCellContent::Tile {
+            color,
+            relief,
+            dims,
+        } => {
+            ui.horizontal(|ui| {
+                paint_chart_tile(ui, color, *dims);
+                paint_chart_tile(ui, relief, *dims);
+            });
+        }
+        ChartCellContent::Note(note) => {
+            ui.label(egui::RichText::new(note).weak());
+        }
+    }
+    ui.add_space(CHART_CELL_SPACING);
+}
+
+fn paint_chart_tile(ui: &mut egui::Ui, texture: &egui::TextureHandle, dims: (u32, u32)) {
+    let longer = dims.0.max(dims.1).max(1) as f32;
+    let scale = (CHART_TILE_TARGET_PX / longer).floor().max(1.0);
+    let size = egui::vec2(dims.0 as f32 * scale, dims.1 as f32 * scale);
+    let (rect, _response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().image(
+        texture.id(),
+        rect,
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
 }
 
 fn allocate_viewport(ui: &mut egui::Ui, id_source: &str) -> egui::Rect {
+    // `Sense::hover()`: this call only reserves the rect. `handle_viewport_input`
+    // does its own `ui.interact(rect, ..., Sense::drag())` on the identical rect
+    // right after — sensing drag here too would register two overlapping
+    // drag-sensing widgets over the same area, and which one wins a given
+    // frame's hit-test is an egui implementation detail, not something to
+    // depend on.
     ui.push_id(id_source, |ui| {
         ui.allocate_exact_size(
             egui::vec2(VIEWPORT_SIZE, VIEWPORT_SIZE),
-            egui::Sense::drag(),
+            egui::Sense::hover(),
         )
     })
     .inner
@@ -1000,8 +1284,8 @@ mod tests {
             ..Default::default()
         };
         let mut outcome = ImportDialogOutcome::KeepOpen;
-        let _ = context.run_ui(input, |_ui| {
-            outcome = state.show(context);
+        let _ = context.run_ui(input, |ui| {
+            outcome = state.show(ui);
         });
         outcome
     }
@@ -1040,11 +1324,12 @@ mod tests {
         )
     }
 
-    /// `egui::Modal` repositions itself once after the first frame it is
-    /// shown (its placement settles as its content's measured size becomes
-    /// final), so a rect captured on the very first frame can be stale.
-    /// Rects are stable from the second frame on; tests read rects only
-    /// after settling.
+    /// `egui::CentralPanel` lays out its content fresh each frame, but
+    /// widgets whose size depends on sibling content (e.g. the `ScrollArea`
+    /// next to the viewports) only reach their final rect once egui's
+    /// internal layout state has a prior frame to size against, so a rect
+    /// captured on the very first frame can be stale. Rects are stable from
+    /// the second frame on; tests read rects only after settling.
     fn settle(context: &egui::Context, state: &mut ImportDialogState) {
         run_dialog_frame(context, state, Vec::new());
         run_dialog_frame(context, state, Vec::new());
@@ -1338,5 +1623,132 @@ mod tests {
         run_dialog_frame(&context, &mut state, vec![pointer_button(target, false)]);
 
         assert_ne!(state.settings.ambient, ImportSettings::default().ambient);
+    }
+
+    #[test]
+    fn generated_chart_views_include_all_capture_sides_in_order() {
+        let context = egui::Context::default();
+        let mut state = ImportDialogState::new(quad_scene(), "quad.glb".into());
+        settle(&context, &mut state);
+
+        assert_eq!(
+            state.generated_chart_views,
+            ALL_VIEWS.to_vec(),
+            "default settings capture every side, so every side must render a chart tile, \
+             in ALL_VIEWS order"
+        );
+    }
+
+    #[test]
+    fn from_opposite_side_renders_no_tile_but_a_status_note_naming_its_source() {
+        let context = egui::Context::default();
+        let mut state = ImportDialogState::new(quad_scene(), "quad.glb".into());
+        state
+            .settings
+            .side_modes
+            .set(CanonicalView::Back, SideMode::FromOpposite)
+            .expect("Front stays Capture by default, so Back may switch to FromOpposite");
+        settle(&context, &mut state);
+
+        assert!(
+            !state.generated_chart_views.contains(&CanonicalView::Back),
+            "a FromOpposite side has no stored chart and must not render a tile"
+        );
+        assert!(
+            state.generated_chart_views.contains(&CanonicalView::Front),
+            "Front stays Capture and must still render a tile"
+        );
+        let back_note = state
+            .chart_status_notes
+            .iter()
+            .find(|(view, _)| *view == CanonicalView::Back)
+            .map(|(_, note)| note.clone())
+            .expect("Back must carry a status note when it renders no tile");
+        assert!(
+            back_note.contains("from Front"),
+            "Back's note must name Front as its source side, got {back_note:?}"
+        );
+    }
+
+    #[test]
+    fn chart_tile_dims_match_the_converted_charts_own_dimensions() {
+        let context = egui::Context::default();
+        let mut state = ImportDialogState::new(quad_scene(), "quad.glb".into());
+        settle(&context, &mut state);
+
+        assert_eq!(state.chart_tiles.tiles.len(), ALL_VIEWS.len());
+        let converted = state
+            .converted
+            .as_ref()
+            .expect("default settings convert successfully");
+        for tile in &state.chart_tiles.tiles {
+            let expected = converted
+                .document
+                .source(tile.view)
+                .expect("a rendered tile always has a Capture-side chart")
+                .dimensions();
+            assert_eq!(
+                tile.dims, expected,
+                "tile dims must match the chart's own dimensions for {:?}",
+                tile.view
+            );
+        }
+    }
+
+    #[test]
+    fn broken_conversion_clears_the_chart_panel_and_reports_the_error() {
+        let context = egui::Context::default();
+        let mut state = ImportDialogState::new(quad_scene(), "quad.glb".into());
+        settle(&context, &mut state);
+        assert!(
+            !state.generated_chart_views.is_empty(),
+            "sanity check: default settings render tiles"
+        );
+
+        // `SideMode::Off` on every side (rather than an out-of-slider-range
+        // `longest_axis_pixels`) keeps the conversion broken across
+        // `settle`'s extra render passes: the bounds slider clamps
+        // `longest_axis_pixels` back into its `1..=63` range the moment it
+        // is drawn, which would silently heal an out-of-range value and
+        // make the conversion succeed again by the second settled frame.
+        for view in ALL_VIEWS {
+            state.settings.side_modes.set(view, SideMode::Off).unwrap();
+        }
+        state.ensure_converted();
+        settle(&context, &mut state);
+
+        assert!(
+            state.generated_chart_views.is_empty(),
+            "a broken conversion must render no tiles"
+        );
+        assert!(
+            state.chart_tiles.tiles.is_empty(),
+            "a broken conversion must clear the texture cache"
+        );
+        let error = match &state.converted {
+            Err(error) => error.clone(),
+            Ok(_) => panic!("turning every side off must fail conversion with NoCaptureSides"),
+        };
+        assert_eq!(state.chart_panel_error.as_deref(), Some(error.as_str()));
+    }
+
+    #[test]
+    fn chart_tile_cache_rebuilds_only_when_conversions_changes() {
+        let context = egui::Context::default();
+        let mut state = ImportDialogState::new(quad_scene(), "quad.glb".into());
+        settle(&context, &mut state);
+        settle(&context, &mut state);
+        assert_eq!(
+            state.chart_tile_cache_rebuilds, 1,
+            "settling twice after one conversion must rebuild the texture cache exactly once"
+        );
+
+        state.settings.longest_axis_pixels = 32;
+        state.ensure_converted();
+        settle(&context, &mut state);
+        assert_eq!(
+            state.chart_tile_cache_rebuilds, 2,
+            "a settings change that bumps conversions must rebuild the texture cache once more"
+        );
     }
 }

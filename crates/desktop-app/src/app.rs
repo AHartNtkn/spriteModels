@@ -284,11 +284,15 @@ impl DepthSpriteApp {
         }
     }
 
-    fn show_import_modal(&mut self, context: &egui::Context) {
+    /// Renders the import dialog full-window (it fills `ui` with its own
+    /// `CentralPanel`) and applies its outcome. Called only while
+    /// `import_active` — see `ui()` — so the editor workspace never renders
+    /// underneath it.
+    fn show_import_screen(&mut self, ui: &mut egui::Ui) {
         let Some(state) = self.import_dialog.as_mut() else {
             return;
         };
-        match state.show(context) {
+        match state.show(ui) {
             ImportDialogOutcome::KeepOpen => {}
             ImportDialogOutcome::Cancel => self.import_dialog = None,
             ImportDialogOutcome::Import(model) => {
@@ -327,71 +331,86 @@ impl eframe::App for DepthSpriteApp {
         #[cfg(test)]
         let menu_observation = menu_output.observation;
 
-        let root_rect = root.max_rect();
-        #[cfg(test)]
-        let mut composition = None;
-        egui::CentralPanel::default().show(root, |ui| {
-            let source_count = self.shell.document.sources().len();
-            let layout = layout::calculate_layout(
-                Size::new(root_rect.width(), root_rect.height()),
-                source_count,
-            )
-            .expect("native window must respect the derived minimum size");
-            let tools_rect = to_egui(layout.tools, root_rect.min);
-            let palette_output = ui
-                .scope_builder(egui::UiBuilder::new().max_rect(tools_rect), |ui| {
-                    self.palette.show(ui, &mut self.shell.document)
-                })
-                .inner;
-            let model_rect = to_egui(layout.model, root_rect.min);
-            let model_output = self.model_view.show(ui, self.shell.document(), model_rect);
-            if let Err(error) = &model_output {
-                ui.painter().text(
-                    model_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    format!("Preview unavailable: {error}"),
-                    egui::FontId::monospace(12.0),
-                    egui::Color32::LIGHT_RED,
-                );
-            }
-            let source_grid_output = self.source_grid.show(
-                ui,
-                &mut self.shell.document,
-                &layout.source_cards,
-                layout.add_button,
-                root_rect.min,
-            );
+        // While the import dialog is the active surface, it fills the
+        // window with its own `CentralPanel` (see `import_dialog::show`)
+        // and the editor workspace must not render underneath it — the
+        // default document's empty-chart depth canvases would otherwise
+        // paint their magenta empty-fill uselessly behind the dialog.
+        let import_active = self.import_dialog.is_some()
+            && self.shell.file_error().is_none()
+            && self.shell.pending_destructive_action().is_none();
+
+        if import_active {
+            self.show_import_screen(root);
             #[cfg(test)]
             {
-                composition = Some(CompositionObservation {
-                    menu: menu_observation,
-                    palette: palette_output.observation,
-                    model: model_output
-                        .expect("the valid document always renders a model preview")
-                        .observation,
-                    source_grid: source_grid_output.observation,
-                });
+                self.last_composition = None;
             }
-            #[cfg(not(test))]
-            {
-                let _ = (palette_output, model_output, source_grid_output);
-            }
-        });
-
-        if self.shell.file_error().is_some() {
-            self.show_file_error_modal(&context);
-        } else if self.shell.pending_destructive_action().is_none() && self.import_dialog.is_some()
-        {
-            self.show_import_modal(&context);
         } else {
-            self.show_unsaved_modal(&context);
+            let root_rect = root.max_rect();
+            #[cfg(test)]
+            let mut composition = None;
+            egui::CentralPanel::default().show(root, |ui| {
+                let source_count = self.shell.document.sources().len();
+                let layout = layout::calculate_layout(
+                    Size::new(root_rect.width(), root_rect.height()),
+                    source_count,
+                )
+                .expect("native window must respect the derived minimum size");
+                let tools_rect = to_egui(layout.tools, root_rect.min);
+                let palette_output = ui
+                    .scope_builder(egui::UiBuilder::new().max_rect(tools_rect), |ui| {
+                        self.palette.show(ui, &mut self.shell.document)
+                    })
+                    .inner;
+                let model_rect = to_egui(layout.model, root_rect.min);
+                let model_output = self.model_view.show(ui, self.shell.document(), model_rect);
+                if let Err(error) = &model_output {
+                    ui.painter().text(
+                        model_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("Preview unavailable: {error}"),
+                        egui::FontId::monospace(12.0),
+                        egui::Color32::LIGHT_RED,
+                    );
+                }
+                let source_grid_output = self.source_grid.show(
+                    ui,
+                    &mut self.shell.document,
+                    &layout.source_cards,
+                    layout.add_button,
+                    root_rect.min,
+                );
+                #[cfg(test)]
+                {
+                    composition = Some(CompositionObservation {
+                        menu: menu_observation,
+                        palette: palette_output.observation,
+                        model: model_output
+                            .expect("the valid document always renders a model preview")
+                            .observation,
+                        source_grid: source_grid_output.observation,
+                    });
+                }
+                #[cfg(not(test))]
+                {
+                    let _ = (palette_output, model_output, source_grid_output);
+                }
+            });
+            #[cfg(test)]
+            {
+                self.last_composition = Some(
+                    composition.expect("actual workspace widget observations are always recorded"),
+                );
+            }
+
+            if self.shell.file_error().is_some() {
+                self.show_file_error_modal(&context);
+            } else {
+                self.show_unsaved_modal(&context);
+            }
         }
-        #[cfg(test)]
-        {
-            self.last_composition = Some(
-                composition.expect("actual workspace widget observations are always recorded"),
-            );
-        }
+
         self.finish_quit(&context);
     }
 }
