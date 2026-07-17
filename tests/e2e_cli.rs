@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use depthsprite_format::{load_path, save_path_atomic};
 use relief_core::{Bounds, CanonicalView, DecodedTexel};
-use relief_render::{RenderRequest, TargetView, render_model};
+use relief_render::{PreparedModel, RenderRequest, TargetView, render_model};
 
 fn bowl_asset() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/examples/bowl.depthsprite")
@@ -39,7 +39,7 @@ fn bowl_open_render_save_reopen_preserves_model_and_relief() {
     let resolved = model.resolve();
     assert!(resolved.chart(CanonicalView::Back).is_some());
     assert!(resolved.chart(CanonicalView::Bottom).is_none());
-    let frame = render_model(&resolved, &request).unwrap();
+    let frame = render_model(&PreparedModel::new(&resolved), &request).unwrap();
     for view in [CanonicalView::Front, CanonicalView::Top] {
         let (x, y, owner, rgb, relief) = (0..frame.height())
             .flat_map(|y| (0..frame.width()).map(move |x| (x, y)))
@@ -76,5 +76,8 @@ fn bowl_open_render_save_reopen_preserves_model_and_relief() {
     save_path_atomic(&model, &copy).unwrap();
     let reopened = load_path(copy).unwrap();
     assert_eq!(reopened, model);
-    assert_eq!(render_model(&reopened.resolve(), &request).unwrap(), frame);
+    assert_eq!(
+        render_model(&PreparedModel::new(&reopened.resolve()), &request).unwrap(),
+        frame
+    );
 }

@@ -1,6 +1,6 @@
 use num_rational::Ratio;
 use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart, ResolvedCharts};
-use relief_render::{CameraBasis, RenderRequest, TargetView, render_model};
+use relief_render::{CameraBasis, PreparedModel, RenderRequest, TargetView, render_model};
 
 fn resolved(bounds: Bounds, charts: Vec<Chart>) -> ResolvedCharts {
     AuthoredModel::new(bounds, charts).unwrap().resolve()
@@ -23,17 +23,18 @@ fn explicit_opposites_never_bleed_through_each_other() {
     let resolved = AuthoredModel::new(bounds, vec![front, back])
         .unwrap()
         .resolve();
+    let prepared = PreparedModel::new(&resolved);
     let front_request = RenderRequest::new(8, 8, TargetView::front());
     let back_request = RenderRequest::new(8, 8, TargetView::back());
     assert!(
-        render_model(&resolved, &front_request)
+        render_model(&prepared, &front_request)
             .unwrap()
             .pixels()
             .iter()
             .all(|p| p[2] == 0)
     );
     assert!(
-        render_model(&resolved, &back_request)
+        render_model(&prepared, &back_request)
             .unwrap()
             .pixels()
             .iter()
@@ -46,8 +47,9 @@ fn one_explicit_opposite_source_is_visible_as_a_back_observation() {
     let bounds = Bounds::new(2, 2, 2).unwrap();
     let front = solid(bounds, CanonicalView::Front, [7, 11, 13, 255]).with_opposite_assignment();
     let resolved = AuthoredModel::new(bounds, vec![front]).unwrap().resolve();
+    let prepared = PreparedModel::new(&resolved);
     let request = RenderRequest::new(8, 8, TargetView::back());
-    let rear = render_model(&resolved, &request).unwrap();
+    let rear = render_model(&prepared, &request).unwrap();
     let visible = rear
         .pixels()
         .iter()
@@ -64,8 +66,9 @@ fn resolved_charts_are_invisible_when_edge_on() {
     let bounds = Bounds::new(2, 2, 2).unwrap();
     let front = solid(bounds, CanonicalView::Front, [7, 11, 13, 255]);
     let resolved = AuthoredModel::new(bounds, vec![front]).unwrap().resolve();
+    let prepared = PreparedModel::new(&resolved);
     let request = RenderRequest::new(8, 8, TargetView::left());
-    let edge_on = render_model(&resolved, &request).unwrap();
+    let edge_on = render_model(&prepared, &request).unwrap();
     assert!(edge_on.pixels().iter().all(|pixel| pixel[3] == 0));
 }
 
@@ -75,7 +78,8 @@ fn a_flat_boundary_cell_covers_its_pixel() {
     let chart = Chart::from_rgba(CanonicalView::Front, 1, 1, vec![[23, 45, 67, 255]]).unwrap();
 
     let charts = resolved(bounds, vec![chart]);
-    let frame = render_model(&charts, &RenderRequest::new(1, 1, TargetView::front())).unwrap();
+    let prepared = PreparedModel::new(&charts);
+    let frame = render_model(&prepared, &RenderRequest::new(1, 1, TargetView::front())).unwrap();
 
     assert_eq!(frame.rgba_at(0, 0), [23, 45, 67, 255]);
 }
@@ -103,7 +107,8 @@ fn explicit_mirrored_camera_still_covers_the_chart() {
     ));
 
     let charts = resolved(bounds, vec![chart]);
-    let frame = render_model(&charts, &RenderRequest::new(1, 1, target)).unwrap();
+    let prepared = PreparedModel::new(&charts);
+    let frame = render_model(&prepared, &RenderRequest::new(1, 1, target)).unwrap();
 
     assert_eq!(frame.rgba_at(0, 0), [70, 80, 90, 255]);
 }
@@ -120,7 +125,8 @@ fn exact_shared_source_edge_uses_the_lowest_nearest_texel_tie() {
     .unwrap();
 
     let charts = resolved(bounds, vec![chart]);
-    let frame = render_model(&charts, &RenderRequest::new(1, 1, TargetView::front())).unwrap();
+    let prepared = PreparedModel::new(&charts);
+    let frame = render_model(&prepared, &RenderRequest::new(1, 1, TargetView::front())).unwrap();
 
     assert_eq!(frame.rgba_at(0, 0), [200, 10, 20, 255]);
     let owner = frame.owner_at(0, 0).unwrap();
@@ -171,8 +177,9 @@ fn overlapping_relief_preimages_compete_by_exact_transient_depth() {
     ));
 
     let charts = resolved(bounds, vec![chart]);
-    let flat = render_model(&charts, &RenderRequest::new(11, 1, flat_nearer)).unwrap();
-    let displaced = render_model(&charts, &RenderRequest::new(11, 1, displaced_nearer)).unwrap();
+    let prepared = PreparedModel::new(&charts);
+    let flat = render_model(&prepared, &RenderRequest::new(11, 1, flat_nearer)).unwrap();
+    let displaced = render_model(&prepared, &RenderRequest::new(11, 1, displaced_nearer)).unwrap();
 
     assert_eq!(flat.rgba_at(8, 0), [220, 20, 20, 255]);
     assert_eq!(displaced.rgba_at(8, 0), [20, 20, 220, 255]);

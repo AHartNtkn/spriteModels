@@ -2,7 +2,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use editor_core::{EditorDocument, OrbitCamera, PreviewCache};
 use fixture_gen::{globe_model, gyroscope_model};
 use relief_core::AuthoredModel;
-use relief_render::{RenderRequest, TargetView, render_model};
+use relief_render::{PreparedModel, RenderRequest, TargetView, render_model};
 
 /// The preview pipeline sizes its square framebuffer from the model alone
 /// (not the orientation), so one cached frame reveals the native side length.
@@ -39,16 +39,26 @@ fn bench_render(criterion: &mut Criterion) {
     ];
     for (model_name, model) in &models {
         let charts = model.resolve();
+        let prepared = PreparedModel::new(&charts);
         let side = native_side(model);
         for (view_name, target) in orientations() {
             criterion.bench_function(&format!("render/{model_name}/{view_name}"), |bencher| {
                 bencher.iter(|| {
                     let request = RenderRequest::new(side, side, target.clone());
-                    render_model(&charts, &request).expect("render must succeed")
+                    render_model(&prepared, &request).expect("render must succeed")
                 })
             });
         }
     }
+}
+
+/// Preparation is camera-independent and hoisted out of every `render/*`
+/// benchmark above; this isolates its own cost.
+fn bench_prepare(criterion: &mut Criterion) {
+    let charts = globe_model().expect("globe fixture must build").resolve();
+    criterion.bench_function("prepare/globe", |bencher| {
+        bencher.iter(|| PreparedModel::new(&charts))
+    });
 }
 
 /// End-to-end orbit interaction through the editor's public preview path:
@@ -85,6 +95,6 @@ fn configured() -> Criterion {
 criterion_group! {
     name = benches;
     config = configured();
-    targets = bench_render, bench_orbit_sweep
+    targets = bench_render, bench_prepare, bench_orbit_sweep
 }
 criterion_main!(benches);

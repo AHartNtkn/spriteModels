@@ -187,11 +187,49 @@ impl PreparedRelief {
     }
 }
 
+/// Camera-independent preparation for a resolved model: per-chart relief
+/// fields and derived constants that do not depend on `RenderRequest`.
+/// Building this is ~40% of a render call, so callers that re-render the
+/// same model under different orientations should build it once and pass it
+/// to every `render_model` call.
+#[derive(Clone, Debug)]
+pub struct PreparedModel {
+    charts: ResolvedCharts,
+    reliefs: Vec<PreparedChart>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedChart {
+    relief: PreparedRelief,
+    maximum_relief: f64,
+}
+
+impl PreparedModel {
+    pub fn new(charts: &ResolvedCharts) -> Self {
+        let bounds = charts.bounds();
+        let reliefs = charts
+            .charts()
+            .iter()
+            .map(|chart| {
+                let field = ReliefField::new(chart);
+                PreparedChart {
+                    relief: PreparedRelief::new(&field),
+                    maximum_relief: f64::from(chart.view().maximum_inward_depth(bounds)),
+                }
+            })
+            .collect();
+        Self {
+            charts: charts.clone(),
+            reliefs,
+        }
+    }
+}
+
 pub fn render_model(
-    charts: &ResolvedCharts,
+    prepared: &PreparedModel,
     request: &RenderRequest,
 ) -> Result<FrameBuffer, RenderError> {
-    let bounds = charts.bounds();
+    let bounds = prepared.charts.bounds();
     (request.width as usize)
         .checked_mul(request.height as usize)
         .ok_or(RenderError::FrameBufferTooLarge)?;
@@ -205,27 +243,21 @@ pub fn render_model(
         max_x,
         min_y,
         max_y,
-    }) = projected_extents(bounds, charts, &request.target)
+    }) = projected_extents(bounds, &prepared.charts, &request.target)
     else {
         return Ok(frame);
     };
     let offset_x = Ratio::new(i64::from(request.width), 2) - (min_x + max_x) / 2;
     let offset_y = Ratio::new(i64::from(request.height), 2) - (min_y + max_y) / 2;
-    let prepared: Vec<_> = charts
+    let frame_charts: Vec<_> = prepared
+        .charts
         .charts()
         .iter()
-        .map(|chart| {
+        .zip(prepared.reliefs.iter())
+        .map(|(chart, entry)| {
             let warp = request.target.warp_coefficients(chart.view(), bounds);
             let facing = request.target.facing_coefficients(chart.view(), bounds);
-            let field = ReliefField::new(chart);
-            let maximum_relief = f64::from(chart.view().maximum_inward_depth(bounds));
-            (
-                chart,
-                PreparedRelief::new(&field),
-                warp,
-                facing,
-                maximum_relief,
-            )
+            (chart, &entry.relief, warp, facing, entry.maximum_relief)
         })
         .collect();
 
@@ -234,7 +266,7 @@ pub fn render_model(
             let screen_x = Ratio::new(2 * i64::from(x) + 1, 2) - offset_x;
             let screen_y = Ratio::new(2 * i64::from(y) + 1, 2) - offset_y;
 
-            for (chart, relief, warp, facing, maximum_relief) in &prepared {
+            for (chart, relief, warp, facing, maximum_relief) in &frame_charts {
                 let Some(line) = warp.inverse_line(screen_x, screen_y) else {
                     continue;
                 };

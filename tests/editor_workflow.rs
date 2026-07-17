@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use editor_core::{ActiveLayer, DepthValue, EditorDocument, ReliefValue};
 use relief_core::{CanonicalView, EMPTY_RGBA};
-use relief_render::{FrameBuffer, RenderRequest, TargetView, render_model};
+use relief_render::{FrameBuffer, PreparedModel, RenderRequest, TargetView, render_model};
 
 const FRONT: CanonicalView = CanonicalView::Front;
 const TOP: CanonicalView = CanonicalView::Top;
@@ -42,8 +42,9 @@ fn paint_relief(document: &mut EditorDocument, view: CanonicalView, pixel: (u32,
 
 fn render(document: &EditorDocument) -> FrameBuffer {
     let resolved = document.model().resolve();
+    let prepared = PreparedModel::new(&resolved);
     render_model(
-        &resolved,
+        &prepared,
         &RenderRequest::new(96, 96, TargetView::bowl_acceptance()),
     )
     .unwrap()

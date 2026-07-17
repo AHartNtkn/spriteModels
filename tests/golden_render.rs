@@ -14,7 +14,7 @@ use fixture_gen::{
     block_model, bowl_model, dome_model, globe_model, gyroscope_model, tent_model,
 };
 use relief_core::AuthoredModel;
-use relief_render::{FrameBuffer, RenderRequest, TargetView, render_model};
+use relief_render::{FrameBuffer, PreparedModel, RenderRequest, TargetView, render_model};
 
 const GOLDEN_PATH: &str = "tests/golden/render_hashes.txt";
 const FAILURE_DIR: &str = "target/golden-failures";
@@ -101,10 +101,11 @@ fn render_scenarios() -> BTreeMap<String, FrameBuffer> {
     let mut frames = BTreeMap::new();
     for (model_name, model) in fixture_models() {
         let charts = model.resolve();
+        let prepared = PreparedModel::new(&charts);
         let side = native_side(&model);
         for (view_name, target) in views() {
             let request = RenderRequest::new(side, side, target);
-            let frame = render_model(&charts, &request).expect("render must succeed");
+            let frame = render_model(&prepared, &request).expect("render must succeed");
             frames.insert(format!("{model_name}/{view_name}"), frame);
         }
     }

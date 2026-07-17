@@ -1,5 +1,5 @@
 use relief_core::{Bounds, CanonicalView, Chart};
-use relief_render::{FrameBuffer, RenderRequest, render_model};
+use relief_render::{FrameBuffer, PreparedModel, RenderRequest, render_model};
 
 use crate::{EditorDocument, EditorError, OrbitCamera, camera::OrbitOrientation};
 
@@ -56,7 +56,7 @@ impl PreviewCache {
             let charts = document.model().resolve();
             let side = native_cell_side(document.bounds(), charts.charts());
             let request = RenderRequest::new(side, side, camera.target_view());
-            let framebuffer = render_model(&charts, &request)?;
+            let framebuffer = render_model(&PreparedModel::new(&charts), &request)?;
             self.generation = self
                 .generation
                 .checked_add(1)

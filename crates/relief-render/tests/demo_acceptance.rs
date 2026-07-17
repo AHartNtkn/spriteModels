@@ -5,7 +5,7 @@ use std::{
 
 use depthsprite_format::load_path;
 use relief_core::{Bounds, CanonicalView, Chart, DecodedTexel};
-use relief_render::{FrameBuffer, RenderRequest, TargetView, render_model};
+use relief_render::{FrameBuffer, PreparedModel, RenderRequest, TargetView, render_model};
 
 fn asset(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -398,10 +398,11 @@ fn opaque_is_connected(frame: &FrameBuffer) -> bool {
 fn foundational_globe_combines_explicit_front_back_into_a_connected_oblique_silhouette() {
     let model = load_path(asset("globe.depthsprite")).unwrap();
     let resolved = model.resolve();
-    let front = render_model(&resolved, &RenderRequest::new(96, 96, TargetView::front())).unwrap();
-    let back = render_model(&resolved, &RenderRequest::new(96, 96, TargetView::back())).unwrap();
+    let prepared = PreparedModel::new(&resolved);
+    let front = render_model(&prepared, &RenderRequest::new(96, 96, TargetView::front())).unwrap();
+    let back = render_model(&prepared, &RenderRequest::new(96, 96, TargetView::back())).unwrap();
     let oblique = render_model(
-        &resolved,
+        &prepared,
         &RenderRequest::new(96, 96, TargetView::isometric()),
     )
     .unwrap();
@@ -802,13 +803,14 @@ fn ambitious_gyroscope_authors_exact_asymmetric_ring_observations() {
 fn ambitious_gyroscope_opposite_renders_preserve_distinct_ownership_and_color() {
     let gyroscope = load_path(asset("gyroscope.depthsprite")).unwrap();
     let resolved = gyroscope.resolve();
+    let prepared = PreparedModel::new(&resolved);
     for (a, b) in [
         (CanonicalView::Front, CanonicalView::Back),
         (CanonicalView::Left, CanonicalView::Right),
         (CanonicalView::Top, CanonicalView::Bottom),
     ] {
-        let first = render_model(&resolved, &RenderRequest::new(96, 96, target(a))).unwrap();
-        let second = render_model(&resolved, &RenderRequest::new(96, 96, target(b))).unwrap();
+        let first = render_model(&prepared, &RenderRequest::new(96, 96, target(a))).unwrap();
+        let second = render_model(&prepared, &RenderRequest::new(96, 96, target(b))).unwrap();
         let first_distribution = owner_color_distribution(&first);
         let second_distribution = owner_color_distribution(&second);
         assert!(first_distribution.keys().any(|(view, _)| *view == a));
@@ -876,7 +878,7 @@ fn ambitious_tent_authors_entrance_curvature_and_connected_landmarks() {
     }
 
     let oblique = render_model(
-        &tent.resolve(),
+        &PreparedModel::new(&tent.resolve()),
         &RenderRequest::new(128, 96, TargetView::isometric()),
     )
     .unwrap();
@@ -985,7 +987,7 @@ fn ambitious_dome_authors_ribs_relief_and_connected_crown_drum() {
     }
 
     let oblique = render_model(
-        &dome.resolve(),
+        &PreparedModel::new(&dome.resolve()),
         &RenderRequest::new(128, 112, TargetView::isometric()),
     )
     .unwrap();
