@@ -66,7 +66,10 @@ pub fn rasterize(scene: &TriangleScene, view: &View, lighting: &Lighting) -> Ras
         // negating the barycentric weights rather than culling.
         let flip = if area < 0.0 { -1.0 } else { 1.0 };
         area *= flip;
-        if area <= f32::EPSILON {
+        // Only skip exactly-zero area (degenerate triangle with no defined barycentric space).
+        // A triangle with any nonzero screen area has a well-defined parameterization;
+        // an absolute epsilon would silently cull thin-but-valid triangles.
+        if area == 0.0 {
             continue;
         }
         let inv_area = 1.0 / area;
@@ -123,7 +126,9 @@ pub fn rasterize(scene: &TriangleScene, view: &View, lighting: &Lighting) -> Ras
 
                 let mut normal = interpolate3(tri.normals);
                 let len = dot(normal, normal).sqrt();
-                if len > f32::EPSILON {
+                // Any positive length normalizes to a unit vector. Zero-length normal has no
+                // direction, so flip test and lambert both evaluate to 0, leaving ambient-only shading.
+                if len > 0.0 {
                     normal = [normal[0] / len, normal[1] / len, normal[2] / len];
                 }
                 // Two-sided shading: flip a normal that faces away from

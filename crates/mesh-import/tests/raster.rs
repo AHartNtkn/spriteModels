@@ -182,6 +182,52 @@ fn mask_cutoff_discards_transparent_texels() {
 }
 
 #[test]
+fn clockwise_wound_triangles_are_rasterized_not_culled() {
+    // Reverse the vertex order of a standard quad to make it clockwise-wound
+    // (negative screen-space area); verify it still rasterizes correctly.
+    let v = |x: f32, y: f32| [x, y, 1.5];
+    let tri = |a: [f32; 3], b: [f32; 3], c: [f32; 3], uvs: [[f32; 2]; 3]| Triangle {
+        positions: [a, b, c],
+        normals: [[0.0, 0.0, -1.0]; 3],
+        uvs,
+        colors: [[1.0, 1.0, 1.0, 1.0]; 3],
+        material: 0,
+    };
+    let triangles = vec![
+        // First triangle: reversed from (0,0)-(4,0)-(4,4) to (0,0)-(4,4)-(4,0)
+        tri(
+            v(0.0, 0.0),
+            v(4.0, 4.0),
+            v(4.0, 0.0),
+            [[0.0, 0.0], [1.0, 1.0], [1.0, 0.0]],
+        ),
+        // Second triangle: reversed from (0,0)-(4,4)-(0,4) to (0,0)-(0,4)-(4,4)
+        tri(
+            v(0.0, 0.0),
+            v(0.0, 4.0),
+            v(4.0, 4.0),
+            [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+        ),
+    ];
+    let scene = TriangleScene {
+        triangles,
+        materials: vec![plain_material()],
+    };
+    let raster = rasterize(&scene, &front_view(), &unlit());
+    for y in 0..4 {
+        for x in 0..4 {
+            let i = (y * 4 + x) as usize;
+            assert_eq!(raster.depth[i], 1.5, "clockwise texel ({x},{y}) depth");
+            assert_eq!(
+                raster.color[i],
+                [255, 255, 255, 255],
+                "clockwise texel ({x},{y}) color"
+            );
+        }
+    }
+}
+
+#[test]
 fn light_direction_places_the_light_by_azimuth_and_elevation() {
     let front = light_direction(0.0, 0.0);
     assert!((front[0]).abs() < 1e-6 && (front[1]).abs() < 1e-6 && (front[2] + 1.0).abs() < 1e-6);
