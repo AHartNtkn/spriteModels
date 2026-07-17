@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
+use depthsprite_format::save_path_atomic;
 use editor_core::{ActiveLayer, DepthValue, EditorDocument, ReliefValue};
+use fixture_gen::bowl_model;
 use relief_core::{CanonicalView, EMPTY_RGBA};
-use relief_render::{FrameBuffer, RenderRequest, TargetView, render_model};
+use relief_render::{FrameBuffer, PreparedModel, RenderRequest, TargetView, render_model};
 
 const FRONT: CanonicalView = CanonicalView::Front;
 const TOP: CanonicalView = CanonicalView::Top;
@@ -10,8 +12,10 @@ const HIDDEN_PIXEL: (u32, u32) = (0, 0);
 const BASIN_PIXEL: (u32, u32) = (15, 15);
 const HIDDEN_RGB: [u8; 3] = [23, 197, 241];
 
-fn bowl_asset() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/examples/bowl.depthsprite")
+fn bowl_asset(directory: &std::path::Path) -> PathBuf {
+    let path = directory.join("bowl.depthsprite");
+    save_path_atomic(&bowl_model().unwrap(), &path).unwrap();
+    path
 }
 
 fn source_pixel(document: &EditorDocument, view: CanonicalView, (x, y): (u32, u32)) -> [u8; 4] {
@@ -42,8 +46,9 @@ fn paint_relief(document: &mut EditorDocument, view: CanonicalView, pixel: (u32,
 
 fn render(document: &EditorDocument) -> FrameBuffer {
     let resolved = document.model().resolve();
+    let prepared = PreparedModel::new(&resolved);
     render_model(
-        &resolved,
+        &prepared,
         &RenderRequest::new(96, 96, TargetView::bowl_acceptance()),
     )
     .unwrap()
@@ -64,7 +69,8 @@ fn rendered_source_pixel(
 
 #[test]
 fn complete_bowl_authoring_workflow_preserves_exact_sources_and_recessed_render() {
-    let asset = bowl_asset();
+    let directory = tempfile::tempdir().unwrap();
+    let asset = bowl_asset(directory.path());
     let mut document = EditorDocument::open(&asset).unwrap();
     assert_eq!(
         document.sources().len(),
@@ -172,7 +178,6 @@ fn complete_bowl_authoring_workflow_preserves_exact_sources_and_recessed_render(
             )
         })
         .collect::<Vec<_>>();
-    let directory = tempfile::tempdir().unwrap();
     let saved_path = directory.path().join("edited-bowl.depthsprite");
     document.save_as(&saved_path).unwrap();
     assert!(!document.is_dirty());

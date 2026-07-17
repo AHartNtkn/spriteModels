@@ -1,9 +1,15 @@
 use relief_core::{Bounds, CanonicalView, Chart};
-use relief_render::{FrameBuffer, RenderRequest, render_model};
+use relief_render::{FrameBuffer, PreparedModel, RenderRequest, render_model};
 
 use crate::{EditorDocument, EditorError, OrbitCamera, camera::OrbitOrientation};
 
 const FRAME_BREATHING_ROOM: u32 = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PreparedKey {
+    document_identity: u64,
+    revision: u64,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PreviewKey {
@@ -12,13 +18,22 @@ struct PreviewKey {
     orientation: OrbitOrientation,
 }
 
+struct PreparedFrame {
+    model: PreparedModel,
+    side: u32,
+}
+
 #[derive(Default)]
 pub struct PreviewCache {
+    prepared_key: Option<PreparedKey>,
+    prepared: Option<PreparedFrame>,
     key: Option<PreviewKey>,
     framebuffer: Option<FrameBuffer>,
     generation: u64,
     #[cfg(test)]
     render_count: u64,
+    #[cfg(test)]
+    prepare_count: u64,
 }
 
 pub struct PreviewFrame<'a> {
@@ -47,16 +62,39 @@ impl PreviewCache {
         camera: OrbitCamera,
     ) -> Result<PreviewFrame<'_>, EditorError> {
         let (document_identity, revision) = document.render_key();
+        let prepared_key = PreparedKey {
+            document_identity,
+            revision,
+        };
+        if self.prepared_key != Some(prepared_key) {
+            let charts = document.model().resolve();
+            let side = native_cell_side(document.bounds(), charts.charts());
+            self.prepared = Some(PreparedFrame {
+                model: PreparedModel::new(&charts),
+                side,
+            });
+            self.prepared_key = Some(prepared_key);
+            #[cfg(test)]
+            {
+                self.prepare_count = self
+                    .prepare_count
+                    .checked_add(1)
+                    .expect("preview prepare count must remain monotonic");
+            }
+        }
+
         let key = PreviewKey {
             document_identity,
             revision,
             orientation: camera.orientation(),
         };
         if self.key != Some(key) {
-            let charts = document.model().resolve();
-            let side = native_cell_side(document.bounds(), charts.charts());
-            let request = RenderRequest::new(side, side, camera.target_view());
-            let framebuffer = render_model(&charts, &request)?;
+            let prepared = self
+                .prepared
+                .as_ref()
+                .expect("prepared_key set above implies a prepared model is stored");
+            let request = RenderRequest::new(prepared.side, prepared.side, camera.target_view());
+            let framebuffer = render_model(&prepared.model, &request)?;
             self.generation = self
                 .generation
                 .checked_add(1)
@@ -183,5 +221,40 @@ mod tests {
         preview.frame(&document, camera).unwrap();
 
         assert_eq!(preview.render_count, 2);
+    }
+
+    #[test]
+    fn orbit_change_reuses_prepared_model() {
+        let document = document();
+        let mut camera = OrbitCamera::default();
+        let mut preview = PreviewCache::default();
+        preview.frame(&document, camera).unwrap();
+
+        for (yaw, pitch) in [(9.0, 4.0), (-15.0, 6.0), (3.0, -8.0)] {
+            camera.drag(yaw, pitch);
+            preview.frame(&document, camera).unwrap();
+        }
+
+        assert_eq!(preview.render_count, 4);
+        assert_eq!(
+            preview.prepare_count, 1,
+            "the prepared model is camera-independent and must survive orbiting"
+        );
+    }
+
+    #[test]
+    fn document_mutation_rebuilds_prepared_model() {
+        let mut document = document();
+        let camera = OrbitCamera::default();
+        let mut preview = PreviewCache::default();
+        preview.frame(&document, camera).unwrap();
+
+        recolor(&mut document, [40, 50, 60]);
+        preview.frame(&document, camera).unwrap();
+
+        assert_eq!(
+            preview.prepare_count, 2,
+            "a document mutation must rebuild the prepared model, not just the frame"
+        );
     }
 }

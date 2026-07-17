@@ -1,16 +1,11 @@
-use std::{collections::VecDeque, path::Path};
+use std::collections::VecDeque;
 
-use depthsprite_format::load_path;
+use fixture_gen::globe_model;
 use relief_core::CanonicalView;
-use relief_render::{FrameBuffer, RenderRequest, TargetView, render_model};
+use relief_render::{FrameBuffer, PreparedModel, RenderRequest, TargetView, render_model};
 
 fn globe() -> relief_core::AuthoredModel {
-    load_path(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("assets/examples/globe.depthsprite"),
-    )
-    .expect("the checked-in globe must load")
+    globe_model().expect("the generated globe must be valid")
 }
 
 fn opaque_count(frame: &FrameBuffer) -> usize {
@@ -65,8 +60,9 @@ fn opaque_is_connected(frame: &FrameBuffer) -> bool {
 fn exact_side_globe_is_a_complete_connected_disc_from_both_sprites() {
     let model = globe();
     let resolved = model.resolve();
-    let front = render_model(&resolved, &RenderRequest::new(96, 96, TargetView::front())).unwrap();
-    let side = render_model(&resolved, &RenderRequest::new(96, 96, TargetView::right())).unwrap();
+    let prepared = PreparedModel::new(&resolved);
+    let front = render_model(&prepared, &RenderRequest::new(96, 96, TargetView::front())).unwrap();
+    let side = render_model(&prepared, &RenderRequest::new(96, 96, TargetView::right())).unwrap();
 
     assert!(
         opaque_count(&side) >= opaque_count(&front) * 9 / 10,
@@ -80,8 +76,9 @@ fn exact_side_globe_is_a_complete_connected_disc_from_both_sprites() {
 #[test]
 fn oblique_globe_combines_locally_visible_regions_of_both_sprites() {
     let model = globe();
+    let prepared = PreparedModel::new(&model.resolve());
     let frame = render_model(
-        &model.resolve(),
+        &prepared,
         &RenderRequest::new(96, 96, TargetView::isometric()),
     )
     .unwrap();

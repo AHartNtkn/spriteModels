@@ -1,5 +1,3 @@
-use std::path::{Path, PathBuf};
-
 use depthsprite_format::load_path;
 use fixture_gen::generate_examples;
 
@@ -12,15 +10,8 @@ const ASSETS: [&str; 6] = [
     "dome.depthsprite",
 ];
 
-fn committed_asset(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("assets/examples")
-        .join(name)
-}
-
 #[test]
-fn one_generation_operation_is_reproducible_and_matches_committed_assets() {
+fn one_generation_operation_is_reproducible_and_produces_loadable_packages() {
     let temporary = tempfile::tempdir().unwrap();
     let first = temporary.path().join("first");
     let second = temporary.path().join("second");
@@ -38,12 +29,6 @@ fn one_generation_operation_is_reproducible_and_matches_committed_assets() {
         assert_eq!(
             first_bytes, second_bytes,
             "independent generations of {name} must match"
-        );
-        assert_eq!(
-            first_bytes,
-            std::fs::read(committed_asset(name))
-                .unwrap_or_else(|error| panic!("committed {name} must exist: {error}")),
-            "committed {name} must come from generate_examples"
         );
         load_path(first_path).unwrap();
         load_path(second_path).unwrap();

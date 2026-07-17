@@ -1,12 +1,36 @@
 use num_rational::Ratio;
 use relief_core::CanonicalView;
+use std::cmp::Ordering;
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FragmentKey {
     pub depth: Ratio<i64>,
     pub chart_rank: u8,
     pub source_y: u32,
     pub source_x: u32,
+}
+
+impl Ord for FragmentKey {
+    /// Orders by depth first, then the tie-break fields. `depth` is always a
+    /// reduced canonical `Ratio<i64>` with positive denominator (produced by
+    /// `num_rational` arithmetic), so comparing two depths by the sign of the
+    /// cross-multiplication `n1*d2 - n2*d1` is exact and total: both products fit
+    /// `i128` because each operand fits `i64` (`|n*d| <= 2^126`), and the shared
+    /// positive-denominator normalization makes the sign the true value order.
+    fn cmp(&self, other: &Self) -> Ordering {
+        let left = i128::from(*self.depth.numer()) * i128::from(*other.depth.denom());
+        let right = i128::from(*other.depth.numer()) * i128::from(*self.depth.denom());
+        left.cmp(&right)
+            .then_with(|| self.chart_rank.cmp(&other.chart_rank))
+            .then_with(|| self.source_y.cmp(&other.source_y))
+            .then_with(|| self.source_x.cmp(&other.source_x))
+    }
+}
+
+impl PartialOrd for FragmentKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

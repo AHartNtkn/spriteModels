@@ -1,18 +1,8 @@
-use std::{
-    collections::{BTreeSet, VecDeque},
-    path::{Path, PathBuf},
-};
+use std::collections::{BTreeSet, VecDeque};
 
-use depthsprite_format::load_path;
+use fixture_gen::{block_model, bowl_model, dome_model, globe_model, gyroscope_model, tent_model};
 use relief_core::{Bounds, CanonicalView, Chart, DecodedTexel};
-use relief_render::{FrameBuffer, RenderRequest, TargetView, render_model};
-
-fn asset(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("assets/examples")
-        .join(name)
-}
+use relief_render::{FrameBuffer, PreparedModel, RenderRequest, TargetView, render_model};
 
 fn foreground(chart: &Chart, x: i32, y: i32) -> bool {
     let (width, height) = chart.dimensions();
@@ -90,7 +80,7 @@ fn column_reliefs(chart: &Chart, x: u32) -> BTreeSet<u8> {
 
 #[test]
 fn foundational_block_authors_six_lit_zero_relief_charts() {
-    let model = load_path(asset("block.depthsprite")).unwrap();
+    let model = block_model().unwrap();
     assert_eq!(model.bounds(), Bounds::new(16, 16, 16).unwrap());
     assert_eq!(
         model
@@ -156,7 +146,7 @@ fn foundational_block_authors_six_lit_zero_relief_charts() {
 
 #[test]
 fn foundational_bowl_has_shallow_basin_narrowing_exterior_and_lighting() {
-    let model = load_path(asset("bowl.depthsprite")).unwrap();
+    let model = bowl_model().unwrap();
     assert_eq!(model.bounds(), Bounds::new(32, 12, 32).unwrap());
     assert_eq!(
         model.charts().iter().map(Chart::view).collect::<Vec<_>>(),
@@ -310,7 +300,7 @@ fn assert_exact_globe_source_profile(chart: &Chart) {
 
 #[test]
 fn foundational_globe_authors_distinct_hemispheres_with_meeting_boundaries() {
-    let model = load_path(asset("globe.depthsprite")).unwrap();
+    let model = globe_model().unwrap();
     assert_eq!(model.bounds(), Bounds::new(48, 48, 48).unwrap());
     assert_eq!(
         model.charts().iter().map(Chart::view).collect::<Vec<_>>(),
@@ -396,12 +386,13 @@ fn opaque_is_connected(frame: &FrameBuffer) -> bool {
 
 #[test]
 fn foundational_globe_combines_explicit_front_back_into_a_connected_oblique_silhouette() {
-    let model = load_path(asset("globe.depthsprite")).unwrap();
+    let model = globe_model().unwrap();
     let resolved = model.resolve();
-    let front = render_model(&resolved, &RenderRequest::new(96, 96, TargetView::front())).unwrap();
-    let back = render_model(&resolved, &RenderRequest::new(96, 96, TargetView::back())).unwrap();
+    let prepared = PreparedModel::new(&resolved);
+    let front = render_model(&prepared, &RenderRequest::new(96, 96, TargetView::front())).unwrap();
+    let back = render_model(&prepared, &RenderRequest::new(96, 96, TargetView::back())).unwrap();
     let oblique = render_model(
-        &resolved,
+        &prepared,
         &RenderRequest::new(96, 96, TargetView::isometric()),
     )
     .unwrap();
@@ -739,7 +730,7 @@ fn has_two_axis_relief(chart: &Chart) -> bool {
 
 #[test]
 fn ambitious_gyroscope_authors_exact_asymmetric_ring_observations() {
-    let gyroscope = load_path(asset("gyroscope.depthsprite")).unwrap();
+    let gyroscope = gyroscope_model().unwrap();
     assert_eq!(gyroscope.bounds(), Bounds::new(48, 48, 48).unwrap());
     assert_eq!(
         views(&gyroscope),
@@ -800,15 +791,16 @@ fn ambitious_gyroscope_authors_exact_asymmetric_ring_observations() {
 
 #[test]
 fn ambitious_gyroscope_opposite_renders_preserve_distinct_ownership_and_color() {
-    let gyroscope = load_path(asset("gyroscope.depthsprite")).unwrap();
+    let gyroscope = gyroscope_model().unwrap();
     let resolved = gyroscope.resolve();
+    let prepared = PreparedModel::new(&resolved);
     for (a, b) in [
         (CanonicalView::Front, CanonicalView::Back),
         (CanonicalView::Left, CanonicalView::Right),
         (CanonicalView::Top, CanonicalView::Bottom),
     ] {
-        let first = render_model(&resolved, &RenderRequest::new(96, 96, target(a))).unwrap();
-        let second = render_model(&resolved, &RenderRequest::new(96, 96, target(b))).unwrap();
+        let first = render_model(&prepared, &RenderRequest::new(96, 96, target(a))).unwrap();
+        let second = render_model(&prepared, &RenderRequest::new(96, 96, target(b))).unwrap();
         let first_distribution = owner_color_distribution(&first);
         let second_distribution = owner_color_distribution(&second);
         assert!(first_distribution.keys().any(|(view, _)| *view == a));
@@ -827,7 +819,7 @@ fn ambitious_gyroscope_opposite_renders_preserve_distinct_ownership_and_color() 
 
 #[test]
 fn ambitious_tent_authors_entrance_curvature_and_connected_landmarks() {
-    let tent = load_path(asset("tent.depthsprite")).unwrap();
+    let tent = tent_model().unwrap();
     assert_eq!(tent.bounds(), Bounds::new(48, 28, 36).unwrap());
     assert_eq!(
         views(&tent),
@@ -876,7 +868,7 @@ fn ambitious_tent_authors_entrance_curvature_and_connected_landmarks() {
     }
 
     let oblique = render_model(
-        &tent.resolve(),
+        &PreparedModel::new(&tent.resolve()),
         &RenderRequest::new(128, 96, TargetView::isometric()),
     )
     .unwrap();
@@ -901,7 +893,7 @@ fn dome_window(rgb: [u8; 3]) -> bool {
 
 #[test]
 fn ambitious_dome_authors_ribs_relief_and_connected_crown_drum() {
-    let dome = load_path(asset("dome.depthsprite")).unwrap();
+    let dome = dome_model().unwrap();
     assert_eq!(dome.bounds(), Bounds::new(48, 32, 48).unwrap());
     assert_eq!(
         views(&dome),
@@ -985,7 +977,7 @@ fn ambitious_dome_authors_ribs_relief_and_connected_crown_drum() {
     }
 
     let oblique = render_model(
-        &dome.resolve(),
+        &PreparedModel::new(&dome.resolve()),
         &RenderRequest::new(128, 112, TargetView::isometric()),
     )
     .unwrap();
