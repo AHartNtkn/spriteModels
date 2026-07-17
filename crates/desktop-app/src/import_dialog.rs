@@ -298,6 +298,38 @@ impl ImportDialogState {
     pub fn show(&mut self, ui: &mut egui::Ui) -> ImportDialogOutcome {
         self.ensure_converted();
         let mut outcome = ImportDialogOutcome::KeepOpen;
+        // Fixed width for exactly `CHART_GRID_COLUMNS` tile columns: each
+        // column is at most `CHART_TILE_TARGET_PX` wide (`paint_chart_tile`
+        // floors its upscale so a tile's longer side never exceeds that
+        // target), `egui::Grid` inserts `ui.spacing().item_spacing.x`
+        // between columns by default, and the panel's own default frame
+        // (`Frame::side_top_panel`) adds `CHART_PANEL_SIDE_MARGIN_PX` of
+        // inner margin on each horizontal side. Panel::default_size's
+        // built-in guess (200px) has no relation to the tile grid, so it
+        // is overridden here instead of left to chance.
+        let column_gap = ui.spacing().item_spacing.x;
+        let charts_panel_width = CHART_GRID_COLUMNS as f32 * CHART_TILE_TARGET_PX
+            + (CHART_GRID_COLUMNS - 1) as f32 * column_gap
+            + 2.0 * CHART_PANEL_SIDE_MARGIN_PX;
+        // Added before the `CentralPanel` (egui panel order rule: side
+        // panels first, `CentralPanel` last) so the central region gets
+        // whatever width remains after this fixed-width panel.
+        egui::Panel::right("import-generated-charts")
+            .resizable(false)
+            .exact_size(charts_panel_width)
+            .show(ui, |ui| {
+                ui.heading("Generated charts");
+                egui::ScrollArea::vertical()
+                    .id_salt("import-generated-charts-scroll")
+                    // The panel owns a fixed width (`charts_panel_width`
+                    // above); the scroll area must fill it rather than
+                    // auto-shrink to its content's width, so only the
+                    // vertical extent is allowed to shrink/scroll.
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        self.show_generated_charts_panel(ui);
+                    });
+            });
         egui::CentralPanel::default().show(ui, |ui| {
             ui.heading(format!("Import 3D Model — {}", self.file_label));
             ui.horizontal(|ui| {
@@ -312,17 +344,6 @@ impl ImportDialogState {
                     self.mesh_viewport_rect = mesh_rect;
                     self.converted_viewport_rect = converted_rect;
                 }
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt("import-generated-charts-scroll")
-                    // The two viewports and settings rows below have a fixed
-                    // footprint; the charts panel is the only element meant
-                    // to take up whatever width remains, so its scroll area
-                    // must not auto-shrink to its content's width.
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        self.show_generated_charts_panel(ui);
-                    });
             });
             ui.separator();
             self.show_settings(ui);
@@ -673,18 +694,25 @@ impl ImportDialogState {
             self.chart_status_notes.clear();
             self.chart_panel_error = None;
         }
-        for (view, cell) in &cells {
-            #[cfg(test)]
-            match &cell.content {
-                ChartCellContent::Tile { .. } => self.generated_chart_views.push(*view),
-                ChartCellContent::Note(note) => {
-                    self.chart_status_notes.push((*view, note.clone()));
+        egui::Grid::new("import-charts-grid")
+            .num_columns(CHART_GRID_COLUMNS)
+            .show(ui, |ui| {
+                for (index, (view, cell)) in cells.iter().enumerate() {
+                    #[cfg(test)]
+                    match &cell.content {
+                        ChartCellContent::Tile { .. } => self.generated_chart_views.push(*view),
+                        ChartCellContent::Note(note) => {
+                            self.chart_status_notes.push((*view, note.clone()));
+                        }
+                    }
+                    #[cfg(not(test))]
+                    let _ = view;
+                    render_chart_cell(ui, cell);
+                    if (index + 1) % CHART_GRID_COLUMNS == 0 {
+                        ui.end_row();
+                    }
                 }
-            }
-            #[cfg(not(test))]
-            let _ = view;
-            render_chart_cell(ui, cell);
-        }
+            });
     }
 
     /// Builds the display content for one side: an image tile when
@@ -811,6 +839,17 @@ const CHART_TILE_TARGET_PX: f32 = 96.0;
 /// list, matching the `ui.separator()` spacing used elsewhere in this
 /// dialog's settings rows.
 const CHART_CELL_SPACING: f32 = 8.0;
+/// 3 columns for the six-cell (`ALL_VIEWS.len() == 6`) charts grid, giving
+/// exactly 2 rows. Six divides evenly into either 3x2 or 2x3; 3 columns is
+/// chosen over 2 because it keeps the grid's overall aspect ratio closer to
+/// square (three tile-columns wide, two tile-rows tall) instead of a tall
+/// 2-wide/3-tall strip, which would need more vertical scrolling to view
+/// every card in the fixed-height side panel.
+const CHART_GRID_COLUMNS: usize = 3;
+/// Horizontal inner margin egui's default side-panel frame applies on each
+/// side (`Frame::side_top_panel`'s `Margin::symmetric(8, 2)`), used to size
+/// the charts side panel to its 3-column grid exactly instead of guessing.
+const CHART_PANEL_SIDE_MARGIN_PX: f32 = 8.0;
 
 enum ChartCellContent {
     Tile {
@@ -827,23 +866,31 @@ struct ChartCell {
 }
 
 fn render_chart_cell(ui: &mut egui::Ui, cell: &ChartCell) {
-    ui.label(egui::RichText::new(&cell.header).strong());
-    match &cell.content {
-        ChartCellContent::Tile {
-            color,
-            relief,
-            dims,
-        } => {
-            ui.horizontal(|ui| {
-                paint_chart_tile(ui, color, *dims);
-                paint_chart_tile(ui, relief, *dims);
-            });
+    // `egui::Grid` treats each top-level call inside its closure as one
+    // column of the current row, so the whole card (label + tiles) is
+    // wrapped in a single `vertical` group to make it one grid cell.
+    ui.vertical(|ui| {
+        ui.label(egui::RichText::new(&cell.header).strong());
+        match &cell.content {
+            ChartCellContent::Tile {
+                color,
+                relief,
+                dims,
+            } => {
+                // Color tile above relief tile: the same stacking
+                // `source_grid`'s authored-source cards use (color canvas
+                // above depth canvas).
+                ui.vertical(|ui| {
+                    paint_chart_tile(ui, color, *dims);
+                    paint_chart_tile(ui, relief, *dims);
+                });
+            }
+            ChartCellContent::Note(note) => {
+                ui.label(egui::RichText::new(note).weak());
+            }
         }
-        ChartCellContent::Note(note) => {
-            ui.label(egui::RichText::new(note).weak());
-        }
-    }
-    ui.add_space(CHART_CELL_SPACING);
+        ui.add_space(CHART_CELL_SPACING);
+    });
 }
 
 fn paint_chart_tile(ui: &mut egui::Ui, texture: &egui::TextureHandle, dims: (u32, u32)) {
