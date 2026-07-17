@@ -13,6 +13,40 @@ const ROOT_SCALE: i64 = 1 << 24;
 const COORDINATE_EPSILON: f64 = 1.0e-9;
 const POLYNOMIAL_EPSILON: f64 = 1.0e-10;
 
+/// Half of one ray-parameter quantum: `0.5 / ROOT_SCALE`. `ROOT_SCALE = 2^24`,
+/// so this is exactly `2^-25`. Two parameters closer together than this
+/// straddle at most one rounding boundary `(q + 0.5) / ROOT_SCALE`, so their
+/// nearest quanta differ by at most one — the fact the correctly-rounded root
+/// solve relies on to terminate. This is a *parameter-space* quantity: the
+/// downstream quantization ([`quantized_parameter`]) rounds the ray parameter,
+/// not the cubic's per-segment unit variable, and the two differ by the
+/// segment span.
+const HALF_QUANTUM: f64 = 0.5 / ROOT_SCALE as f64;
+
+/// Static upper bound on the clipped ray-parameter range length. The ray
+/// parameter is the inverse solve's *free* source variable itself
+/// (`PreparedInverse` sets `var_slope[free] = 1` and `var_offset[free] = 0`,
+/// and those survive to the f64 coefficients exactly), and `solve_preimages`
+/// clips the parameter range so every source variable — the free one included —
+/// stays inside its box. The clipped range is therefore contained in the free
+/// variable's box: source coordinates span at most 63 (`Bounds::new` rejects
+/// sides outside `1..=63`) and relief spans at most
+/// `CanonicalView::maximum_inward_depth = 4 * opposing_axis <= 4 * 63`. Hence
+/// `4 * 63 = 252`, and every root-bearing segment `[start, end]` — a
+/// sub-interval of that range — has span at most 252.
+const MAX_PARAMETER_SPAN: f64 = 252.0;
+
+/// Worst-case count of safeguarded bracket-shrinking steps in
+/// [`correctly_rounded_root`]. Each step at least halves the bracket (a
+/// bisection substep is unconditional; the Newton substep only tightens
+/// further). The initial bracket, measured in parameter space where the
+/// convergence criterion lives, has width at most `span <= MAX_PARAMETER_SPAN
+/// = 252 < 2^8`, and the loop stops once that width is at most `HALF_QUANTUM =
+/// 2^-25`. Halving `2^8` down to `2^-25` takes `8 + 25 = 33` steps, and 32 do
+/// not suffice (`252 / 2^32 > 2^-25`), so 33 is derived, not chosen:
+/// `MAX_PARAMETER_SPAN / 2^33 <= HALF_QUANTUM < MAX_PARAMETER_SPAN / 2^32`.
+const MAX_SAFEGUARDED_STEPS: u32 = 33;
+
 /// A fixed-capacity, stack-allocated ordered collection for values whose
 /// cardinality is bounded by a small mathematical fact established at each
 /// call site (documented where the capacity `N` is chosen). Replaces
@@ -526,7 +560,7 @@ fn solve_preimages(
                     });
                     let polynomial = interpolate_unit_cubic(values);
 
-                    for unit in roots_in_unit_interval(polynomial) {
+                    for unit in roots_in_unit_interval(polynomial, start, end) {
                         let parameter = start + (end - start) * unit;
                         let x = x_offset + x_slope * parameter;
                         let y = y_offset + y_slope * parameter;
@@ -800,6 +834,14 @@ fn interpolate_unit_cubic(values: [f64; 4]) -> [f64; 4] {
     result
 }
 
+/// Finds the cubic's roots in its unit variable `[0, 1]`. The segment
+/// `[start, end]` — the ray-parameter interval the unit variable is an affine
+/// reparameterization of (`parameter = start + (end - start) * unit`) — is
+/// passed through to [`correctly_rounded_root`] so each sign-change root is
+/// returned as the unit preimage of its provably correctly rounded *parameter*
+/// quantum. Direct tolerance hits at partition points are returned as the raw
+/// partition values, exactly as before.
+///
 /// Bound on `partitions`: it holds the interval endpoints `{0, 1}` plus the
 /// roots of the polynomial's derivative that fall strictly inside `(0, 1)`
 /// — the polynomial's critical points, which split `[0, 1]` into monotonic
@@ -822,7 +864,7 @@ fn interpolate_unit_cubic(values: [f64; 4]) -> [f64; 4] {
 /// that fact constrains the polynomial's true zero set, not the number of
 /// *candidate* entries this tolerance-based procedure can push before
 /// `dedup_by` collapses coincident candidates.
-fn roots_in_unit_interval(mut polynomial: [f64; 4]) -> Bounded<f64, 4> {
+fn roots_in_unit_interval(mut polynomial: [f64; 4], start: f64, end: f64) -> Bounded<f64, 4> {
     let scale = polynomial
         .iter()
         .fold(1.0_f64, |largest, value| largest.max(value.abs()));
@@ -873,9 +915,9 @@ fn roots_in_unit_interval(mut polynomial: [f64; 4]) -> Bounded<f64, 4> {
         }
     }
     for interval in partitions.as_slice().windows(2) {
-        let mut left = interval[0];
-        let mut right = interval[1];
-        let mut left_value = evaluate(left);
+        let left = interval[0];
+        let right = interval[1];
+        let left_value = evaluate(left);
         let right_value = evaluate(right);
         if left_value.abs() <= tolerance
             || right_value.abs() <= tolerance
@@ -883,26 +925,206 @@ fn roots_in_unit_interval(mut polynomial: [f64; 4]) -> Bounded<f64, 4> {
         {
             continue;
         }
-        for _ in 0..56 {
-            let middle = (left + right) * 0.5;
-            let middle_value = evaluate(middle);
-            if middle_value.abs() <= tolerance {
-                left = middle;
-                right = middle;
-                break;
-            }
-            if middle_value.signum() == left_value.signum() {
-                left = middle;
-                left_value = middle_value;
-            } else {
-                right = middle;
-            }
-        }
-        roots.push((left + right) * 0.5);
+        roots.push(
+            correctly_rounded_root(
+                &polynomial,
+                left,
+                right,
+                left_value,
+                right_value,
+                start,
+                end,
+            )
+            .0,
+        );
     }
     roots.sort_by(f64::total_cmp);
     roots.dedup_by(|left, right| (*left - *right).abs() <= 1.0e-7);
     roots
+}
+
+/// Solves for the correctly-rounded ray-parameter quantum of the root of
+/// `polynomial` inside the strictly sign-changing unit bracket `[a, b]`.
+///
+/// The cubic lives in the segment's unit variable, but the quantity the
+/// pipeline stores and renders is the ray parameter
+/// `t = start + (end - start) * unit`, quantized to `q = round(t * ROOT_SCALE)`
+/// by [`quantized_parameter`]. This solver therefore converges the bracket
+/// until its *image in parameter space* fits within a half-quantum window and
+/// decides the quantum by a polynomial sign test at the parameter-quantum
+/// boundary mapped back into the unit variable, so the returned quantum
+/// provably contains the root's parameter.
+///
+/// Returns `(unit, steps)` where `unit` is the unit-variable preimage
+/// `(q / ROOT_SCALE - start) / span` of the proven quantum `q` — chosen so the
+/// caller's parameter reconstruction followed by [`quantized_parameter`]
+/// recovers exactly `q` (asserted below) — and `steps` is the number of
+/// safeguarded shrinking steps taken (exposed only so the tests can certify
+/// the [`MAX_SAFEGUARDED_STEPS`] bound).
+///
+/// Preconditions the caller establishes: `fa = polynomial(a)` and `fb =
+/// polynomial(b)` carry strictly opposite signs (a unique root lies in
+/// `(a, b)`), and `[a, b]` is a partition interval between consecutive critical
+/// points, so `polynomial` is strictly monotone on `[a, b]`. Both are relied on
+/// below.
+///
+/// This replaces the previous "bisect a fixed 56 times, then round the
+/// midpoint" step. That produced the correct quantum almost always but never
+/// proved it. Here the returned `q` is *proven* (relative to the same f64
+/// Horner evaluation the rest of the solve uses) to be the correct rounding of
+/// the root's parameter, by the sign test at the quantum boundary — see the
+/// comments at the return.
+fn correctly_rounded_root(
+    polynomial: &[f64; 4],
+    a: f64,
+    b: f64,
+    fa: f64,
+    fb: f64,
+    start: f64,
+    end: f64,
+) -> (f64, u32) {
+    // `span` must match the caller's `end - start` bit-for-bit so the
+    // round-trip assert below exercises the identical expression; the upper
+    // bound is the clip-derived fact MAX_SAFEGUARDED_STEPS rests on.
+    let span = end - start;
+    assert!(
+        span > 0.0 && span <= MAX_PARAMETER_SPAN,
+        "segment span {span} outside (0, {MAX_PARAMETER_SPAN}]: the clipped parameter-range \
+         bound behind MAX_SAFEGUARDED_STEPS does not hold"
+    );
+    debug_assert!(
+        fa.signum() != fb.signum(),
+        "correctly_rounded_root requires a strict sign change on [a, b]"
+    );
+    let evaluate =
+        |x: f64| polynomial[0] + x * (polynomial[1] + x * (polynomial[2] + x * polynomial[3]));
+    // Derivative of the cubic `c0 + c1 x + c2 x^2 + c3 x^3`.
+    let derivative = |x: f64| polynomial[1] + x * (2.0 * polynomial[2] + x * (3.0 * polynomial[3]));
+    let scale = ROOT_SCALE as f64;
+    // The caller's exact parameter expression for a unit value.
+    let parameter_of = |unit: f64| start + span * unit;
+    // Finishes with a proven quantum `q` (an integer-valued f64): the returned
+    // unit value is `q`'s unit preimage. The assert certifies the caller's
+    // reconstruction recovers `q`: the round trip perturbs `t` from the exact
+    // `q / 2^24` by a few ulps of magnitude ~max(|start|, span, |t|) <= ~2^8,
+    // i.e. by ~2^-45 — about 2^-21 of a quantum — so `round(t * 2^24)` cannot
+    // move off the integer `q`. A violation would mean the f64 domain
+    // assumptions are broken, and must be loud, not a silently shifted root.
+    let finish = |q: f64, steps: u32| {
+        let unit = (q / scale - start) / span;
+        assert!(
+            quantized_parameter(parameter_of(unit)) == q as i64,
+            "proven quantum {q} does not survive the caller's parameter reconstruction"
+        );
+        (unit, steps)
+    };
+
+    let mut lo = a;
+    let mut hi = b;
+    // Only the sign of `f(lo)` is needed to steer the bracket; `f(hi)` always
+    // holds the opposite sign by the invariant, so it need not be tracked.
+    let mut f_lo = fa;
+    let mut steps = 0u32;
+    // Converge until the bracket's parameter-space image fits within a
+    // half-quantum window: past that point the bracket pins the parameter
+    // quantum to at most two candidates (below).
+    while span * (hi - lo) > HALF_QUANTUM {
+        assert!(
+            steps < MAX_SAFEGUARDED_STEPS,
+            "safeguarded root solve exceeded {MAX_SAFEGUARDED_STEPS} halvings: each step at \
+             least halves a parameter-space bracket of initial width <= {MAX_PARAMETER_SPAN} \
+             toward the {HALF_QUANTUM:e} half-quantum, so the bound must hold"
+        );
+        steps += 1;
+
+        // Bisection substep: unconditional, so the bracket is at least halved
+        // every step regardless of what Newton does — this is what makes the
+        // `MAX_SAFEGUARDED_STEPS` bound hold. `evaluate`/`derivative` at `mid`
+        // double as the data for the Newton substep, so the substep is free.
+        let mid = 0.5 * (lo + hi);
+        let f_mid = evaluate(mid);
+        if f_mid == 0.0 {
+            // Representable exact root: its parameter's rounding is the quantum.
+            return finish((parameter_of(mid) * scale).round(), steps);
+        }
+        if f_mid.signum() == f_lo.signum() {
+            lo = mid;
+            f_lo = f_mid;
+        } else {
+            hi = mid;
+        }
+
+        // Newton substep: refine strictly inside the just-halved bracket. The
+        // tangent from `mid` is the classic Newton step; it is taken only when
+        // it lands strictly inside the bracket (otherwise it is discarded, the
+        // "bisection fallback"), so it can only tighten `[lo, hi]`, never widen
+        // it, and the halving bound is preserved. Near a simple root it
+        // collapses the bracket far below a half-quantum in a single step.
+        let slope = derivative(mid);
+        if slope != 0.0 {
+            let newton = mid - f_mid / slope;
+            if newton > lo && newton < hi {
+                let f_newton = evaluate(newton);
+                if f_newton == 0.0 {
+                    return finish((parameter_of(newton) * scale).round(), steps);
+                }
+                if f_newton.signum() == f_lo.signum() {
+                    lo = newton;
+                    f_lo = f_newton;
+                } else {
+                    hi = newton;
+                }
+            }
+        }
+    }
+
+    // The bracket's parameter image `[t_lo, t_hi]` is now at most one
+    // half-quantum wide — half the spacing of the quantum-grid rounding
+    // boundaries `(k + 1/2) / ROOT_SCALE` — so it contains at most one such
+    // boundary, and its endpoints round to quanta `q_lo <= q_hi` differing by
+    // at most one.
+    let t_lo = parameter_of(lo);
+    let t_hi = parameter_of(hi);
+    let q_lo = (t_lo * scale).round();
+    let q_hi = (t_hi * scale).round();
+    if q_lo == q_hi {
+        // Every parameter in `[t_lo, t_hi]` — the root's among them — rounds
+        // to the same quantum, so `q_lo` is unambiguously the correctly-rounded
+        // parameter. Equivalently, the required boundary sign check succeeds by
+        // monotonicity without further evaluation: `q_lo`'s rounding boundaries
+        // `(q_lo -+ 1/2) / ROOT_SCALE` lie outside `[t_lo, t_hi]` on opposite
+        // sides, `f` maps through the increasing `t(u)` and changes sign across
+        // the bracket, so its signs at the two boundary preimages are the
+        // bracket-endpoint signs — opposite — and the root's parameter lies
+        // strictly inside `q_lo`'s quantum.
+        return finish(q_lo, steps);
+    }
+    debug_assert_eq!(q_hi, q_lo + 1.0);
+
+    // The bracket straddles the single rounding boundary
+    // `s = (q_lo + 1/2) / ROOT_SCALE` between the two candidate quanta. The
+    // correctly-rounded parameter is `q_lo` if the root's parameter is below
+    // `s` and `q_hi` if above. Decide with one polynomial sign test at `s`
+    // mapped back into the unit variable. `2 * q_lo + 1 < 2^33` is f64-exact
+    // and the division is by a power of two, so `s` itself is exact; its unit
+    // preimage lies in `[lo, hi] subset [a, b]` (up to f64 mapping noise of
+    // ~2^-21 quanta), inside the monotone interval, where `f` shares `f(lo)`'s
+    // sign exactly when `s` is still below the root.
+    //
+    // Degenerate tie (`f == 0` at the boundary preimage, or indistinguishable
+    // from zero at a near-tangency): the root's parameter sits on the rounding
+    // boundary, `t * ROOT_SCALE = q_lo + 1/2`, and both neighbours are within
+    // a half-quantum, so either is a correct rounding. Round half away from
+    // zero to match `quantized_parameter`'s own tie rule (`f64::round`), i.e.
+    // take `q_hi`.
+    let s = (2.0 * q_lo + 1.0) / (2.0 * scale);
+    let f_s = evaluate((s - start) / span);
+    let q = if f_s == 0.0 || f_s.signum() == f_lo.signum() {
+        q_hi
+    } else {
+        q_lo
+    };
+    finish(q, steps)
 }
 
 /// Bound: a quadratic (or, when the quadratic coefficient is negligible,
@@ -933,10 +1155,11 @@ fn ratio_to_f64(value: Ratio<i64>) -> f64 {
 }
 
 /// Quantizes a ray parameter to denominator `ROOT_SCALE = 2^24`, returning the
-/// integer numerator `round(t * 2^24)`. The value `t` is clipped to the source
-/// box first (`0 <= source coord <= 63`, `0 <= relief <= 8*255`), so
-/// `|round(t * 2^24)| <= 8*255 * 2^24 < 2^36`, well inside `i64` and the
-/// `2^53` f64-exact range.
+/// integer numerator `round(t * 2^24)`. The value `t` lies within the clipped
+/// parameter range — a sub-interval of `[0, MAX_PARAMETER_SPAN]` (see that
+/// constant's derivation) — extended by at most a half-quantum plus the box
+/// check epsilons, so `|round(t * 2^24)| <= 253 * 2^24 < 2^32`, well inside
+/// `i64` and the `2^53` f64-exact range.
 fn quantized_parameter(value: f64) -> i64 {
     (value * ROOT_SCALE as f64).round() as i64
 }
@@ -957,8 +1180,9 @@ mod tests {
     use crate::{CameraBasis, TargetView};
 
     use super::{
-        Bounded, PreparedRelief, ROOT_SCALE, RenderScratch, interpolate_unit_cubic, ratio_to_f64,
-        roots_in_unit_interval, solve_preimages,
+        Bounded, HALF_QUANTUM, MAX_PARAMETER_SPAN, MAX_SAFEGUARDED_STEPS, PreparedRelief,
+        ROOT_SCALE, RenderScratch, correctly_rounded_root, interpolate_unit_cubic,
+        quantized_parameter, ratio_to_f64, roots_in_unit_interval, solve_preimages,
     };
 
     /// Exact relief along the inverse line at the quantized ray parameter,
@@ -981,7 +1205,7 @@ mod tests {
     fn scalar_solver_retains_three_preimages_of_a_fold() {
         let values = [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]
             .map(|value| (value - 0.2) * (value - 0.5) * (value - 0.8));
-        let roots = roots_in_unit_interval(interpolate_unit_cubic(values));
+        let roots = roots_in_unit_interval(interpolate_unit_cubic(values), 0.0, 1.0);
 
         assert_eq!(roots.as_slice().len(), 3);
         assert!((roots.as_slice()[0] - 0.2).abs() < 1.0e-6);
@@ -992,9 +1216,199 @@ mod tests {
     #[test]
     fn scalar_solver_keeps_a_tangent_preimage() {
         let values = [0.25, 1.0 / 36.0, 1.0 / 36.0, 0.25];
-        let roots = roots_in_unit_interval(interpolate_unit_cubic(values));
+        let roots = roots_in_unit_interval(interpolate_unit_cubic(values), 0.0, 1.0);
 
         assert_eq!(roots.as_slice(), [0.5]);
+    }
+
+    /// Evaluates `c0 + c1 x + c2 x^2 + c3 x^3` — a standalone oracle for the
+    /// half-quantum sign property, independent of the solver's own `evaluate`.
+    fn poly(coefficients: &[f64; 4], x: f64) -> f64 {
+        coefficients[0] + x * (coefficients[1] + x * (coefficients[2] + x * coefficients[3]))
+    }
+
+    /// The proven parameter quantum for a solver result: the caller's own
+    /// reconstruction `start + (end - start) * unit` fed through
+    /// [`quantized_parameter`] — the exact pipeline the stored preimage uses.
+    fn quantum_of(unit: f64, start: f64, end: f64) -> i64 {
+        quantized_parameter(start + (end - start) * unit)
+    }
+
+    /// The returned quantum is *proven* to be the correct rounding of the true
+    /// root's parameter: the polynomial changes sign across the unit preimages
+    /// of the two half-quantum parameter boundaries `q / 2^24 +- 2^-25`, so the
+    /// root's parameter lies strictly inside `q`'s quantum. Checked directly
+    /// here on `2 x^3 - 1`, whose only root in `(0, 1)` is the irrational
+    /// `2^(-1/3)`, over the unit segment where parameter and unit coincide.
+    #[test]
+    fn correctly_rounded_root_certifies_irrational_root_by_half_quantum_sign_change() {
+        let coefficients = [-1.0, 0.0, 0.0, 2.0];
+        let true_root = 2.0_f64.powf(-1.0 / 3.0);
+        let (root, steps) = correctly_rounded_root(
+            &coefficients,
+            0.0,
+            1.0,
+            poly(&coefficients, 0.0),
+            poly(&coefficients, 1.0),
+            0.0,
+            1.0,
+        );
+        let parameter =
+            f64::from(i32::try_from(quantum_of(root, 0.0, 1.0)).unwrap()) / ROOT_SCALE as f64;
+
+        // Correctly rounded: within half a quantum of the true root's parameter.
+        assert!(
+            (parameter - true_root).abs() <= HALF_QUANTUM,
+            "quantum {parameter} is farther than a half-quantum from {true_root}"
+        );
+        // Half-quantum sign property: strict sign change across q +- 2^-25.
+        let lower = poly(&coefficients, parameter - HALF_QUANTUM);
+        let upper = poly(&coefficients, parameter + HALF_QUANTUM);
+        assert!(
+            lower < 0.0 && upper > 0.0,
+            "root not bracketed by its quantum: {lower}, {upper}"
+        );
+        assert!(steps <= MAX_SAFEGUARDED_STEPS, "took {steps} steps");
+    }
+
+    /// The span mismatch this solver exists to handle: over a segment of span
+    /// 192 (the largest observed in the fixture set — the globe's relief
+    /// range), a unit-variable half-quantum is 96 parameter quanta wide, so
+    /// correctness must be certified on the parameter grid. The same
+    /// irrational-root cubic is solved over `[start, end] = [10, 202]` and the
+    /// half-quantum sign property is asserted in parameter space.
+    #[test]
+    fn correctly_rounded_root_certifies_the_parameter_quantum_across_a_wide_span() {
+        let (start, end) = (10.0, 202.0);
+        let coefficients = [-1.0, 0.0, 0.0, 2.0];
+        let true_unit_root = 2.0_f64.powf(-1.0 / 3.0);
+        let true_parameter = start + (end - start) * true_unit_root;
+        let (root, steps) = correctly_rounded_root(
+            &coefficients,
+            0.0,
+            1.0,
+            poly(&coefficients, 0.0),
+            poly(&coefficients, 1.0),
+            start,
+            end,
+        );
+        let quantum = quantum_of(root, start, end);
+        let parameter = quantum as f64 / ROOT_SCALE as f64;
+
+        // Correctly rounded on the PARAMETER grid: within half a parameter
+        // quantum of the true root's parameter.
+        assert!(
+            (parameter - true_parameter).abs() <= HALF_QUANTUM,
+            "quantum {parameter} is farther than a parameter half-quantum from {true_parameter}"
+        );
+        // Half-quantum sign property, evaluated at the unit preimages of the
+        // parameter boundaries q/2^24 +- 2^-25.
+        let lower = poly(
+            &coefficients,
+            (parameter - HALF_QUANTUM - start) / (end - start),
+        );
+        let upper = poly(
+            &coefficients,
+            (parameter + HALF_QUANTUM - start) / (end - start),
+        );
+        assert!(
+            lower < 0.0 && upper > 0.0,
+            "root's parameter not bracketed by its quantum: {lower}, {upper}"
+        );
+        assert!(steps <= MAX_SAFEGUARDED_STEPS, "took {steps} steps");
+    }
+
+    /// A root whose parameter lands exactly on a representable quantum is
+    /// returned exactly. `x^3 - 1/8` has the root `1/2 = 2^23 / 2^24` over the
+    /// unit segment, and every quantity here is a power of two, so the solve
+    /// hits it with no rounding at all.
+    #[test]
+    fn correctly_rounded_root_returns_an_exactly_representable_quantum() {
+        let coefficients = [-0.125, 0.0, 0.0, 1.0];
+        let (root, steps) = correctly_rounded_root(
+            &coefficients,
+            0.0,
+            1.0,
+            poly(&coefficients, 0.0),
+            poly(&coefficients, 1.0),
+            0.0,
+            1.0,
+        );
+
+        assert_eq!(
+            root, 0.5,
+            "exact representable root must be returned exactly"
+        );
+        assert!(steps <= MAX_SAFEGUARDED_STEPS, "took {steps} steps");
+    }
+
+    /// A near-tangency with a genuine sign change: `(x - 3/10)^3 + m (x - 3/10)`
+    /// has the single real root `3/10`, and with tiny `m` its derivative there
+    /// is only `m`, so Newton steps overshoot and are rejected — the bisection
+    /// safeguard still converges to the correct quantum.
+    #[test]
+    fn correctly_rounded_root_converges_through_a_near_tangency() {
+        let m = 1.0e-3;
+        // Coefficients of (x - 0.3)^3 + m (x - 0.3).
+        let coefficients = [-0.027 - m * 0.3, 0.27 + m, -0.9, 1.0];
+        let (root, steps) = correctly_rounded_root(
+            &coefficients,
+            0.0,
+            1.0,
+            poly(&coefficients, 0.0),
+            poly(&coefficients, 1.0),
+            0.0,
+            1.0,
+        );
+
+        assert!(
+            (root - 0.3).abs() <= 1.0 / ROOT_SCALE as f64,
+            "near-tangent root {root} is farther than one quantum from 0.3"
+        );
+        assert!(steps <= MAX_SAFEGUARDED_STEPS, "took {steps} steps");
+    }
+
+    /// The `MAX_SAFEGUARDED_STEPS` bound is derived, not tuned: each step at
+    /// least halves the parameter-space bracket, the initial width is at most
+    /// `MAX_PARAMETER_SPAN`, and the loop stops at `HALF_QUANTUM = 2^-25`, so
+    /// 33 halvings are exactly sufficient and 32 are not.
+    #[test]
+    fn safeguarded_step_bound_is_the_minimal_sufficient_halving_count() {
+        assert!(MAX_PARAMETER_SPAN * 2.0_f64.powi(-(MAX_SAFEGUARDED_STEPS as i32)) <= HALF_QUANTUM);
+        assert!(
+            MAX_PARAMETER_SPAN * 2.0_f64.powi(-((MAX_SAFEGUARDED_STEPS - 1) as i32)) > HALF_QUANTUM
+        );
+    }
+
+    /// The worst case respects the step bound: the widest permitted segment
+    /// (`span = MAX_PARAMETER_SPAN`) with a Newton-hostile cubic.
+    /// `(x - 1/2)^3 + m (x - 1/2) + k` is monotone with its inflection at
+    /// `1/2`; the tangent from a midpoint near the inflection points far
+    /// outside the bracket, so Newton is rejected until the bracket has homed
+    /// in, forcing the bisection safeguard to carry the early steps.
+    #[test]
+    fn safeguarded_root_solve_never_exceeds_the_step_bound() {
+        let m = 1.0e-2;
+        let k = 0.064 + m * 0.4; // places the root at 1/10
+        let coefficients = [-0.125 - m * 0.5 + k, 0.75 + m, -1.5, 1.0];
+        let (root, steps) = correctly_rounded_root(
+            &coefficients,
+            0.0,
+            1.0,
+            poly(&coefficients, 0.0),
+            poly(&coefficients, 1.0),
+            0.0,
+            MAX_PARAMETER_SPAN,
+        );
+
+        assert!(
+            (root - 0.1).abs() <= 1.0 / (ROOT_SCALE as f64 * MAX_PARAMETER_SPAN),
+            "root {root} off 0.1"
+        );
+        assert!(
+            steps <= MAX_SAFEGUARDED_STEPS,
+            "safeguarded solve took {steps} steps, exceeding {MAX_SAFEGUARDED_STEPS}"
+        );
     }
 
     #[test]
