@@ -1,3 +1,5 @@
+use std::f64::consts::PI;
+
 use mesh_import::{
     ALL_VIEWS, ImportError, ImportSettings, Material, SideMode, Triangle, TriangleScene, convert,
     derived_bounds,
@@ -332,6 +334,22 @@ fn flat_quad_gives_depth_one_covered_relief_and_empty_edge_on_sides() {
         left.rgba().iter().all(|texel| texel[3] == 0),
         "edge-on capture must produce an all-empty chart, not an error"
     );
+
+    // Back: the quad's geometric winding gives face normal (0,0,-1) (same
+    // as its explicit vertex normal, since both triangles share the same
+    // winding pattern as the cube fixture's z=0 face). Front observes it as
+    // the front face (sigma=+1: -n.forward_Front = 1 >= 0); Back observes
+    // the exact same point as the reverse face (sigma=-1: n.forward_Back =
+    // 1 > 0). A side is never a same-oriented-face candidate for the
+    // other's hit (score(Front) for Back's sigma, and vice versa, both
+    // work out to -1 <= 0), so ownership never dedups across the two
+    // orientations: both charts must stay fully covered.
+    let back = model.chart(CanonicalView::Back).expect("back chart");
+    assert!(
+        back.rgba().iter().all(|texel| texel[3] != 0),
+        "Back observes the reverse face of the same sheet and must keep full coverage, \
+         not be deduplicated away by Front's ownership"
+    );
 }
 
 /// A scene with zero triangles has no geometry to fit a box around; both
@@ -501,4 +519,328 @@ fn legal_modes_matches_what_set_accepts() {
             }
         }
     }
+}
+
+/// UV-sphere inscribed in the unit box: radius 0.5, centered at
+/// (0.5, 0.5, 0.5), touching every box face at a single point. 96 rings x
+/// 192 segments (both divisible by 4, so the equator touches x/z = 0 and 1
+/// exactly, matching the poles' exact touch of y = 0 and 1); fitting at
+/// `longest = 63` therefore scales it to fill the box exactly (bounds
+/// 63x63x63, no centering offset), matching the box-space sphere
+/// (radius 31.5, center (31.5,31.5,31.5)) the derivations below assume.
+///
+/// Winding is `(p00, p10, p01)` / `(p01, p10, p11)` — the mirror of the
+/// naive `(p00, p01, p10)` / `(p01, p11, p10)` diagonal split — chosen so
+/// this crate's own `triangle_face_normal` convention (`cross(p2-p0,
+/// p1-p0)`) evaluates to the true *outward* sphere normal, not the inward
+/// one the naive order gives under that same cross-product convention
+/// (verified analytically: at the equator sample theta=pi/2, phi=0, the
+/// tangent cross `d/dtheta x d/dphi` points inward, so outward needs the
+/// swapped `d/dphi x d/dtheta` order, which is what this winding produces).
+fn sphere_scene() -> TriangleScene {
+    const RINGS: usize = 96;
+    const SEGMENTS: usize = 192;
+    const RADIUS: f64 = 0.5;
+    const CENTER: [f64; 3] = [0.5, 0.5, 0.5];
+    let position = |i: usize, j: usize| -> [f64; 3] {
+        let theta = i as f64 * PI / RINGS as f64;
+        let phi = j as f64 * 2.0 * PI / SEGMENTS as f64;
+        let (sin_t, cos_t) = theta.sin_cos();
+        let (sin_p, cos_p) = phi.sin_cos();
+        [
+            CENTER[0] + RADIUS * sin_t * cos_p,
+            CENTER[1] + RADIUS * cos_t,
+            CENTER[2] + RADIUS * sin_t * sin_p,
+        ]
+    };
+    let as_f32 = |p: [f64; 3]| [p[0] as f32, p[1] as f32, p[2] as f32];
+    let normal_at = |p: [f64; 3]| -> [f32; 3] {
+        as_f32([
+            (p[0] - CENTER[0]) / RADIUS,
+            (p[1] - CENTER[1]) / RADIUS,
+            (p[2] - CENTER[2]) / RADIUS,
+        ])
+    };
+    let to_tri = |a: [f64; 3], b: [f64; 3], c: [f64; 3]| -> Triangle {
+        Triangle {
+            positions: [as_f32(a), as_f32(b), as_f32(c)],
+            normals: [normal_at(a), normal_at(b), normal_at(c)],
+            uvs: [[0.0, 0.0]; 3],
+            colors: [[1.0, 1.0, 1.0, 1.0]; 3],
+            material: 0,
+        }
+    };
+    let mut triangles = Vec::with_capacity(RINGS * SEGMENTS * 2);
+    for i in 0..RINGS {
+        for j in 0..SEGMENTS {
+            let p00 = position(i, j);
+            let p01 = position(i, j + 1);
+            let p10 = position(i + 1, j);
+            let p11 = position(i + 1, j + 1);
+            // At the poles, two of a quad's four corners coincide, making
+            // one of its two triangles zero-area; `rasterize`'s
+            // non-finite-area-reciprocal guard skips those safely.
+            triangles.push(to_tri(p00, p10, p01));
+            triangles.push(to_tri(p01, p10, p11));
+        }
+    }
+    TriangleScene {
+        triangles,
+        materials: vec![plain_material()],
+    }
+}
+
+#[test]
+fn sphere_ownership_deduplicates_to_the_best_facing_side() {
+    // Analytic sphere point at polar angle theta from the Front axis (the
+    // axis Front looks down) projects onto Front's screen at radius
+    // R*sin(theta), with outward normal n = (sin(theta)cos(phi), n_y,
+    // cos(theta)) in Front's (right, down, forward) basis at azimuth phi
+    // (phi measured around the Front axis).
+    //
+    // - contains: Front is the strict-or-tied best owner of a hit iff
+    //   cos(theta) >= max(|n_x|, |n_y|) = R*|sin(theta)| * max(|cos(phi)|,
+    //   ...)-normalized, i.e. cos(theta) >= sin(theta)*max(|cos(phi)|,
+    //   |sin(phi)|); the worst azimuth has max(|cos(phi)|,|sin(phi)|) = 1
+    //   (phi a multiple of 90 degrees), giving cos(theta) >= sin(theta),
+    //   i.e. theta <= 45 degrees for every azimuth. That admits every point
+    //   inside screen radius R*sin(45deg) = R/sqrt(2); ties at exactly 45
+    //   degrees resolve to Front by rank. Shrink by 1 texel for
+    //   center-vs-region discretization.
+    // - contained: ownership only requires cos(theta) >= |n_x| AND
+    //   cos(theta) >= |n_y| (Front need not be uniquely best, just not
+    //   beaten), so the admitted region extends to the weakest azimuth
+    //   (45 degrees, |n_x| = |n_y|): tan(theta) <= sqrt(2), i.e.
+    //   sin(theta) <= sqrt(2/3). Add 1 texel for the closure ring plus
+    //   0.5 texel for the texel-center-vs-continuous-boundary offset.
+    //
+    // By symmetry (the sphere and box are both invariant under permuting
+    // axes) the identical bounds apply to Top's chart around its own axis.
+    let scene = sphere_scene();
+    let model = convert(&scene, &settings(63)).expect("sphere converts");
+    let bounds = model.bounds();
+    assert_eq!(
+        (bounds.width(), bounds.height(), bounds.depth()),
+        (63, 63, 63),
+        "sphere inscribed in the unit box must fit the model box exactly"
+    );
+
+    let radius = 31.5_f64;
+    let center = 31.5_f64;
+    let sin_45 = std::f64::consts::FRAC_1_SQRT_2;
+    let sin_weakest_azimuth = (2.0_f64 / 3.0).sqrt();
+    let contains_bound = sin_45 * radius - 1.0;
+    let contained_bound = sin_weakest_azimuth * radius + 1.5;
+
+    for view in [CanonicalView::Front, CanonicalView::Top] {
+        let chart = model.chart(view).expect("chart present");
+        let (width, height) = chart.dimensions();
+        assert_eq!((width, height), (63, 63), "{view:?} dimensions");
+        for y in 0..height {
+            for x in 0..width {
+                let dx = f64::from(x) + 0.5 - center;
+                let dy = f64::from(y) + 0.5 - center;
+                let dist = (dx * dx + dy * dy).sqrt();
+                let covered = chart.rgba()[(y * width + x) as usize][3] != 0;
+                if dist <= contains_bound {
+                    assert!(
+                        covered,
+                        "{view:?} texel ({x},{y}) at distance {dist:.2} from center is \
+                         within the contains bound {contains_bound:.2} and must be covered"
+                    );
+                }
+                if covered {
+                    assert!(
+                        dist <= contained_bound,
+                        "{view:?} texel ({x},{y}) at distance {dist:.2} from center exceeds \
+                         the contained bound {contained_bound:.2}; ownership must not leave \
+                         this far outside the owned cap"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Three quads in a unit box (identity rotation): a "slant" tilted 30
+/// degrees from horizontal, a horizontal "occluder" strictly above it, and
+/// an edge-on sliver pinning the box's y/z extent.
+///
+/// The slant's geometric normal is proportional to `(0, -cos30, -sin30)`
+/// (facing up-and-front): winding `(A,B,D),(B,C,D)` around corners
+/// `A = (x0,y0,z0)`, `B = (x1,y0,z0)`, `C = (x1,y0+L*sin30,z0-L*cos30)`,
+/// `D = (x0,y0+L*sin30,z0-L*cos30)` gives this, because this crate's own
+/// `triangle_face_normal` convention is `cross(p2-p0, p1-p0)`: with
+/// `e1 = B-A` along the flat (x) tangent and `e2 = D-A` along the tilt
+/// tangent `(0, sin30, -cos30)`, `cross(e2, e1)` is `(0, -cos30, -sin30)`
+/// up to a positive scale (verified by direct component expansion).
+///
+/// The occluder's geometric normal is `(0, -1, 0)` (facing Top): winding
+/// `(A,C,B),(A,D,C)` around corners `A = (x0,y,z0)`, `B = (x1,y,z0)`,
+/// `C = (x1,y,z1)`, `D = (x0,y,z1)` gives this by the same convention (a
+/// horizontal quad is the z0=0 face of `cube()`'s pattern rotated into the
+/// x/z plane; the winding is chosen, not copied, to hit this specific
+/// normal sign).
+fn slant_and_occluder_scene() -> (TriangleScene, f64, f64, f64, f64, f64) {
+    let (sin30, cos30) = (30.0_f64).to_radians().sin_cos();
+
+    let (x0, x1) = (0.0_f64, 1.0_f64);
+    let (y0, l) = (0.3_f64, 0.4_f64);
+    // z0 is chosen so the slant's whole z range (box-space, scale 16)
+    // stays under h_max_front = 4*16 = 64, i.e. z <= 8.0 scene-scaled:
+    // z0 = 0.45 keeps the slant's top (z0 itself, box z = 7.2) comfortably
+    // under that reachability ceiling, so Front's own reachability filter
+    // (Task 12, unrelated to ownership) never drops a slant texel and this
+    // test isolates the ownership visibility gate alone.
+    let z0 = 0.45_f64;
+    let y_top = y0 + l * sin30;
+    let z_min = z0 - l * cos30;
+
+    let slant_a = [x0, y0, z0];
+    let slant_b = [x1, y0, z0];
+    let slant_c = [x1, y_top, z_min];
+    let slant_d = [x0, y_top, z_min];
+
+    // Strictly below (smaller y than) every slant point: y0 is the
+    // slant's minimum y.
+    let y_occ = y0 - 0.2;
+    // Covers the slant's z range [z_min, z0] with margin.
+    let z_occ_min = z_min - 0.05;
+    let z_occ_max = z0 + 0.05;
+    let occ_a = [x0, y_occ, z_occ_min];
+    let occ_b = [x1, y_occ, z_occ_min];
+    let occ_c = [x1, y_occ, z_occ_max];
+    let occ_d = [x0, y_occ, z_occ_max];
+
+    let as_f32 = |p: [f64; 3]| [p[0] as f32, p[1] as f32, p[2] as f32];
+    let scene = TriangleScene {
+        triangles: vec![
+            tri(as_f32(slant_a), as_f32(slant_b), as_f32(slant_d)),
+            tri(as_f32(slant_b), as_f32(slant_c), as_f32(slant_d)),
+            tri(as_f32(occ_a), as_f32(occ_c), as_f32(occ_b)),
+            tri(as_f32(occ_a), as_f32(occ_d), as_f32(occ_c)),
+            // Edge-on sliver at x = 0 pinning the box's full y and z
+            // extent. Constant x makes every triple of its vertices
+            // collinear under both Front's (x,y) and Top's (x,z)
+            // projections (screen coordinate 0 is shared by all three),
+            // so it contributes zero rasterized area to either enabled
+            // side while still setting the bounding box's y/z extent to
+            // [0,1] via its raw vertex positions.
+            tri([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+        ],
+        materials: vec![plain_material()],
+    };
+    (scene, y0, y_top, z0, z_min, y_occ)
+}
+
+#[test]
+fn fallback_owner_used_when_the_best_side_is_occluded() {
+    // The occluder covers the slant's full x/z footprint at a strictly
+    // smaller y, so Top's raw nearest-hit rasterization (ordinary
+    // occlusion, established before ownership runs) never sees the slant
+    // at all there. Ownership's own-score/candidate scoring then favors
+    // Top for the slant's hit (score cos(30deg) ~= 0.866 vs Front's own
+    // score sin(30deg) = 0.5), but Top fails the visibility gate: its
+    // filtered depth buffer at the slant's projected texel holds the
+    // occluder's much shallower depth, not the slant's, so the "d_T(p) <=
+    // z + tol" check rejects it — Front, the only remaining candidate,
+    // becomes the fallback owner. This isolates the visibility condition
+    // specifically: separately verified in comments below that Top's
+    // reach and in-bounds checks both pass for the slant's reconstructed
+    // point, so visibility is the only gate excluding it.
+    let (sin30, cos30) = (30.0_f64).to_radians().sin_cos();
+    let (scene, y0, y_top, z0, z_min, y_occ) = slant_and_occluder_scene();
+
+    let mut config = settings(16);
+    let mut modes = config.side_modes;
+    for side in [
+        CanonicalView::Back,
+        CanonicalView::Left,
+        CanonicalView::Right,
+        CanonicalView::Bottom,
+    ] {
+        modes.set(side, SideMode::Off).expect("legal mode");
+    }
+    config.side_modes = modes;
+    let model = convert(&scene, &config).expect("converts");
+    let bounds = model.bounds();
+    // Unit-extent scene at longest_axis_pixels = 16: the slant/occluder
+    // touch x = 0 and x = 1, and the sliver touches y = 0/1 and z = 0/1,
+    // so every axis's extent is exactly 1 with no centering offset: scale
+    // is exactly 16.
+    assert_eq!(
+        (bounds.width(), bounds.height(), bounds.depth()),
+        (16, 16, 16),
+        "derived bounds"
+    );
+    let scale = f64::from(bounds.width());
+
+    let top = model.chart(CanonicalView::Top).expect("top chart");
+    let front = model.chart(CanonicalView::Front).expect("front chart");
+
+    // Top: within the occluder's covered rows, every texel must show the
+    // occluder's own relief (Top trivially owns it: normal (0,-1,0) gives
+    // Top's own score 1, and the only other enabled side, Front, scores
+    // exactly 0 for that normal — dot((0,-1,0),(0,0,1)) = 0 — so Front is
+    // not even a same-oriented-face candidate). Matching this exact
+    // relief (not just "covered") also proves the slant never leaks
+    // through: the slant's relief range is far higher (see below).
+    let occ_relief = ((y_occ * scale) * 8.0).round() as i64;
+    let z_occ_min_box = (z_min - 0.05) * scale;
+    let z_occ_max_box = (z0 + 0.05) * scale;
+    let mut occluder_rows_checked = 0;
+    for pz in 0..bounds.depth() {
+        let center = f64::from(pz) + 0.5;
+        if center < z_occ_min_box || center >= z_occ_max_box {
+            continue;
+        }
+        occluder_rows_checked += 1;
+        for px in 0..bounds.width() {
+            let idx = (pz * bounds.width() + px) as usize;
+            let texel = top.rgba()[idx];
+            assert_ne!(
+                texel[3], 0,
+                "Top ({px},{pz}) must be covered by the occluder"
+            );
+            assert_eq!(
+                i64::from(255 - texel[3]),
+                occ_relief,
+                "Top ({px},{pz}) must show the occluder's relief {occ_relief}, not the slant's \
+                 (occlusion + ownership must hide the slant from Top entirely)"
+            );
+        }
+    }
+    assert!(
+        occluder_rows_checked > 0,
+        "test setup: no occluder rows probed"
+    );
+
+    // Front: every row whose pixel-center y falls within the slant's
+    // range must be covered at the slant's analytic per-row relief
+    // (fallback ownership, since Top is occluded there).
+    let mut slant_rows_checked = 0;
+    for py in 0..bounds.height() {
+        let world_y_scene = (f64::from(py) + 0.5) / scale;
+        if world_y_scene < y0 || world_y_scene > y_top {
+            continue;
+        }
+        slant_rows_checked += 1;
+        let t = (world_y_scene - y0) / sin30;
+        let z_scene = z0 - t * cos30;
+        let expected_relief = ((z_scene * scale) * 8.0).round() as i64;
+        for px in 0..bounds.width() {
+            let idx = (py * bounds.width() + px) as usize;
+            let texel = front.rgba()[idx];
+            assert_ne!(
+                texel[3], 0,
+                "Front ({px},{py}) must be covered by the slant (fallback owner)"
+            );
+            assert_eq!(
+                i64::from(255 - texel[3]),
+                expected_relief,
+                "Front ({px},{py}) relief must match the slant's analytic depth"
+            );
+        }
+    }
+    assert!(slant_rows_checked > 0, "test setup: no slant rows probed");
 }

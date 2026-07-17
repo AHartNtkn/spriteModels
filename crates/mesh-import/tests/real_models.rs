@@ -98,14 +98,36 @@ fn earth_sphere_front_capture_is_a_textured_disc() {
         "center relief {center_relief} must be ~0"
     );
 
-    // Silhouette circularity: covered area within one boundary-texel
-    // annulus (2*pi*R ~ 198 texels) of the ideal disc pi*R^2, R = 31.5.
+    // Ownership-region bounds (same derivation as
+    // capture.rs's sphere dedup test): the sphere sits inscribed in the box
+    // (radius R = 31.5), so a point at polar angle theta from the Front
+    // axis projects at screen radius R*sin(theta) with analytic normal
+    // n = (sin(theta)cos(phi), ..., cos(theta)) at azimuth phi.
+    //
+    // - contains: Front strictly-or-tie-best requires cos(theta) >=
+    //   max(|n_x|, |n_y|), which holds for every azimuth iff theta <= 45
+    //   degrees (worst azimuth aligns one axis with the full sin(theta));
+    //   ties resolve to Front by rank at exactly 45 degrees. That admits
+    //   every point inside screen radius R*sin(45deg) = R/sqrt(2); shrink
+    //   by 1 texel for center-vs-region discretization.
+    // - contained: ownership only requires cos(theta) >= |n_x| AND
+    //   cos(theta) >= |n_y| (Front need not be the unique best, just not
+    //   beaten by another Capture side observing the same point), so the
+    //   admitted region extends to the weakest azimuth (45 degrees, where
+    //   |n_x| = |n_y|): tan(theta) <= sqrt(2), i.e. sin(theta) <=
+    //   sqrt(2/3). Add 1 texel for the closure ring plus 0.5 texel for the
+    //   texel-center-vs-continuous-boundary offset.
+    let radius = 31.5_f64;
+    let sin_45 = std::f64::consts::FRAC_1_SQRT_2; // sin(45 deg) = sqrt(2)/2
+    let sin_weakest_azimuth = (2.0_f64 / 3.0).sqrt(); // tan(theta) <= sqrt(2)
+    let contains_radius = (sin_45 * radius - 1.0).max(0.0);
+    let contained_radius = sin_weakest_azimuth * radius + 1.5;
+    let lower = std::f64::consts::PI * contains_radius * contains_radius;
+    let upper = std::f64::consts::PI * contained_radius * contained_radius;
     let covered = front.rgba().iter().filter(|texel| texel[3] != 0).count() as f64;
-    let ideal = std::f64::consts::PI * 31.5 * 31.5;
-    let annulus = 2.0 * std::f64::consts::PI * 31.5;
     assert!(
-        (covered - ideal).abs() <= annulus,
-        "covered {covered} vs disc {ideal:.0} exceeds boundary annulus {annulus:.0}"
+        (lower..=upper).contains(&covered),
+        "covered {covered} outside ownership-region bounds [{lower:.1}, {upper:.1}]"
     );
 
     // Texture liveness: a constant-color capture means texture sampling is

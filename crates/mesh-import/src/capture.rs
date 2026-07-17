@@ -1,4 +1,4 @@
-use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart};
+use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart, RELIEF_UNITS_PER_PIXEL};
 
 use crate::{ImportError, Lighting, Triangle, TriangleScene, View, light_direction, rasterize};
 
@@ -273,6 +273,301 @@ pub fn convert(
 /// `box_space_scene` once for its mesh preview and feeds the same result
 /// here instead of paying for the mesh -> box-space transform twice per
 /// settings change.
+fn add3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn scale3(a: [f64; 3], s: f64) -> [f64; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// One enabled Capture side's rasterization after the reachability filter
+/// (Task 12's midplane drop) but before ownership: everything ownership
+/// needs to query this side as either the observing side or a candidate
+/// owner for another side's hit.
+struct CaptureSide {
+    view: CanonicalView,
+    origin: [f64; 3],
+    right: [f64; 3],
+    down: [f64; 3],
+    forward: [f64; 3],
+    width: u32,
+    height: u32,
+    h_max: i64,
+    /// Reachability-filtered depth in model pixels, exact (not quantized):
+    /// `f64::INFINITY` marks a texel that is either uncovered or whose hit
+    /// quantized past `h_max` and was dropped.
+    depth: Vec<f64>,
+    /// Geometric face normal of the winning triangle at each texel;
+    /// meaningless (never read) where `depth` is not finite.
+    face_normal: Vec<[f32; 3]>,
+    /// Fully encoded RGBA (relief-quantized alpha, dropped texels already
+    /// `[0,0,0,0]`) before ownership decides which texels this side keeps.
+    rgba: Vec<[u8; 4]>,
+}
+
+impl CaptureSide {
+    fn index(&self, x: u32, y: u32) -> usize {
+        (y * self.width + x) as usize
+    }
+
+    /// The 3D point a texel's reconstructed depth corresponds to, per the
+    /// registration identity `p = origin + (x+0.5)*right + (y+0.5)*down +
+    /// depth*forward` (Task 11 pins this reconstruction/projection
+    /// round-trip as exact).
+    fn point_at(&self, x: u32, y: u32, depth: f64) -> [f64; 3] {
+        add3(
+            add3(self.origin, scale3(self.right, f64::from(x) + 0.5)),
+            add3(
+                scale3(self.down, f64::from(y) + 0.5),
+                scale3(self.forward, depth),
+            ),
+        )
+    }
+}
+
+fn capture_side(
+    box_scene: &TriangleScene,
+    view: CanonicalView,
+    bounds: Bounds,
+    lighting: &Lighting,
+) -> CaptureSide {
+    let frame = view.frame(bounds);
+    let (width, height) = view.dimensions(bounds);
+    let raster = rasterize(
+        box_scene,
+        &View {
+            origin: frame.origin.map(|c| c as f32),
+            right: frame.source_u.map(|c| c as f32),
+            down: frame.source_v.map(|c| c as f32),
+            forward: frame.inward.map(|c| c as f32),
+            scale: 1.0,
+            width,
+            height,
+        },
+        lighting,
+    );
+    let h_max = i64::from(view.maximum_inward_depth(bounds));
+    let count = (width * height) as usize;
+    let mut depth = vec![f64::INFINITY; count];
+    let mut face_normal = vec![[0.0f32; 3]; count];
+    let mut rgba = vec![[0u8; 4]; count];
+    for i in 0..count {
+        let d = raster.depth[i];
+        if d == f32::INFINITY {
+            continue;
+        }
+        // depth is in model pixels from the face plane; float error can dip
+        // epsilon-negative, the max(0) floor handles it.
+        let relief = (f64::from(d) * RELIEF_UNITS_PER_PIXEL as f64).round() as i64;
+        let relief = relief.max(0);
+        // A post-quantization relief beyond h_max lies past the midplane,
+        // which is exactly the region the opposing side reaches
+        // (d_front > D/2 <=> d_back < D/2); range-checking after
+        // quantization keeps the exact-midplane hit (relief == h_max) on
+        // both sides, preserving the format's opposing-charts-meet-at-the-
+        // midplane guarantee. Dropping instead of clamping avoids
+        // fabricating geometry at a false depth. Applying this filter here,
+        // before ownership, means every cross-side query in pass 2 sees
+        // post-filter state, exactly like Task 12 intends.
+        if relief > h_max {
+            continue;
+        }
+        depth[i] = f64::from(d);
+        face_normal[i] = raster.face_normal[i];
+        let color = raster.color[i];
+        rgba[i] = [color[0], color[1], color[2], (255 - relief) as u8];
+    }
+    let as_f64 = |v: [i64; 3]| [v[0] as f64, v[1] as f64, v[2] as f64];
+    CaptureSide {
+        view,
+        origin: as_f64(frame.origin),
+        right: as_f64(frame.source_u),
+        down: as_f64(frame.source_v),
+        forward: as_f64(frame.inward),
+        width,
+        height,
+        h_max,
+        depth,
+        face_normal,
+        rgba,
+    }
+}
+
+/// `score(T) = sigma * (-dot(n, forward_T))` — how head-on side `T` would
+/// observe a hit with face normal `n` and observation orientation `sigma`.
+/// For `T == S` (the side that actually captured the hit) this reduces
+/// algebraically to `|dot(n, forward_S)|` regardless of `sigma`'s sign
+/// (whichever branch of `sigma` applies, the two negations cancel), which
+/// is exactly the spec's "S's own score" rule. So `S` needs no special-case
+/// formula, only the "always a candidate" exemption from the
+/// score>0/reach/bounds/visible gate that every other side must clear.
+fn observation_score(sigma: f64, normal: [f64; 3], forward_t: [f64; 3]) -> f64 {
+    sigma * -dot3(normal, forward_t)
+}
+
+/// Max absolute one-sided finite difference between `z` (the filtered depth
+/// at `(x, y)`) and its up-to-4 in-bounds finite 4-neighbors; `0.0` if none
+/// are finite. Bounds the depth buffer's local slope for the visibility
+/// tolerance in `owning_mask` below.
+fn local_gradient(depth: &[f64], width: u32, height: u32, x: u32, y: u32, z: f64) -> f64 {
+    let mut grad = 0.0f64;
+    let offsets = [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)];
+    for (dx, dy) in offsets {
+        let nx = x as i64 + dx;
+        let ny = y as i64 + dy;
+        if nx < 0 || ny < 0 || nx >= i64::from(width) || ny >= i64::from(height) {
+            continue;
+        }
+        let neighbor = depth[(ny as u32 * width + nx as u32) as usize];
+        if neighbor.is_finite() {
+            grad = grad.max((z - neighbor).abs());
+        }
+    }
+    grad
+}
+
+/// Ownership pass 2 for one side `S` (`sides[s_idx]`): for each of `S`'s
+/// covered texels, decides whether `S` is the best-facing candidate among
+/// the enabled Capture sides that observe the same oriented face, can
+/// reach the reconstructed point, and see it (are not occluded there).
+/// Returns a per-texel keep mask the same shape as `S`'s buffers.
+fn owning_mask(sides: &[CaptureSide], s_idx: usize) -> Vec<bool> {
+    let s = &sides[s_idx];
+    let count = (s.width * s.height) as usize;
+    let mut kept = vec![false; count];
+    for y in 0..s.height {
+        for x in 0..s.width {
+            let idx = s.index(x, y);
+            let depth = s.depth[idx];
+            if !depth.is_finite() {
+                continue;
+            }
+            let p = s.point_at(x, y, depth);
+            let normal = [
+                f64::from(s.face_normal[idx][0]),
+                f64::from(s.face_normal[idx][1]),
+                f64::from(s.face_normal[idx][2]),
+            ];
+            // sigma = +1 when S observes the front face (-n.forward_S >=
+            // 0); exact 0 (grazing incidence) is conventionally front.
+            let sigma = if dot3(normal, s.forward) <= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
+
+            // S is always a candidate for its own hit; no seen-and-
+            // reachable point is orphaned when its ideal side is occluded
+            // or disabled.
+            let mut owner = s.view;
+            let mut best_score = observation_score(sigma, normal, s.forward);
+            let mut best_rank = s.view.rank();
+
+            for t in sides {
+                if t.view == s.view {
+                    continue;
+                }
+                // Condition 1: same oriented face.
+                let candidate_score = observation_score(sigma, normal, t.forward);
+                if candidate_score <= 0.0 {
+                    continue;
+                }
+                let rel = sub3(p, t.origin);
+                // Condition 2: reach, identical quantized rule to the
+                // reachability filter; origin_T lies on T's face plane so
+                // this dot IS d_T(p).
+                let d_t = dot3(rel, t.forward);
+                let relief_t = (d_t * RELIEF_UNITS_PER_PIXEL as f64).round() as i64;
+                if relief_t > t.h_max {
+                    continue;
+                }
+                // Condition 3: in-bounds.
+                let u = dot3(rel, t.right);
+                let v = dot3(rel, t.down);
+                let (tx, ty) = (u.floor(), v.floor());
+                if tx < 0.0 || ty < 0.0 || tx >= f64::from(t.width) || ty >= f64::from(t.height) {
+                    continue;
+                }
+                let (tex_x, tex_y) = (tx as u32, ty as u32);
+                let t_index = t.index(tex_x, tex_y);
+                // Condition 4: visible — T's filtered depth at the
+                // projected texel is finite and within tolerance of d_T(p).
+                let z = t.depth[t_index];
+                if !z.is_finite() {
+                    continue;
+                }
+                let grad = local_gradient(&t.depth, t.width, t.height, tex_x, tex_y, z);
+                // half-texel-diagonal times local slope bounds the first-
+                // hit surface's variation across the texel footprint (p
+                // projects up to sqrt(2)/2 from the compared center), plus
+                // one relief quantum (1/8 px) absorbing the quantization
+                // asymmetry between the two sides' rules. Using the max
+                // difference is deliberately conservative toward "visible":
+                // consistent overlap composites harmlessly, a hole shows
+                // background.
+                let tol =
+                    grad * std::f64::consts::FRAC_1_SQRT_2 + 1.0 / RELIEF_UNITS_PER_PIXEL as f64;
+                if d_t > z + tol {
+                    continue;
+                }
+
+                if candidate_score > best_score
+                    || (candidate_score == best_score && t.view.rank() < best_rank)
+                {
+                    best_score = candidate_score;
+                    best_rank = t.view.rank();
+                    owner = t.view;
+                }
+            }
+
+            kept[idx] = owner == s.view;
+        }
+    }
+    kept
+}
+
+/// Dilates `kept` by one texel (4-neighborhood), intersected with `covered`
+/// so dilation never adds a texel the side never actually reached. Tent
+/// interpolation's support extends one texel past the last kept center, so
+/// without this ring a strict ownership partition would open sub-texel gaps
+/// where differently-owned regions abut; because the ring is drawn only
+/// from `covered` texels it carries true (reachability-filtered) geometry,
+/// so the resulting overlap is consistent, not synthesized.
+pub(crate) fn dilate_keep_mask(
+    kept: &[bool],
+    covered: &[bool],
+    width: u32,
+    height: u32,
+) -> Vec<bool> {
+    let index = |x: u32, y: u32| (y * width + x) as usize;
+    let mut out = kept.to_vec();
+    for y in 0..height {
+        for x in 0..width {
+            let idx = index(x, y);
+            if kept[idx] || !covered[idx] {
+                continue;
+            }
+            let has_kept_neighbor = (x > 0 && kept[index(x - 1, y)])
+                || (x + 1 < width && kept[index(x + 1, y)])
+                || (y > 0 && kept[index(x, y - 1)])
+                || (y + 1 < height && kept[index(x, y + 1)]);
+            if has_kept_neighbor {
+                out[idx] = true;
+            }
+        }
+    }
+    out
+}
+
 pub fn convert_box_space(
     box_scene: &TriangleScene,
     bounds: Bounds,
@@ -287,58 +582,29 @@ pub fn convert_box_space(
         ambient: settings.ambient,
     };
 
+    // Pass 1: rasterize and reachability-filter every enabled Capture side.
+    // Ownership (pass 2) runs only across this set; `From opposite`/`Off`
+    // sides play no role.
+    let sides: Vec<CaptureSide> = ALL_VIEWS
+        .into_iter()
+        .filter(|&view| settings.side_modes.get(view) == SideMode::Capture)
+        .map(|view| capture_side(box_scene, view, bounds, &lighting))
+        .collect();
+
+    // Pass 2: ownership + one-texel closure ring, then encode each chart.
     let mut charts = Vec::new();
-    for view in ALL_VIEWS {
-        if settings.side_modes.get(view) != SideMode::Capture {
-            continue;
-        }
-        let frame = view.frame(bounds);
-        let (width, height) = view.dimensions(bounds);
-        let raster = rasterize(
-            box_scene,
-            &View {
-                origin: frame.origin.map(|c| c as f32),
-                right: frame.source_u.map(|c| c as f32),
-                down: frame.source_v.map(|c| c as f32),
-                forward: frame.inward.map(|c| c as f32),
-                scale: 1.0,
-                width,
-                height,
-            },
-            &lighting,
-        );
-        let h_max = i64::from(view.maximum_inward_depth(bounds));
-        let rgba: Vec<[u8; 4]> = raster
-            .depth
+    for (s_idx, side) in sides.iter().enumerate() {
+        let kept = owning_mask(&sides, s_idx);
+        let covered: Vec<bool> = side.depth.iter().map(|d| d.is_finite()).collect();
+        let dilated = dilate_keep_mask(&kept, &covered, side.width, side.height);
+        let rgba: Vec<[u8; 4]> = side
+            .rgba
             .iter()
-            .zip(raster.color.iter())
-            .map(|(&depth, &color)| {
-                if depth == f32::INFINITY {
-                    [0, 0, 0, 0]
-                } else {
-                    // depth is in model pixels from the face plane; float
-                    // error can dip epsilon-negative, the max(0) floor
-                    // handles it.
-                    let relief = (f64::from(depth) * 8.0).round() as i64;
-                    let relief = relief.max(0);
-                    // A post-quantization relief beyond h_max lies past the
-                    // midplane, which is exactly the region the opposing
-                    // side reaches (d_front > D/2 <=> d_back < D/2);
-                    // range-checking after quantization keeps the
-                    // exact-midplane hit (relief == h_max) on both sides,
-                    // preserving the format's opposing-charts-meet-at-the-
-                    // midplane guarantee. Dropping instead of clamping
-                    // avoids fabricating geometry at a false depth.
-                    if relief > h_max {
-                        [0, 0, 0, 0]
-                    } else {
-                        [color[0], color[1], color[2], (255 - relief) as u8]
-                    }
-                }
-            })
+            .zip(dilated.iter())
+            .map(|(&texel, &keep)| if keep { texel } else { [0, 0, 0, 0] })
             .collect();
-        let mut chart = Chart::from_rgba(view, width, height, rgba)?;
-        let opposite_mode = settings.side_modes.get(view.opposite());
+        let mut chart = Chart::from_rgba(side.view, side.width, side.height, rgba)?;
+        let opposite_mode = settings.side_modes.get(side.view.opposite());
         if opposite_mode == SideMode::FromOpposite {
             chart = chart.with_opposite_assignment();
         }
@@ -348,4 +614,64 @@ pub fn convert_box_space(
         charts.push(chart);
     }
     Ok(AuthoredModel::new(bounds, charts)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dilate_keep_mask;
+
+    /// 5x5 grid; `kept` is a plus shape centered at (2,2). `covered` is
+    /// everything except (0,2) — a texel that borders the kept texel (1,2)
+    /// but was never reached by this side, so it must stay excluded even
+    /// though it geometrically borders a kept texel. Dilation must add
+    /// exactly the plus's other seven orthogonal neighbors (its full
+    /// one-texel ring, minus the uncovered exception) and nothing else.
+    #[test]
+    fn dilate_keep_mask_adds_covered_orthogonal_neighbors_only() {
+        let width = 5u32;
+        let height = 5u32;
+        let at = |x: u32, y: u32| (y * width + x) as usize;
+
+        let mut covered = vec![true; (width * height) as usize];
+        covered[at(0, 2)] = false;
+
+        let plus = [(2u32, 2u32), (1, 2), (3, 2), (2, 1), (2, 3)];
+        let mut kept = vec![false; (width * height) as usize];
+        for &(x, y) in &plus {
+            kept[at(x, y)] = true;
+        }
+
+        let dilated = dilate_keep_mask(&kept, &covered, width, height);
+
+        let ring_added = [(1u32, 1u32), (3, 1), (1, 3), (3, 3), (4, 2), (2, 0), (2, 4)];
+        for &(x, y) in &ring_added {
+            assert!(
+                dilated[at(x, y)],
+                "({x},{y}) borders a kept, covered texel and must be dilated in"
+            );
+        }
+        assert!(
+            !dilated[at(0, 2)],
+            "(0,2) borders kept (1,2) but was never covered by this side; \
+             dilation must not fabricate it"
+        );
+        for &(x, y) in &plus {
+            assert!(dilated[at(x, y)], "({x},{y}) was already kept");
+        }
+
+        let mut expected_true: Vec<usize> = plus
+            .iter()
+            .chain(ring_added.iter())
+            .map(|&(x, y)| at(x, y))
+            .collect();
+        expected_true.sort_unstable();
+        expected_true.dedup();
+        for (idx, &is_dilated) in dilated.iter().enumerate() {
+            assert_eq!(
+                is_dilated,
+                expected_true.contains(&idx),
+                "texel {idx} dilation mismatch"
+            );
+        }
+    }
 }
