@@ -355,3 +355,15 @@ compares full framebuffers against an independent copy of the old traversal
 across 4 cameras x 2 sizes. Workspace green, goldens bit-identical, review
 approved. Minor (for final review): margin doc comment's spare-factor prose is
 optimistic (bound itself sound).
+
+### Task 7 (quadratic corner-resolved surface) — commit f682b9f
+
+USER APPROVED the output change 2026-07-17 through the image gate: 22 pixels
+differ across all 24 scenarios (controller-verified per scenario), no
+silhouette or shading changes; 13 golden hashes regenerated. The ray equation
+is now closed-form quadratic (cancellation-free q-form as probe seed; the
+returned parameter quantum is still sign-verified, so correctness never rests
+on the closed form's conditioning). Cubic machinery deleted. Bench medians:
+globe front 1.51 ms, default_orbit 19.1 ms, oblique 19.7 ms; gyroscope front
+27.8 ms, default_orbit 41.9 ms, oblique 48.7 ms; orbit_sweep 242 ms. Review
+approved, no findings.
