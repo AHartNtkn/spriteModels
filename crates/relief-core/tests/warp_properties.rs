@@ -111,8 +111,9 @@ fn inverse_warp_line_recovers_a_known_preimage_with_its_selected_parameter() {
     let warped = warp.apply(source.clone(), relief);
 
     let line = warp
-        .inverse_line(warped.screen_x, warped.screen_y)
-        .expect("front-facing affine chart transform is invertible");
+        .prepare_inverse()
+        .expect("front-facing affine chart transform is invertible")
+        .inverse_line(warped.screen_x, warped.screen_y);
 
     assert_eq!(line.source_at(source.x), source);
     assert_eq!(line.relief_at(source.x), relief);
@@ -127,8 +128,9 @@ fn inverse_warp_line_uses_source_y_as_parameter_when_x_and_relief_span_screen() 
     let warped = warp.apply(source.clone(), relief);
 
     let line = warp
-        .inverse_line(warped.screen_x, warped.screen_y)
-        .expect("source x and relief form a rank-two projected map");
+        .prepare_inverse()
+        .expect("source x and relief form a rank-two projected map")
+        .inverse_line(warped.screen_x, warped.screen_y);
 
     assert_eq!(line.source_at(source.y), source);
     assert_eq!(line.depth_at(source.y), warped.depth);
@@ -142,8 +144,9 @@ fn inverse_warp_line_uses_source_x_as_parameter_at_exact_canonical_edge_on() {
     let warped = warp.apply(source.clone(), relief);
 
     let line = warp
-        .inverse_line(warped.screen_x, warped.screen_y)
-        .expect("source y and relief form a rank-two projected map");
+        .prepare_inverse()
+        .expect("source y and relief form a rank-two projected map")
+        .inverse_line(warped.screen_x, warped.screen_y);
 
     assert_eq!(line.source_at(source.x), source);
     assert_eq!(line.depth_at(source.x), warped.depth);
@@ -153,10 +156,9 @@ fn inverse_warp_line_uses_source_x_as_parameter_at_exact_canonical_edge_on() {
 fn inverse_warp_line_rejects_a_rank_one_projected_map() {
     let warp = WarpCoefficients::new([[2, 4, 3], [0, 0, -4]], [6, 0], [7, 11, 13], 17);
 
-    assert_eq!(
-        warp.inverse_line(Ratio::from_integer(9), Ratio::from_integer(-4)),
-        None
-    );
+    // Singularity is a property of the matrix alone, so it is rejected once at
+    // preparation time rather than per pixel.
+    assert!(warp.prepare_inverse().is_none());
 }
 
 #[test]
@@ -166,8 +168,9 @@ fn inverse_warp_line_exposes_every_affine_coordinate_and_transient_depth() {
     let relief = Ratio::new(7, 3);
     let warped = warp.apply(source, relief);
     let line = warp
-        .inverse_line(warped.screen_x, warped.screen_y)
-        .expect("source x and relief form a rank-two projected map");
+        .prepare_inverse()
+        .expect("source x and relief form a rank-two projected map")
+        .inverse_line(warped.screen_x, warped.screen_y);
 
     assert_eq!(
         line.variable_coefficients(),
@@ -192,8 +195,9 @@ fn inverse_warp_line_selects_the_largest_determinant_with_stable_ties() {
         Ratio::from_integer(5),
     );
     let line = warp
-        .inverse_line(warped.screen_x, warped.screen_y)
-        .expect("every projected column pair has rank two");
+        .prepare_inverse()
+        .expect("every projected column pair has rank two")
+        .inverse_line(warped.screen_x, warped.screen_y);
 
     assert_eq!(
         line.variable_coefficients(),

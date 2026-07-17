@@ -2,6 +2,7 @@ use num_rational::Ratio;
 use relief_core::{
     Bounds, DecodedTexel, InverseWarpLine, ReliefField, ResolvedCharts, SourcePoint,
 };
+use std::cmp::Ordering;
 use thiserror::Error;
 
 use crate::{
@@ -354,15 +355,20 @@ pub fn render_model(
     };
     let offset_x = Ratio::new(i64::from(request.width), 2) - (min_x + max_x) / 2;
     let offset_y = Ratio::new(i64::from(request.height), 2) - (min_y + max_y) / 2;
+    // `prepare_inverse` returns `None` exactly when the per-pixel inverse solve
+    // would have for every pixel (the singular condition depends only on the
+    // matrix, not the screen coordinates), so a chart that fails it contributes
+    // nothing to any pixel and is dropped from the frame entirely.
     let frame_charts: Vec<_> = prepared
         .charts
         .charts()
         .iter()
         .zip(prepared.reliefs.iter())
-        .map(|(chart, entry)| {
+        .filter_map(|(chart, entry)| {
             let warp = request.target.warp_coefficients(chart.view(), bounds);
+            let inverse = warp.prepare_inverse()?;
             let facing = request.target.facing_coefficients(chart.view(), bounds);
-            (chart, &entry.relief, warp, facing, entry.maximum_relief)
+            Some((chart, &entry.relief, inverse, facing, entry.maximum_relief))
         })
         .collect();
 
@@ -373,10 +379,8 @@ pub fn render_model(
             let screen_x = Ratio::new(2 * i64::from(x) + 1, 2) - offset_x;
             let screen_y = Ratio::new(2 * i64::from(y) + 1, 2) - offset_y;
 
-            for (chart, relief, warp, facing, maximum_relief) in &frame_charts {
-                let Some(line) = warp.inverse_line(screen_x, screen_y) else {
-                    continue;
-                };
+            for (chart, relief, inverse, facing, maximum_relief) in &frame_charts {
+                let line = inverse.inverse_line(screen_x, screen_y);
 
                 solve_preimages(&mut scratch, relief, &line, *facing, *maximum_relief);
                 for preimage in &scratch.preimages {
@@ -471,18 +475,13 @@ fn solve_preimages(
         return;
     }
 
-    boundaries.push(range_start);
-    boundaries.push(range_end);
-    add_grid_crossings(boundaries, x_offset, x_slope, width, range_start, range_end);
-    add_grid_crossings(
+    merge_boundaries(
         boundaries,
-        y_offset,
-        y_slope,
-        height,
         range_start,
         range_end,
+        GridCrossings::new(x_offset, x_slope, width, range_start, range_end),
+        GridCrossings::new(y_offset, y_slope, height, range_start, range_end),
     );
-    boundaries.sort_by(f64::total_cmp);
     boundaries.dedup_by(|left, right| (*left - *right).abs() <= COORDINATE_EPSILON);
 
     for window in boundaries.windows(2) {
@@ -608,23 +607,120 @@ fn clip_affine_range(
     range[0] <= range[1] + COORDINATE_EPSILON
 }
 
-fn add_grid_crossings(
-    boundaries: &mut Vec<f64>,
+/// Enumerates one source axis's half-texel grid-line crossings of the ray as
+/// ray parameters, in ascending `f64::total_cmp` order, without allocating.
+///
+/// Each crossing is `(coordinate - offset) / slope` with
+/// `coordinate = f64::from(half_step) * 0.5` for `half_step in 0..=extent*2` —
+/// the identical `f64` expression the collect-and-sort predecessor used, on the
+/// identical operand values, so every emitted crossing is bit-identical.
+///
+/// The parameter is a monotone (rounding-preserving) function of `coordinate`:
+/// increasing when `slope > 0`, decreasing when `slope < 0`. Iterating the
+/// half-step index in the matching direction (ascending for positive slope,
+/// descending for negative) therefore yields crossings already in
+/// `total_cmp` order — including the `-0.0`/`+0.0` boundary, where the negative
+/// side (smaller `total_cmp`) is always reached first. Only crossings strictly
+/// inside `(range_start, range_end)` are emitted, matching the predecessor's
+/// strict interior filter; a negligible slope yields no crossings.
+struct GridCrossings {
     offset: f64,
     slope: f64,
-    extent: u32,
-    parameter_start: f64,
-    parameter_end: f64,
-) {
-    if slope.abs() <= COORDINATE_EPSILON {
-        return;
-    }
-    for half_step in 0..=extent * 2 {
-        let coordinate = f64::from(half_step) * 0.5;
-        let parameter = (coordinate - offset) / slope;
-        if parameter > parameter_start && parameter < parameter_end {
-            boundaries.push(parameter);
+    range_start: f64,
+    range_end: f64,
+    lo: u32,
+    hi: u32,
+    forward: bool,
+    active: bool,
+    exhausted: bool,
+}
+
+impl GridCrossings {
+    fn new(offset: f64, slope: f64, extent: u32, range_start: f64, range_end: f64) -> Self {
+        Self {
+            offset,
+            slope,
+            range_start,
+            range_end,
+            lo: 0,
+            hi: extent * 2,
+            forward: slope > 0.0,
+            active: slope.abs() > COORDINATE_EPSILON,
+            exhausted: false,
         }
+    }
+
+    fn next_half_step(&mut self) -> Option<u32> {
+        if !self.active || self.exhausted {
+            return None;
+        }
+        let index = if self.forward { self.lo } else { self.hi };
+        if self.lo == self.hi {
+            self.exhausted = true;
+        } else if self.forward {
+            self.lo += 1;
+        } else {
+            self.hi -= 1;
+        }
+        Some(index)
+    }
+}
+
+impl Iterator for GridCrossings {
+    type Item = f64;
+
+    fn next(&mut self) -> Option<f64> {
+        loop {
+            let half_step = self.next_half_step()?;
+            let coordinate = f64::from(half_step) * 0.5;
+            let parameter = (coordinate - self.offset) / self.slope;
+            if parameter > self.range_start && parameter < self.range_end {
+                return Some(parameter);
+            }
+        }
+    }
+}
+
+/// Merges the two per-axis crossing streams (each already in `total_cmp` order)
+/// with the two range endpoints into `boundaries`, in `total_cmp` order. The
+/// output multiset is exactly `{range_start, range_end}` plus every interior
+/// crossing — the same set the predecessor collected — and `total_cmp` order is
+/// the same order its `sort_by(f64::total_cmp)` produced, so the subsequent
+/// epsilon dedup makes bit-identical decisions. Streams supply identical values
+/// only when their `f64` bit patterns are identical, so the choice of source on
+/// a tie cannot change which bit pattern survives.
+fn merge_boundaries(
+    boundaries: &mut Vec<f64>,
+    range_start: f64,
+    range_end: f64,
+    mut x_axis: GridCrossings,
+    mut y_axis: GridCrossings,
+) {
+    boundaries.clear();
+    let mut heads = [
+        x_axis.next(),
+        y_axis.next(),
+        Some(range_start),
+        Some(range_end),
+    ];
+    loop {
+        let mut best: Option<usize> = None;
+        for (index, head) in heads.iter().enumerate() {
+            if let Some(value) = *head {
+                match best {
+                    Some(current)
+                        if heads[current].unwrap().total_cmp(&value) != Ordering::Greater => {}
+                    _ => best = Some(index),
+                }
+            }
+        }
+        let Some(index) = best else { break };
+        boundaries.push(heads[index].unwrap());
+        heads[index] = match index {
+            0 => x_axis.next(),
+            1 => y_axis.next(),
+            _ => None,
+        };
     }
 }
 
@@ -887,8 +983,9 @@ mod tests {
             Ratio::from_integer(1),
         );
         let line = warp
-            .inverse_line(Ratio::new(3, 4), Ratio::new(1, 2))
-            .unwrap();
+            .prepare_inverse()
+            .unwrap()
+            .inverse_line(Ratio::new(3, 4), Ratio::new(1, 2));
 
         let facing = TargetView::front()
             .facing_coefficients(CanonicalView::Front, Bounds::new(3, 1, 4).unwrap());
@@ -927,8 +1024,9 @@ mod tests {
         let bounds = Bounds::new(3, 1, 4).unwrap();
         let warp = target.warp_coefficients(CanonicalView::Front, bounds);
         let line = warp
-            .inverse_line(Ratio::new(3, 4), Ratio::new(1, 2))
-            .unwrap();
+            .prepare_inverse()
+            .unwrap()
+            .inverse_line(Ratio::new(3, 4), Ratio::new(1, 2));
         let facing = target.facing_coefficients(CanonicalView::Front, bounds);
 
         let mut scratch = RenderScratch::default();
