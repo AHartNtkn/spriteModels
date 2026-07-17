@@ -5,6 +5,21 @@ fn alpha(relief_eighths: u8) -> u8 {
     255 - relief_eighths
 }
 
+/// Source point along the inverse line at parameter `p`, reconstructed from the
+/// exact per-variable `[offset, slope]` coefficients the fixed-point
+/// [`relief_core::FrameInverse`] exposes.
+fn source_at(variables: &[[Ratio<i64>; 2]; 3], p: Ratio<i64>) -> SourcePoint {
+    SourcePoint::new(
+        variables[0][0] + variables[0][1] * p,
+        variables[1][0] + variables[1][1] * p,
+    )
+}
+
+/// Relief along the inverse line at parameter `p`.
+fn relief_at(variables: &[[Ratio<i64>; 2]; 3], p: Ratio<i64>) -> Ratio<i64> {
+    variables[2][0] + variables[2][1] * p
+}
+
 #[test]
 fn direct_warp_is_flat_transform_plus_relief_parallax() {
     let warp = WarpCoefficients::new([[1, 0, 10], [0, 1, 20]], [2, -1], [0, 0, 1], 3);
@@ -110,14 +125,15 @@ fn inverse_warp_line_recovers_a_known_preimage_with_its_selected_parameter() {
     let relief = Ratio::new(7, 3);
     let warped = warp.apply(source.clone(), relief);
 
-    let line = warp
+    let frame = warp
         .prepare_inverse()
         .expect("front-facing affine chart transform is invertible")
-        .inverse_line(warped.screen_x, warped.screen_y);
+        .inverse_frame(warped.screen_x, warped.screen_y, 1, 1);
+    let variables = frame.variable_coefficients_exact(0, 0);
 
-    assert_eq!(line.source_at(source.x), source);
-    assert_eq!(line.relief_at(source.x), relief);
-    assert_eq!(line.depth_at(source.x), warped.depth);
+    assert_eq!(source_at(&variables, source.x), source);
+    assert_eq!(relief_at(&variables, source.x), relief);
+    assert_eq!(frame.depth_at(0, 0, source.x), warped.depth);
 }
 
 #[test]
@@ -127,13 +143,14 @@ fn inverse_warp_line_uses_source_y_as_parameter_when_x_and_relief_span_screen() 
     let relief = Ratio::new(7, 3);
     let warped = warp.apply(source.clone(), relief);
 
-    let line = warp
+    let frame = warp
         .prepare_inverse()
         .expect("source x and relief form a rank-two projected map")
-        .inverse_line(warped.screen_x, warped.screen_y);
+        .inverse_frame(warped.screen_x, warped.screen_y, 1, 1);
+    let variables = frame.variable_coefficients_exact(0, 0);
 
-    assert_eq!(line.source_at(source.y), source);
-    assert_eq!(line.depth_at(source.y), warped.depth);
+    assert_eq!(source_at(&variables, source.y), source);
+    assert_eq!(frame.depth_at(0, 0, source.y), warped.depth);
 }
 
 #[test]
@@ -143,13 +160,14 @@ fn inverse_warp_line_uses_source_x_as_parameter_at_exact_canonical_edge_on() {
     let relief = Ratio::new(7, 3);
     let warped = warp.apply(source.clone(), relief);
 
-    let line = warp
+    let frame = warp
         .prepare_inverse()
         .expect("source y and relief form a rank-two projected map")
-        .inverse_line(warped.screen_x, warped.screen_y);
+        .inverse_frame(warped.screen_x, warped.screen_y, 1, 1);
+    let variables = frame.variable_coefficients_exact(0, 0);
 
-    assert_eq!(line.source_at(source.x), source);
-    assert_eq!(line.depth_at(source.x), warped.depth);
+    assert_eq!(source_at(&variables, source.x), source);
+    assert_eq!(frame.depth_at(0, 0, source.x), warped.depth);
 }
 
 #[test]
@@ -167,13 +185,14 @@ fn inverse_warp_line_exposes_every_affine_coordinate_and_transient_depth() {
     let source = SourcePoint::new(Ratio::new(3, 2), Ratio::new(5, 4));
     let relief = Ratio::new(7, 3);
     let warped = warp.apply(source, relief);
-    let line = warp
+    let frame = warp
         .prepare_inverse()
         .expect("source x and relief form a rank-two projected map")
-        .inverse_line(warped.screen_x, warped.screen_y);
+        .inverse_frame(warped.screen_x, warped.screen_y, 1, 1);
+    let variables = frame.variable_coefficients_exact(0, 0);
 
     assert_eq!(
-        line.variable_coefficients(),
+        variables,
         [
             [Ratio::new(3, 2), Ratio::from_integer(0)],
             [Ratio::from_integer(0), Ratio::from_integer(1)],
@@ -181,10 +200,10 @@ fn inverse_warp_line_exposes_every_affine_coordinate_and_transient_depth() {
         ]
     );
     assert_eq!(
-        line.depth_coefficients(),
+        frame.depth_coefficients_exact(0, 0),
         [Ratio::new(379, 6), Ratio::from_integer(11)]
     );
-    assert_eq!(line.relief_at(Ratio::new(5, 4)), Ratio::new(7, 3));
+    assert_eq!(relief_at(&variables, Ratio::new(5, 4)), Ratio::new(7, 3));
 }
 
 #[test]
@@ -194,13 +213,13 @@ fn inverse_warp_line_selects_the_largest_determinant_with_stable_ties() {
         SourcePoint::new(Ratio::from_integer(2), Ratio::from_integer(3)),
         Ratio::from_integer(5),
     );
-    let line = warp
+    let frame = warp
         .prepare_inverse()
         .expect("every projected column pair has rank two")
-        .inverse_line(warped.screen_x, warped.screen_y);
+        .inverse_frame(warped.screen_x, warped.screen_y, 1, 1);
 
     assert_eq!(
-        line.variable_coefficients(),
+        frame.variable_coefficients_exact(0, 0),
         [
             [Ratio::from_integer(-1), Ratio::from_integer(1)],
             [Ratio::from_integer(0), Ratio::from_integer(1)],

@@ -20,26 +20,18 @@ pub struct WarpCoefficients {
     depth_relief: Ratio<i64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InverseWarpLine {
-    variables: [[Ratio<i64>; 2]; 3],
-    depth: [Ratio<i64>; 2],
-}
-
 /// The screen-coordinate-independent factoring of the inverse-line solve for a
 /// single (chart, camera) pair. Building this performs the pivot selection and
-/// the 2×2 inversion once; [`PreparedInverse::inverse_line`] then reconstructs
-/// the per-pixel [`InverseWarpLine`] with only affine substitution of the
-/// screen coordinates — no per-pixel pivot search and no per-pixel rational
-/// division.
+/// the 2×2 inversion once; [`PreparedInverse::inverse_frame`] then fixes the
+/// per-frame screen origin and produces a [`FrameInverse`] whose per-pixel work
+/// is exact integer affine substitution — no per-pixel pivot search, no
+/// per-pixel rational division, and no gcd reduction.
 ///
 /// Each per-pixel field is an affine function of `(screen_x, screen_y)`. The
 /// pivot rows' constant offsets `variables[first][0]` and
 /// `variables[second][0]` carry the only screen dependence; all slopes and the
 /// free row are screen-independent constants computed in
-/// [`WarpCoefficients::prepare_inverse`]. Because `num_rational::Ratio` is kept
-/// in reduced canonical form, evaluating those affine forms yields the exact
-/// same reduced rationals the per-pixel solve produced, bit for bit.
+/// [`WarpCoefficients::prepare_inverse`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreparedInverse {
     first: usize,
@@ -51,6 +43,212 @@ pub struct PreparedInverse {
     second_offset: [Ratio<i64>; 3],
     first_slope: Ratio<i64>,
     second_slope: Ratio<i64>,
+    depth_plane: [Ratio<i64>; 3],
+    depth_relief: Ratio<i64>,
+    depth_slope: Ratio<i64>,
+}
+
+/// `1/2 <= |value|` representable exactly in `f64` requires `|value| <= 2^53`;
+/// integers up to and including `2^53` are exactly representable, `2^53 + 1` is
+/// not. Every rational that becomes an `f64` in the hot path is asserted to have
+/// numerator and denominator magnitudes within this bound so that the unreduced
+/// integer division `(numerator as f64) / (denominator as f64)` is the correctly
+/// rounded `f64` of the exact value — bit-identical to converting the reduced
+/// pair (whose magnitudes are no larger). See [`FrameInverse`] for the full
+/// argument.
+const MAX_F64_EXACT_INT: i128 = 1 << 53;
+
+/// A reduced rational over `i128`, used only during per-(chart,frame) setup to
+/// combine the frame-constant inverse coefficients with the frame screen origin
+/// without the intermediate overflow that `Ratio<i64>` would risk. Every operand
+/// entering setup is a reduced `Ratio<i64>` (magnitude `< 2^63`); products and
+/// cross-sums therefore stay within `i128`, and each result is reduced back to
+/// lowest terms.
+#[derive(Clone, Copy)]
+struct Rat128 {
+    numerator: i128,
+    denominator: i128,
+}
+
+fn gcd_i128(a: i128, b: i128) -> i128 {
+    let mut a = a.unsigned_abs();
+    let mut b = b.unsigned_abs();
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a as i128
+}
+
+impl Rat128 {
+    fn new(numerator: i128, denominator: i128) -> Self {
+        assert!(denominator != 0, "Rat128 denominator must be non-zero");
+        let (mut numerator, mut denominator) = if denominator < 0 {
+            (-numerator, -denominator)
+        } else {
+            (numerator, denominator)
+        };
+        let divisor = gcd_i128(numerator, denominator);
+        if divisor > 1 {
+            numerator /= divisor;
+            denominator /= divisor;
+        }
+        Self {
+            numerator,
+            denominator,
+        }
+    }
+
+    fn from_ratio(value: Ratio<i64>) -> Self {
+        Self::new(i128::from(*value.numer()), i128::from(*value.denom()))
+    }
+
+    fn mul(self, other: Self) -> Self {
+        let numerator = self
+            .numerator
+            .checked_mul(other.numerator)
+            .expect("frame-setup rational multiply overflowed i128");
+        let denominator = self
+            .denominator
+            .checked_mul(other.denominator)
+            .expect("frame-setup rational multiply overflowed i128");
+        Self::new(numerator, denominator)
+    }
+
+    fn add(self, other: Self) -> Self {
+        let divisor = gcd_i128(self.denominator, other.denominator);
+        let lcm = (self.denominator / divisor)
+            .checked_mul(other.denominator)
+            .expect("frame-setup rational add overflowed i128");
+        let left = self
+            .numerator
+            .checked_mul(other.denominator / divisor)
+            .expect("frame-setup rational add overflowed i128");
+        let right = other
+            .numerator
+            .checked_mul(self.denominator / divisor)
+            .expect("frame-setup rational add overflowed i128");
+        let numerator = left
+            .checked_add(right)
+            .expect("frame-setup rational add overflowed i128");
+        Self::new(numerator, lcm)
+    }
+}
+
+/// An exact affine function of the integer pixel column `x` and row `y`,
+/// `value(x, y) = (a + bx * x + by * y) / d`, with `d > 0`. Frame-constant
+/// integer coefficients let the per-pixel evaluation be three integer multiplies
+/// and two adds — no rational arithmetic, no reduction.
+#[derive(Clone, Copy, Debug)]
+struct AffineForm {
+    a: i128,
+    bx: i128,
+    by: i128,
+    d: i128,
+}
+
+impl AffineForm {
+    const ZERO: Self = Self {
+        a: 0,
+        bx: 0,
+        by: 0,
+        d: 1,
+    };
+
+    /// Builds the affine form of `constant + bx_rat * x + by_rat * y` by placing
+    /// the three frame-constant rationals over their common denominator. Asserts
+    /// the shared denominator is representable in `f64` (`<= 2^53`) so that the
+    /// per-pixel `f64` conversion is exact.
+    fn from_rats(constant: Rat128, bx_rat: Rat128, by_rat: Rat128) -> Self {
+        let divisor = gcd_i128(constant.denominator, bx_rat.denominator);
+        let partial = (constant.denominator / divisor)
+            .checked_mul(bx_rat.denominator)
+            .expect("frame-setup denominator lcm overflowed i128");
+        let divisor = gcd_i128(partial, by_rat.denominator);
+        let d = (partial / divisor)
+            .checked_mul(by_rat.denominator)
+            .expect("frame-setup denominator lcm overflowed i128");
+        assert!(
+            (1..=MAX_F64_EXACT_INT).contains(&d),
+            "inverse-line shared denominator {d} exceeds the 2^53 f64-exact bound; \
+             the camera basis or model bounds exceed the documented domain"
+        );
+        let scale = |value: Rat128| {
+            value
+                .numerator
+                .checked_mul(d / value.denominator)
+                .expect("frame-setup numerator scaling overflowed i128")
+        };
+        Self {
+            a: scale(constant),
+            bx: scale(bx_rat),
+            by: scale(by_rat),
+            d,
+        }
+    }
+
+    fn numerator_at(&self, x: i128, y: i128) -> i128 {
+        let bx_term = self
+            .bx
+            .checked_mul(x)
+            .expect("inverse-line x term overflowed i128");
+        let by_term = self
+            .by
+            .checked_mul(y)
+            .expect("inverse-line y term overflowed i128");
+        self.a
+            .checked_add(bx_term)
+            .and_then(|partial| partial.checked_add(by_term))
+            .expect("inverse-line numerator overflowed i128")
+    }
+}
+
+/// The per-(chart,frame) fixed-point factoring of the inverse-line solve.
+///
+/// # Common-denominator scheme
+///
+/// For integer pixel column `x` and row `y`, the screen coordinates are
+/// `screen_x = x + sx0` and `screen_y = y + sy0`, where `sx0 = 1/2 - offset_x`
+/// and `sy0 = 1/2 - offset_y` are frame constants. Each of the three source
+/// variables (source x, source y, relief) has value
+/// `variables[i][0] + variables[i][1] * parameter` along the inverse line; the
+/// offset `variables[i][0]` is the only screen-dependent part and is an affine
+/// function of `(screen_x, screen_y)`, hence an affine function of `(x, y)`:
+/// `(a_i + bx_i * x + by_i * y) / d_i`. These coefficients are computed once at
+/// setup (in exact `i128` rational arithmetic) and evaluated per pixel with pure
+/// integer arithmetic.
+///
+/// # `f64` exactness
+///
+/// The predecessor converted the *reduced* `Ratio<i64>` offset `n/d` to `f64`
+/// as `(n as f64) / (d as f64)`. This factoring instead holds the *unreduced*
+/// pair `N/D = (n * g)/(d * g)`. `f64` division is correctly rounded, so
+/// `(N as f64)/(D as f64) == (n as f64)/(d as f64)` whenever `N` and `D` are both
+/// exactly representable in `f64`, i.e. `|N| <= 2^53` and `D <= 2^53`: both sides
+/// then equal the correctly rounded `f64` of the identical exact value, and the
+/// reduced magnitudes `|n| <= |N|`, `d <= D` are exact a fortiori. Setup asserts
+/// `D <= 2^53` ([`AffineForm::from_rats`]) and that every per-pixel numerator
+/// `N = a + bx*x + by*y` satisfies `|N| <= 2^53` at the four corners of the pixel
+/// rectangle; because `N` is affine in `x, y` its extreme magnitudes occur at a
+/// corner, so the interior is covered.
+///
+/// The static bound: camera basis entries are `integer/Dcam` with
+/// `|integer| <= 1024` and `Dcam <= 1024` (editor quantization uses denominator
+/// 1024; presets use denominators dividing 12 with numerators `<= 4`). Model
+/// bounds are `<= 63`, so origin offsets are `<= 63`; `source_u/v/inward` are
+/// unit vectors; the relief unit is `1/8`. The projected columns therefore have
+/// numerators `<= 3*1024*63 < 2^18` over denominators `<= 8*1024 < 2^13`; the
+/// 2×2 determinant, the offsets divided by it, and the screen origin (denominator
+/// `2` numerators `<= 2*(side + bound)`) combine to shared denominators and
+/// per-pixel numerators comfortably below `2^53` for `side <= a few thousand`.
+/// The asserts convert any violation of this domain into a loud panic rather
+/// than a silent precision loss.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameInverse {
+    var_offset: [AffineForm; 3],
+    var_slope: [Ratio<i64>; 3],
+    var_slope_f64: [f64; 3],
     depth_plane: [Ratio<i64>; 3],
     depth_relief: Ratio<i64>,
     depth_slope: Ratio<i64>,
@@ -105,10 +303,9 @@ impl WarpCoefficients {
 
     /// Solves the camera-only part of the inverse-line system once for this
     /// (chart, camera) pair, returning the affine factoring evaluated per pixel
-    /// by [`PreparedInverse::inverse_line`]. Returns `None` exactly when the
-    /// per-pixel solve would have — when all three projected 2×2 minors are
-    /// singular — because that condition depends only on the matrix, not on the
-    /// screen coordinates.
+    /// by [`FrameInverse`]. Returns `None` exactly when the per-pixel solve would
+    /// have — when all three projected 2×2 minors are singular — because that
+    /// condition depends only on the matrix, not on the screen coordinates.
     pub fn prepare_inverse(&self) -> Option<PreparedInverse> {
         let columns = [
             [self.screen[0][0], self.screen[1][0]],
@@ -188,58 +385,143 @@ impl WarpCoefficients {
 }
 
 impl PreparedInverse {
-    /// Reconstructs the per-pixel [`InverseWarpLine`] by substituting the screen
-    /// coordinates into the precomputed affine forms. Every produced rational
-    /// equals the one the per-pixel 2×2 solve produced (reduced canonical form
-    /// is unique), so the downstream `f64` conversions are bit-identical.
-    pub fn inverse_line(&self, screen_x: Ratio<i64>, screen_y: Ratio<i64>) -> InverseWarpLine {
-        let zero = Ratio::from_integer(0);
-        let eval =
-            |coeffs: [Ratio<i64>; 3]| coeffs[0] + coeffs[1] * screen_x + coeffs[2] * screen_y;
+    /// Fixes the frame screen origin — `screen_x = x + sx0`, `screen_y = y + sy0`
+    /// for integer pixel column `x`, row `y` — and returns the per-pixel
+    /// fixed-point [`FrameInverse`]. `width` and `height` bound the pixel
+    /// rectangle so the setup asserts can certify that every per-pixel numerator
+    /// stays within the `f64`-exact range.
+    pub fn inverse_frame(
+        &self,
+        sx0: Ratio<i64>,
+        sy0: Ratio<i64>,
+        width: u32,
+        height: u32,
+    ) -> FrameInverse {
+        let sx0 = Rat128::from_ratio(sx0);
+        let sy0 = Rat128::from_ratio(sy0);
 
-        let mut variables = [[zero; 2]; 3];
-        variables[self.free][1] = Ratio::from_integer(1);
-        variables[self.first] = [eval(self.first_offset), self.first_slope];
-        variables[self.second] = [eval(self.second_offset), self.second_slope];
+        // variables[i][0] = offset[0] + offset[1]*screen_x + offset[2]*screen_y
+        //                 = (offset[0] + offset[1]*sx0 + offset[2]*sy0)
+        //                   + offset[1]*x + offset[2]*y.
+        let affine_of = |offset: [Ratio<i64>; 3]| {
+            let o0 = Rat128::from_ratio(offset[0]);
+            let o1 = Rat128::from_ratio(offset[1]);
+            let o2 = Rat128::from_ratio(offset[2]);
+            let constant = o0.add(o1.mul(sx0)).add(o2.mul(sy0));
+            AffineForm::from_rats(constant, o1, o2)
+        };
 
-        let depth = [
-            self.depth_plane[0] * variables[0][0]
-                + self.depth_plane[1] * variables[1][0]
-                + self.depth_plane[2]
-                + self.depth_relief * variables[2][0],
-            self.depth_slope,
-        ];
+        let mut var_offset = [AffineForm::ZERO; 3];
+        var_offset[self.first] = affine_of(self.first_offset);
+        var_offset[self.second] = affine_of(self.second_offset);
+        // var_offset[self.free] stays ZERO: the free variable's offset is 0.
 
-        InverseWarpLine { variables, depth }
+        let mut var_slope = [Ratio::from_integer(0); 3];
+        var_slope[self.free] = Ratio::from_integer(1);
+        var_slope[self.first] = self.first_slope;
+        var_slope[self.second] = self.second_slope;
+
+        let frame = FrameInverse {
+            var_offset,
+            var_slope,
+            var_slope_f64: var_slope.map(ratio_to_f64),
+            depth_plane: self.depth_plane,
+            depth_relief: self.depth_relief,
+            depth_slope: self.depth_slope,
+        };
+
+        // Certify the per-pixel f64 numerators stay f64-exact. Each numerator is
+        // affine in (x, y), so its extreme magnitudes lie at a corner of the
+        // pixel rectangle [0, width-1] x [0, height-1]; checking the corners
+        // covers the interior. width/height are >= 1 here (the caller returns
+        // early for an empty frame).
+        let last_x = i128::from(width.saturating_sub(1));
+        let last_y = i128::from(height.saturating_sub(1));
+        for form in &frame.var_offset {
+            for &x in &[0, last_x] {
+                for &y in &[0, last_y] {
+                    let numerator = form.numerator_at(x, y);
+                    assert!(
+                        numerator.unsigned_abs() <= MAX_F64_EXACT_INT as u128,
+                        "inverse-line numerator {numerator} at pixel ({x}, {y}) exceeds the \
+                         2^53 f64-exact bound; the camera basis, model bounds, or frame size \
+                         exceed the documented domain"
+                    );
+                }
+            }
+        }
+
+        frame
     }
 }
 
-impl InverseWarpLine {
-    /// Evaluates the source coordinates at the shared affine-line parameter.
-    pub fn source_at(&self, parameter: Ratio<i64>) -> SourcePoint {
-        SourcePoint::new(
-            self.variables[0][0] + self.variables[0][1] * parameter,
-            self.variables[1][0] + self.variables[1][1] * parameter,
-        )
+impl FrameInverse {
+    fn numerator_denominator(&self, variable: usize, x: u32, y: u32) -> (i128, i128) {
+        let form = &self.var_offset[variable];
+        (form.numerator_at(i128::from(x), i128::from(y)), form.d)
     }
 
-    pub fn depth_at(&self, parameter: Ratio<i64>) -> Ratio<i64> {
-        self.depth[0] + self.depth[1] * parameter
+    /// Per-pixel `[offset, slope]` for source x, source y, and relief as `f64`,
+    /// the exact bit pattern the reduced-`Ratio` predecessor produced (see the
+    /// type-level `f64`-exactness argument). The offsets are converted from the
+    /// unreduced integer affine numerators; the slopes are frame constants
+    /// converted once at setup.
+    pub fn variable_f64(&self, x: u32, y: u32) -> [[f64; 2]; 3] {
+        std::array::from_fn(|variable| {
+            let (numerator, denominator) = self.numerator_denominator(variable, x, y);
+            debug_assert!(
+                numerator.unsigned_abs() <= MAX_F64_EXACT_INT as u128
+                    && denominator <= MAX_F64_EXACT_INT,
+                "inverse-line f64 conversion outside the 2^53-exact range"
+            );
+            [
+                numerator as f64 / denominator as f64,
+                self.var_slope_f64[variable],
+            ]
+        })
     }
 
-    pub fn relief_at(&self, parameter: Ratio<i64>) -> Ratio<i64> {
-        self.variables[2][0] + self.variables[2][1] * parameter
+    /// Exact `[offset, slope]` per source variable as reduced `Ratio<i64>`. Used
+    /// by depth reconstruction and by exactness tests. The numerator and
+    /// denominator fit `i64` because they are within the `2^53` bound certified
+    /// at setup.
+    pub fn variable_coefficients_exact(&self, x: u32, y: u32) -> [[Ratio<i64>; 2]; 3] {
+        std::array::from_fn(|variable| {
+            let (numerator, denominator) = self.numerator_denominator(variable, x, y);
+            [
+                Ratio::new(numerator as i64, denominator as i64),
+                self.var_slope[variable],
+            ]
+        })
     }
 
-    /// Returns `[constant, slope]` for source x, source y, and relief, in that order.
-    pub fn variable_coefficients(&self) -> [[Ratio<i64>; 2]; 3] {
-        self.variables
+    fn depth_offset(&self, offsets: &[[Ratio<i64>; 2]; 3]) -> Ratio<i64> {
+        self.depth_plane[0] * offsets[0][0]
+            + self.depth_plane[1] * offsets[1][0]
+            + self.depth_plane[2]
+            + self.depth_relief * offsets[2][0]
     }
 
-    /// Returns `[constant, slope]` for transient camera depth.
-    pub fn depth_coefficients(&self) -> [Ratio<i64>; 2] {
-        self.depth
+    /// Exact `[constant, slope]` for transient camera depth at this pixel, as
+    /// reduced `Ratio<i64>`: the depth along the inverse line is
+    /// `constant + slope * parameter`.
+    pub fn depth_coefficients_exact(&self, x: u32, y: u32) -> [Ratio<i64>; 2] {
+        let offsets = self.variable_coefficients_exact(x, y);
+        [self.depth_offset(&offsets), self.depth_slope]
     }
+
+    /// Exact camera depth `constant + slope * parameter` at this pixel. The
+    /// result is the reduced canonical `Ratio<i64>` of the same rational the
+    /// predecessor's `depth_at` produced, so the golden fragment-owner depths are
+    /// bit-identical.
+    pub fn depth_at(&self, x: u32, y: u32, parameter: Ratio<i64>) -> Ratio<i64> {
+        let offsets = self.variable_coefficients_exact(x, y);
+        self.depth_offset(&offsets) + self.depth_slope * parameter
+    }
+}
+
+fn ratio_to_f64(value: Ratio<i64>) -> f64 {
+    *value.numer() as f64 / *value.denom() as f64
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

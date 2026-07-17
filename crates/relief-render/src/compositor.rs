@@ -1,7 +1,5 @@
 use num_rational::Ratio;
-use relief_core::{
-    Bounds, DecodedTexel, InverseWarpLine, ReliefField, ResolvedCharts, SourcePoint,
-};
+use relief_core::{Bounds, DecodedTexel, ReliefField, ResolvedCharts, SourcePoint};
 use std::cmp::Ordering;
 use thiserror::Error;
 
@@ -120,9 +118,16 @@ pub enum RenderError {
     FrameBufferTooLarge,
 }
 
-#[derive(Clone, Debug)]
+/// A recovered source-cell hit along the inverse line. `parameter` is the ray
+/// parameter quantized to denominator `ROOT_SCALE = 2^24`, stored as the integer
+/// numerator `round(t * 2^24)`; the implicit denominator is shared by every
+/// preimage, so integer comparison of `parameter` is exact rational comparison
+/// and `parameter as f64 / ROOT_SCALE as f64` is the bit-identical `f64` the
+/// reduced-`Ratio` predecessor produced (both `|parameter| <= 2^53` and
+/// `2^24 <= 2^53`, so both are correctly rounded conversions of the same value).
+#[derive(Clone, Copy, Debug)]
 struct Preimage {
-    parameter: Ratio<i64>,
+    parameter: i64,
     source_x: u32,
     source_y: u32,
 }
@@ -355,6 +360,11 @@ pub fn render_model(
     };
     let offset_x = Ratio::new(i64::from(request.width), 2) - (min_x + max_x) / 2;
     let offset_y = Ratio::new(i64::from(request.height), 2) - (min_y + max_y) / 2;
+    // `screen_x = (2x+1)/2 - offset_x = x + (1/2 - offset_x) = x + sx0`, so the
+    // integer pixel column `x` enters the inverse line as an integer offset and
+    // `sx0` is a frame constant folded into the fixed-point affine forms.
+    let sx0 = Ratio::new(1, 2) - offset_x;
+    let sy0 = Ratio::new(1, 2) - offset_y;
     // `prepare_inverse` returns `None` exactly when the per-pixel inverse solve
     // would have for every pixel (the singular condition depends only on the
     // matrix, not the screen coordinates), so a chart that fails it contributes
@@ -366,7 +376,9 @@ pub fn render_model(
         .zip(prepared.reliefs.iter())
         .filter_map(|(chart, entry)| {
             let warp = request.target.warp_coefficients(chart.view(), bounds);
-            let inverse = warp.prepare_inverse()?;
+            let inverse =
+                warp.prepare_inverse()?
+                    .inverse_frame(sx0, sy0, request.width, request.height);
             let facing = request.target.facing_coefficients(chart.view(), bounds);
             Some((chart, &entry.relief, inverse, facing, entry.maximum_relief))
         })
@@ -376,13 +388,16 @@ pub fn render_model(
 
     for y in 0..request.height {
         for x in 0..request.width {
-            let screen_x = Ratio::new(2 * i64::from(x) + 1, 2) - offset_x;
-            let screen_y = Ratio::new(2 * i64::from(y) + 1, 2) - offset_y;
-
             for (chart, relief, inverse, facing, maximum_relief) in &frame_charts {
-                let line = inverse.inverse_line(screen_x, screen_y);
+                let coefficients = inverse.variable_f64(x, y);
 
-                solve_preimages(&mut scratch, relief, &line, *facing, *maximum_relief);
+                solve_preimages(
+                    &mut scratch,
+                    relief,
+                    &coefficients,
+                    *facing,
+                    *maximum_relief,
+                );
                 for preimage in &scratch.preimages {
                     let Some(DecodedTexel::Relief { rgb, .. }) =
                         chart.texel_at(preimage.source_x, preimage.source_y)
@@ -394,7 +409,11 @@ pub fn render_model(
                         x,
                         y,
                         FragmentKey {
-                            depth: line.depth_at(preimage.parameter),
+                            depth: inverse.depth_at(
+                                x,
+                                y,
+                                Ratio::new(preimage.parameter, ROOT_SCALE),
+                            ),
                             chart_rank: chart.view().rank(),
                             source_y: preimage.source_y,
                             source_x: preimage.source_x,
@@ -428,7 +447,7 @@ fn projected_extents(
 fn solve_preimages(
     scratch: &mut RenderScratch,
     field: &PreparedRelief,
-    line: &InverseWarpLine,
+    coefficients: &[[f64; 2]; 3],
     facing: FacingCoefficients,
     maximum_relief: f64,
 ) {
@@ -439,14 +458,11 @@ fn solve_preimages(
     boundaries.clear();
     preimages.clear();
 
-    let coefficients = line
-        .variable_coefficients()
-        .map(|[offset, slope]| [ratio_to_f64(offset), ratio_to_f64(slope)]);
     let [
         [x_offset, x_slope],
         [y_offset, y_slope],
         [relief_offset, relief_slope],
-    ] = coefficients;
+    ] = *coefficients;
     let (width, height) = (field.width, field.height);
     let mut parameter_range = [f64::NEG_INFINITY, f64::INFINITY];
     if !clip_affine_range(
@@ -528,7 +544,7 @@ fn solve_preimages(
                             continue;
                         }
                         preimages.push(Preimage {
-                            parameter: quantized_ratio(parameter),
+                            parameter: quantized_parameter(parameter),
                             source_x,
                             source_y,
                         });
@@ -546,7 +562,7 @@ fn solve_preimages(
     preimages.dedup_by(|left, right| {
         left.source_x == right.source_x
             && left.source_y == right.source_y
-            && (ratio_to_f64(left.parameter) - ratio_to_f64(right.parameter)).abs() <= 1.0e-7
+            && (parameter_f64(left.parameter) - parameter_f64(right.parameter)).abs() <= 1.0e-7
     });
 }
 
@@ -916,8 +932,21 @@ fn ratio_to_f64(value: Ratio<i64>) -> f64 {
     *value.numer() as f64 / *value.denom() as f64
 }
 
-fn quantized_ratio(value: f64) -> Ratio<i64> {
-    Ratio::new((value * ROOT_SCALE as f64).round() as i64, ROOT_SCALE)
+/// Quantizes a ray parameter to denominator `ROOT_SCALE = 2^24`, returning the
+/// integer numerator `round(t * 2^24)`. The value `t` is clipped to the source
+/// box first (`0 <= source coord <= 63`, `0 <= relief <= 8*255`), so
+/// `|round(t * 2^24)| <= 8*255 * 2^24 < 2^36`, well inside `i64` and the
+/// `2^53` f64-exact range.
+fn quantized_parameter(value: f64) -> i64 {
+    (value * ROOT_SCALE as f64).round() as i64
+}
+
+/// Converts a quantized parameter numerator back to `f64` as
+/// `numerator / ROOT_SCALE`. Both operands are `f64`-exact (see
+/// [`quantized_parameter`]), so this is the bit-identical `f64` of the reduced
+/// `Ratio::new(numerator, ROOT_SCALE)` the predecessor compared against.
+fn parameter_f64(parameter: i64) -> f64 {
+    parameter as f64 / ROOT_SCALE as f64
 }
 
 #[cfg(test)]
@@ -928,9 +957,16 @@ mod tests {
     use crate::{CameraBasis, TargetView};
 
     use super::{
-        Bounded, PreparedRelief, RenderScratch, interpolate_unit_cubic, ratio_to_f64,
+        Bounded, PreparedRelief, ROOT_SCALE, RenderScratch, interpolate_unit_cubic, ratio_to_f64,
         roots_in_unit_interval, solve_preimages,
     };
+
+    /// Exact relief along the inverse line at the quantized ray parameter,
+    /// reconstructed from the fixed-point frame's exact per-variable
+    /// coefficients: `relief = relief_offset + relief_slope * parameter`.
+    fn relief_at(variables: &[[Ratio<i64>; 2]; 3], parameter: i64) -> Ratio<i64> {
+        variables[2][0] + variables[2][1] * Ratio::new(parameter, ROOT_SCALE)
+    }
 
     #[test]
     #[should_panic(expected = "Bounded<_, 2> capacity exceeded")]
@@ -982,22 +1018,25 @@ mod tests {
             [zero, zero, zero],
             Ratio::from_integer(1),
         );
-        let line = warp
-            .prepare_inverse()
-            .unwrap()
-            .inverse_line(Ratio::new(3, 4), Ratio::new(1, 2));
+        let frame =
+            warp.prepare_inverse()
+                .unwrap()
+                .inverse_frame(Ratio::new(3, 4), Ratio::new(1, 2), 1, 1);
+        let variables = frame.variable_coefficients_exact(0, 0);
+        let coefficients = frame.variable_f64(0, 0);
 
         let facing = TargetView::front()
             .facing_coefficients(CanonicalView::Front, Bounds::new(3, 1, 4).unwrap());
         let mut scratch = RenderScratch::default();
-        solve_preimages(&mut scratch, &prepared, &line, facing, 16.0);
+        solve_preimages(&mut scratch, &prepared, &coefficients, facing, 16.0);
         let locations: Vec<_> = scratch
             .preimages
             .iter()
             .map(|preimage| {
                 (
                     preimage.source_x,
-                    (ratio_to_f64(line.relief_at(preimage.parameter)) * 1_000.0).round() / 1_000.0,
+                    (ratio_to_f64(relief_at(&variables, preimage.parameter)) * 1_000.0).round()
+                        / 1_000.0,
                 )
             })
             .collect();
@@ -1023,21 +1062,24 @@ mod tests {
         ));
         let bounds = Bounds::new(3, 1, 4).unwrap();
         let warp = target.warp_coefficients(CanonicalView::Front, bounds);
-        let line = warp
-            .prepare_inverse()
-            .unwrap()
-            .inverse_line(Ratio::new(3, 4), Ratio::new(1, 2));
+        let frame =
+            warp.prepare_inverse()
+                .unwrap()
+                .inverse_frame(Ratio::new(3, 4), Ratio::new(1, 2), 1, 1);
+        let variables = frame.variable_coefficients_exact(0, 0);
+        let coefficients = frame.variable_f64(0, 0);
         let facing = target.facing_coefficients(CanonicalView::Front, bounds);
 
         let mut scratch = RenderScratch::default();
-        solve_preimages(&mut scratch, &prepared, &line, facing, 16.0);
+        solve_preimages(&mut scratch, &prepared, &coefficients, facing, 16.0);
         let locations: Vec<_> = scratch
             .preimages
             .iter()
             .map(|preimage| {
                 (
                     preimage.source_x,
-                    (ratio_to_f64(line.relief_at(preimage.parameter)) * 1_000.0).round() / 1_000.0,
+                    (ratio_to_f64(relief_at(&variables, preimage.parameter)) * 1_000.0).round()
+                        / 1_000.0,
                 )
             })
             .collect();

@@ -18,7 +18,7 @@ pub use resize::{
     AxisSide, ChartEdge, DiscardPolicy, ImageEdge, ReassignMode, ResizeDelta, ResizeRequest,
     WorldAxis, WorldEdge,
 };
-pub use warp::{InverseWarpLine, PreparedInverse, SourcePoint, WarpCoefficients, WarpedSample};
+pub use warp::{FrameInverse, PreparedInverse, SourcePoint, WarpCoefficients, WarpedSample};
 
 /// Number of inverted-alpha relief units represented by one model-space pixel.
 pub const RELIEF_UNITS_PER_PIXEL: i64 = 8;
