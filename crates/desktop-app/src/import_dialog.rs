@@ -79,44 +79,53 @@ impl ImportDialogState {
             orthonormalized(multiply(pitch, multiply(yaw, self.settings.rotation)));
     }
 
+    /// Snaps to the nearest axis-aligned orientation. There are only 24
+    /// signed permutation matrices with determinant +1 (6 permutations x 8
+    /// sign patterns, 4 of which give det +1 for each permutation), so the
+    /// nearest one is found by exhaustive search rather than any greedy
+    /// heuristic. Nearest in Frobenius norm is equivalent to maximizing the
+    /// Frobenius inner product `sum(R[i][j] * S[i][j])`, because every
+    /// candidate R has the same norm (sqrt(3)): `|R - S|^2 = |R|^2 - 2<R,S>
+    /// + |S|^2`, so minimizing `|R - S|` over a fixed-norm candidate set is
+    /// the same as maximizing `<R, S>`.
     pub fn snap_rotation(&mut self) {
         let r = self.settings.rotation;
-        let mut snapped = [[0.0f32; 3]; 3];
-        let mut used = [false; 3];
-        // Rows in order of their strongest component (most confident first)
-        // so the strongest alignments win their axes.
-        let mut order: Vec<usize> = (0..3).collect();
-        let strength = |row: [f32; 3]| row.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        order.sort_by(|&a, &b| strength(r[b]).partial_cmp(&strength(r[a])).unwrap());
-        let mut weakest = (order[2], 0usize, f32::INFINITY);
-        for &i in &order {
-            let (mut best, mut best_abs) = (usize::MAX, -1.0f32);
-            for j in 0..3 {
-                if !used[j] && r[i][j].abs() > best_abs {
-                    best = j;
-                    best_abs = r[i][j].abs();
+        let mut best: Option<([[f32; 3]; 3], f32)> = None;
+        for perm in SIGNED_PERMUTATION_BASES {
+            for signs in 0u8..8 {
+                let mut candidate = [[0.0f32; 3]; 3];
+                for (i, &column) in perm.iter().enumerate() {
+                    candidate[i][column] = if signs & (1 << i) == 0 { 1.0 } else { -1.0 };
+                }
+                if determinant(candidate) != 1.0 {
+                    continue;
+                }
+                let inner: f32 = (0..3)
+                    .flat_map(|i| (0..3).map(move |j| (i, j)))
+                    .map(|(i, j)| candidate[i][j] * r[i][j])
+                    .sum();
+                // Strict `>` keeps the first-enumerated candidate on an
+                // exact tie (measure-zero for real drags, reachable from
+                // preset states), giving a deterministic result.
+                let replace = match &best {
+                    Some((_, best_inner)) => inner > *best_inner,
+                    None => true,
+                };
+                if replace {
+                    best = Some((candidate, inner));
                 }
             }
-            used[best] = true;
-            snapped[i][best] = r[i][best].signum();
-            if best_abs < weakest.2 {
-                weakest = (i, best, best_abs);
-            }
         }
-        let det = snapped[0][0] * (snapped[1][1] * snapped[2][2] - snapped[1][2] * snapped[2][1])
-            - snapped[0][1] * (snapped[1][0] * snapped[2][2] - snapped[1][2] * snapped[2][0])
-            + snapped[0][2] * (snapped[1][0] * snapped[2][1] - snapped[1][1] * snapped[2][0]);
-        if det < 0.0 {
-            // A reflection is not an orientation; negating the least
-            // confident row is the smallest change restoring det = +1.
-            snapped[weakest.0][weakest.1] = -snapped[weakest.0][weakest.1];
-        }
-        self.settings.rotation = snapped;
+        self.settings.rotation = best
+            .expect("4 of the 8 sign patterns give determinant +1 for every permutation")
+            .0;
     }
 
     pub fn apply_preset(&mut self, preset: OrientationPreset) {
         let rotation = match preset {
-            // -90 about X: +y -> +z, +z -> -y (glTF Y-up from Z-up sources).
+            // +90 degrees about X under this module's Rodrigues convention
+            // (rotation_about([1,0,0], angle)): maps +y -> +z, +z -> -y (the
+            // box's "up" axis), converting Z-up sources to Y-up.
             OrientationPreset::ZUpToYUp => [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
             OrientationPreset::FlipX => [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
             OrientationPreset::FlipY => [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]],
@@ -124,6 +133,24 @@ impl ImportDialogState {
         };
         self.settings.rotation = multiply(rotation, self.settings.rotation);
     }
+}
+
+/// The 6 permutations of `{0, 1, 2}`: `SIGNED_PERMUTATION_BASES[k][i]` is the
+/// column assigned to row `i`, the unsigned skeleton `snap_rotation` fills
+/// in with all 8 sign patterns per permutation.
+const SIGNED_PERMUTATION_BASES: [[usize; 3]; 6] = [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0],
+];
+
+fn determinant(m: [[f32; 3]; 3]) -> f32 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
 }
 
 fn multiply(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
@@ -275,6 +302,127 @@ mod tests {
         assert_eq!(det, 1.0);
         // Near identity snaps TO identity.
         assert_eq!(r, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    }
+
+    /// All 48 signed permutation matrices (6 permutations x 8 sign patterns),
+    /// restricted to the 24 with determinant +1 (proper rotations). This is
+    /// the definition of "axis-aligned orientation" independent of whatever
+    /// algorithm `snap_rotation` uses to search it, so comparing against it
+    /// is not duplicated production logic.
+    fn signed_permutation_candidates_with_determinant_one() -> Vec<[[f32; 3]; 3]> {
+        const PERMUTATIONS: [[usize; 3]; 6] = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        let mut candidates = Vec::new();
+        for perm in PERMUTATIONS {
+            for signs in 0u8..8 {
+                let mut candidate = [[0.0f32; 3]; 3];
+                for (i, &column) in perm.iter().enumerate() {
+                    candidate[i][column] = if signs & (1 << i) == 0 { 1.0 } else { -1.0 };
+                }
+                let det = candidate[0][0]
+                    * (candidate[1][1] * candidate[2][2] - candidate[1][2] * candidate[2][1])
+                    - candidate[0][1]
+                        * (candidate[1][0] * candidate[2][2] - candidate[1][2] * candidate[2][0])
+                    + candidate[0][2]
+                        * (candidate[1][0] * candidate[2][1] - candidate[1][1] * candidate[2][0]);
+                if det == 1.0 {
+                    candidates.push(candidate);
+                }
+            }
+        }
+        candidates
+    }
+
+    fn frobenius_inner(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> f32 {
+        (0..3)
+            .flat_map(|i| (0..3).map(move |j| (i, j)))
+            .map(|(i, j)| a[i][j] * b[i][j])
+            .sum()
+    }
+
+    #[test]
+    fn snap_picks_the_nearest_axis_aligned_orientation() {
+        let candidates = signed_permutation_candidates_with_determinant_one();
+        assert_eq!(
+            candidates.len(),
+            24,
+            "6 permutations x 4 sign patterns each"
+        );
+
+        let inputs: Vec<[[f32; 3]; 3]> = [
+            // Reviewer's counterexample: the greedy row-order + det-fixup
+            // algorithm picks permutation (2,1,0) (inner product 1.700)
+            // when permutation (1,2,0) (inner product ~2.015) is nearer.
+            [
+                [0.659, -0.666, -0.350],
+                [0.321, 0.670, -0.669],
+                [0.680, 0.329, 0.655],
+            ],
+            [[1.0, 0.1, 0.05], [0.0, 1.0, 0.2], [0.0, 0.0, 1.0]],
+            [[0.2, 0.9, 0.1], [0.9, -0.2, 0.05], [0.05, 0.1, -0.99]],
+            [[-0.5, 0.5, 0.7], [0.7, 0.7, 0.0], [-0.5, 0.5, -0.7]],
+            [[0.9, 0.1, 0.1], [0.1, 0.9, -0.1], [-0.1, 0.1, 0.9]],
+            [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            [
+                [0.577, 0.577, 0.577],
+                [0.577, -0.789, 0.211],
+                [-0.577, -0.211, 0.789],
+            ],
+            [
+                [0.408, 0.408, 0.816],
+                [-0.707, 0.707, 0.0],
+                [-0.577, -0.577, 0.577],
+            ],
+        ]
+        .into_iter()
+        .map(orthonormalized)
+        .collect();
+
+        for input in inputs {
+            let mut state = ImportDialogState::new(quad_scene(), "quad.glb".into());
+            state.settings.rotation = input;
+            state.snap_rotation();
+            let snapped = state.settings.rotation;
+
+            let mut ones = 0;
+            for row in snapped {
+                for value in row {
+                    assert!(
+                        value == 0.0 || value == 1.0 || value == -1.0,
+                        "snap must produce a signed permutation, got {value}"
+                    );
+                    if value != 0.0 {
+                        ones += 1;
+                    }
+                }
+            }
+            assert_eq!(ones, 3);
+            let det = snapped[0][0]
+                * (snapped[1][1] * snapped[2][2] - snapped[1][2] * snapped[2][1])
+                - snapped[0][1] * (snapped[1][0] * snapped[2][2] - snapped[1][2] * snapped[2][0])
+                + snapped[0][2] * (snapped[1][0] * snapped[2][1] - snapped[1][1] * snapped[2][0]);
+            assert_eq!(det, 1.0);
+
+            let snapped_inner = frobenius_inner(snapped, input);
+            for candidate in &candidates {
+                let candidate_inner = frobenius_inner(*candidate, input);
+                assert!(
+                    // f32 summation order differs between production and
+                    // this independent test enumeration; 1e-4 is far below
+                    // the smallest real gap between distinct candidates for
+                    // these inputs and only absorbs rounding noise.
+                    snapped_inner >= candidate_inner - 1e-4,
+                    "snap {snapped:?} (inner {snapped_inner}) is not nearest to {input:?}; \
+                     candidate {candidate:?} scores {candidate_inner}"
+                );
+            }
+        }
     }
 
     #[test]
