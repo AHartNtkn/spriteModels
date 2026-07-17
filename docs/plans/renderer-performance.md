@@ -128,13 +128,20 @@ produce identical bits. Golden hashes must match.
 `roots_in_unit_interval` bisects up to 56 iterations per sign-change bracket,
 then the root is quantized to denominator 2^24 (`compositor.rs:632-634`).
 Replace bisection-then-quantize with a solver that returns the provably
-correctly rounded quantum directly: bracket via the cubic's critical points
-(as today), converge with Newton iterations safeguarded by the bracket, and
-finish by verifying the sign of the polynomial at the two neighbouring
-half-quantum boundaries (2^-25 offsets) so the returned quantum q is proven to
-contain the root. Iteration bound: Newton safeguarded by bisection halves the
-bracket at worst, so ≤ 25 safeguarded steps reach quantum resolution — state
-and enforce the bound, no magic numbers.
+correctly rounded quantum directly. The quantum that matters is the RAY
+PARAMETER's (parameter = segment_start + span * unit_variable, quantized to
+denominator 2^24 downstream) — NOT the cubic's unit variable: converging the
+unit variable to 2^-25 is off by the segment span (median ~3, observed max
+~192), which is what a first draft of this task tripped over. Bracket via the
+cubic's critical points (as today), converge with Newton iterations
+safeguarded by the bracket until the bracket MAPPED TO PARAMETER SPACE fits
+within a half-quantum (2^-25) window, and verify by sign check at the
+parameter-quantum boundaries (mapped back to the unit variable) that the
+returned quantum q provably contains the root. Iteration bound: safeguarded
+steps halve the bracket; the initial parameter-space bracket length is
+bounded by the clipped parameter range (derive the static bound from the
+Task 4 clip bounds), so the step bound is 25 + ceil(log2(max span)) — derive,
+state, and enforce it, no magic numbers.
 
 **Semantics note:** this defines the root as the correctly rounded quantum,
 which the current 56-iteration bisection almost always but not provably
