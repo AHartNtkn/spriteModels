@@ -390,3 +390,34 @@ with sign-verified quantization, integer depth compare — no gcd, no
 iteration, no allocation, no trig, no per-pixel divides beyond the f64
 conversions. Final whole-branch review: Ready (after doc fixes, applied in
 bec835a). Full gate green at tip.
+
+## Task 8: True per-patch forward splatting (output changes expected and acceptable)
+
+CORRECTION OF RECORD: bit-identical output was never a user requirement; it
+was controller scaffolding, useful for the pure representation changes
+(Tasks 2-4) and wrongly allowed to select Task 6's weaker pixel-culling
+architecture. The user's requirement from the start was speed with
+approximation tolerated "within reason," judged by images.
+
+Implement the traversal Task 6 analyzed and set aside: for each chart, for
+each foreground quarter-cell patch, enumerate the pixels in the patch's swept
+screen footprint and intersect each pixel's preimage line against THIS patch
+only (quadratic surface, closed-form + sign-verified quantum), committing
+fragments through the existing order-independent depth test. Define the
+per-patch semantics cleanly on their own terms — per-patch parameter clipping
+to the patch's box, acceptance and facing checks per patch, dedup only where
+two patches genuinely produce the same fragment key — rather than emulating
+the whole-ray dedup chains (whose cross-patch coupling is an artifact of the
+old marcher, not a modeling intent). Whole-ray boundary enumeration,
+`merge_boundaries`, `containing_cells`, and the per-pixel crossing march are
+deleted along with the mask-only culling layer if the per-patch path fully
+replaces them (no dual traversals).
+
+Gate: image approval. `cargo test --workspace` green except golden_render;
+render all 24 scenarios before/after; report differing pixel counts and
+characterization; STOP for user approval; on approval regenerate goldens,
+bench, commit. The output-identity oracle vs the old traversal is expected to
+fail by design — replace it with an oracle asserting the new semantics
+(e.g. per-pixel fragment sets equal a straightforward reference that
+enumerates all patches for that pixel), so coverage is preserved without
+freezing the old semantics.
