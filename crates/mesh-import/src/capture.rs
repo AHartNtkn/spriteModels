@@ -94,7 +94,7 @@ impl SideModes {
             if matches!(
                 self.get(view),
                 SideMode::FromOpposite | SideMode::FromOppositeMirrored
-            ) && self.get(view.opposite()) != SideMode::Capture
+            ) && !self.allows_from_opposite(view)
             {
                 return Err(ImportError::UnsatisfiedOpposite {
                     side: view,

@@ -565,7 +565,7 @@ impl ImportDialogState {
                     {
                         self.settings.side_modes.set(view, mode).expect(
                             "legal_modes and set share one predicate \
-                             (SideModes::from_opposite_allowed), so every mode this loop \
+                             (SideModes::allows_from_opposite), so every mode this loop \
                              offers is accepted by construction",
                         );
                     }
