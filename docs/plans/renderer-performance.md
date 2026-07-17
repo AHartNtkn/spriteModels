@@ -221,3 +221,12 @@ oblique scenes; orbit_sweep/globe ~-10% (0.594 s -> ~0.54 s). Consistent with
 malloc/free's ~5% profile share; the structural value is an allocation-free
 per-pixel loop for later tasks. Workspace tests green, goldens bit-identical,
 review approved (fix: added Bounded capacity panic test).
+
+### Task 3 (affine hoisting + streamed crossings) — commit 810b7b8
+
+Controller-measured medians: globe/front 5.4 ms, globe/default_orbit 41.7 ms,
+globe/oblique 47.3 ms, gyroscope/front 59.5 ms, gyroscope/default_orbit
+101.2 ms, gyroscope/oblique 118.5 ms, orbit_sweep 453 ms. Roughly 25-35%
+faster than Task 2 across the board. Reviewer independently re-derived both
+exactness arguments (affine algebra term-by-term; merge order incl. -0.0/tie
+cases). Workspace tests green, goldens bit-identical, review approved.
