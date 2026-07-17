@@ -553,18 +553,20 @@ impl ImportDialogState {
 
     fn show_side_combo(&mut self, ui: &mut egui::Ui, view: CanonicalView) {
         let current = self.settings.side_modes.get(view);
-        let opposite_captures = self.settings.side_modes.get(view.opposite()) == SideMode::Capture;
+        let legal: Vec<SideMode> = self.settings.side_modes.legal_modes(view).collect();
         ui.label(view_label(view));
         egui::ComboBox::from_id_salt(("import-side-mode", view))
             .selected_text(side_mode_label(current))
             .show_ui(ui, |ui| {
-                for mode in available_side_modes(opposite_captures) {
+                for mode in legal {
                     if ui
                         .selectable_label(current == mode, side_mode_label(mode))
                         .clicked()
                     {
                         self.settings.side_modes.set(view, mode).expect(
-                            "the UI only offers modes legal for the current opposite-side state",
+                            "legal_modes and set share one predicate \
+                             (SideModes::from_opposite_allowed), so every mode this loop \
+                             offers is accepted by construction",
                         );
                     }
                 }
@@ -617,18 +619,6 @@ fn mesh_raster_image(raster: &mesh_import::Raster) -> egui::ColorImage {
             })
             .collect(),
     )
-}
-
-/// `Capture` and `Off` are always legal; the `FromOpposite*` modes require
-/// the opposite side to already be `Capture` (`SideModes::set` enforces the
-/// same rule, so this must stay in sync with it).
-fn available_side_modes(opposite_captures: bool) -> Vec<SideMode> {
-    let mut modes = vec![SideMode::Capture, SideMode::Off];
-    if opposite_captures {
-        modes.push(SideMode::FromOpposite);
-        modes.push(SideMode::FromOppositeMirrored);
-    }
-    modes
 }
 
 fn side_mode_label(mode: SideMode) -> &'static str {
@@ -1280,23 +1270,6 @@ mod tests {
                 "preset button {index} must apply {preset:?}"
             );
         }
-    }
-
-    #[test]
-    fn available_side_modes_offers_from_opposite_variants_only_when_the_opposite_captures() {
-        assert_eq!(
-            available_side_modes(false),
-            vec![SideMode::Capture, SideMode::Off]
-        );
-        assert_eq!(
-            available_side_modes(true),
-            vec![
-                SideMode::Capture,
-                SideMode::Off,
-                SideMode::FromOpposite,
-                SideMode::FromOppositeMirrored,
-            ]
-        );
     }
 
     #[test]

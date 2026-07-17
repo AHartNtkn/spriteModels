@@ -1,5 +1,5 @@
 use mesh_import::{
-    ImportError, ImportSettings, Material, SideMode, Triangle, TriangleScene, convert,
+    ALL_VIEWS, ImportError, ImportSettings, Material, SideMode, Triangle, TriangleScene, convert,
     derived_bounds,
 };
 use relief_core::CanonicalView;
@@ -243,4 +243,49 @@ fn side_mode_constraints_are_enforced() {
         convert(&cube(), &config),
         Err(ImportError::NoCaptureSides)
     ));
+}
+
+#[test]
+fn legal_modes_matches_what_set_accepts() {
+    // A few representative states: all-Capture default, one side turned
+    // Off, and one side already wired to FromOpposite.
+    let states = [
+        mesh_import::SideModes::default(),
+        {
+            let mut modes = mesh_import::SideModes::default();
+            modes
+                .set(CanonicalView::Front, SideMode::Off)
+                .expect("legal");
+            modes
+        },
+        {
+            let mut modes = mesh_import::SideModes::default();
+            modes
+                .set(CanonicalView::Back, SideMode::FromOpposite)
+                .expect("legal");
+            modes
+        },
+    ];
+    let all_modes = [
+        SideMode::Capture,
+        SideMode::FromOpposite,
+        SideMode::FromOppositeMirrored,
+        SideMode::Off,
+    ];
+
+    for state in states {
+        for view in ALL_VIEWS {
+            let legal: Vec<SideMode> = state.legal_modes(view).collect();
+            for mode in all_modes {
+                let mut candidate = state;
+                let accepted = candidate.set(view, mode).is_ok();
+                assert_eq!(
+                    legal.contains(&mode),
+                    accepted,
+                    "legal_modes({view:?}) disagreed with set({view:?}, {mode:?}) \
+                     on state {state:?}"
+                );
+            }
+        }
+    }
 }

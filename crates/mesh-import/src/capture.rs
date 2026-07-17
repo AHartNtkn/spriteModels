@@ -37,6 +37,13 @@ impl SideModes {
         self.modes[view.rank() as usize]
     }
 
+    /// Whether `view` may be set to `FromOpposite`/`FromOppositeMirrored`
+    /// in the current state. The single predicate `set` enforces and
+    /// `legal_modes` queries, so the two can never drift apart.
+    fn allows_from_opposite(&self, view: CanonicalView) -> bool {
+        self.get(view.opposite()) == SideMode::Capture
+    }
+
     /// Sets one side's mode. `FromOpposite*` requires the opposite side to
     /// be `Capture`. Moving a side out of `Capture` resets an opposite that
     /// depended on it to `Off`.
@@ -44,7 +51,7 @@ impl SideModes {
         if matches!(
             mode,
             SideMode::FromOpposite | SideMode::FromOppositeMirrored
-        ) && self.get(view.opposite()) != SideMode::Capture
+        ) && !self.allows_from_opposite(view)
         {
             return Err(ImportError::UnsatisfiedOpposite {
                 side: view,
@@ -61,6 +68,25 @@ impl SideModes {
             self.modes[view.opposite().rank() as usize] = SideMode::Off;
         }
         Ok(())
+    }
+
+    /// The modes `set` would accept for this side in the current state.
+    /// This is the single source of truth the UI queries; `set` remains the
+    /// enforcing mutation.
+    pub fn legal_modes(&self, view: CanonicalView) -> impl Iterator<Item = SideMode> + '_ {
+        [
+            SideMode::Capture,
+            SideMode::FromOpposite,
+            SideMode::FromOppositeMirrored,
+            SideMode::Off,
+        ]
+        .into_iter()
+        .filter(move |mode| {
+            !matches!(
+                mode,
+                SideMode::FromOpposite | SideMode::FromOppositeMirrored
+            ) || self.allows_from_opposite(view)
+        })
     }
 
     pub fn validate(&self) -> Result<(), ImportError> {
