@@ -212,3 +212,12 @@ preparation that is now hoisted, orbit_sweep is apples-to-apples end-to-end):
 | orbit_sweep/globe (8 frames)   | 1.134 s   | 0.594 s   |
 
 Workspace tests green, goldens bit-identical, review approved.
+
+### Task 2 (hot-loop allocations) — commits 9ffa8d7, 3ed2664
+
+Controller-measured: run-to-run noise is ~±10% on this machine. Deltas vs
+Task 1: within noise on render/globe/front; ~7-13% faster on the heavy
+oblique scenes; orbit_sweep/globe ~-10% (0.594 s -> ~0.54 s). Consistent with
+malloc/free's ~5% profile share; the structural value is an allocation-free
+per-pixel loop for later tasks. Workspace tests green, goldens bit-identical,
+review approved (fix: added Bounded capacity panic test).
