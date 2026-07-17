@@ -369,6 +369,9 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
     [v[0] / len, v[1] / len, v[2] / len]
 }
 
+// `raster.rs`'s `triangle_face_normal` deliberately mirrors this edge order
+// so both sites derive the same orientation from the same winding — change
+// them together or ownership's σ classification diverges from shading.
 fn face_normal(p: [[f32; 3]; 3]) -> [f32; 3] {
     let e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
     let e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];

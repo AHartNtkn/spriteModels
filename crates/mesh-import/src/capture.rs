@@ -486,6 +486,10 @@ fn owning_mask(sides: &[CaptureSide], s_idx: usize) -> Vec<bool> {
                 // reachability filter; origin_T lies on T's face plane so
                 // this dot IS d_T(p).
                 let d_t = dot3(rel, t.forward);
+                // No `.max(0)` floor here, unlike pass 1's defensive clamp:
+                // `p` is reconstructed from S's own in-bounds screen/depth
+                // sample, so it lies inside the model box and its distance
+                // to any face plane is non-negative by construction.
                 let relief_t = (d_t * RELIEF_UNITS_PER_PIXEL as f64).round() as i64;
                 if relief_t > t.h_max {
                     continue;
