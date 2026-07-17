@@ -421,3 +421,33 @@ fail by design — replace it with an oracle asserting the new semantics
 (e.g. per-pixel fragment sets equal a straightforward reference that
 enumerates all patches for that pixel), so coverage is preserved without
 freezing the old semantics.
+
+### Task 8 (true per-patch splatting) — pending commit (sandbox denied git commit)
+
+Chart-major, cell-major per-patch traversal on the quadratic surface; the
+whole-ray marcher, grid-crossing merge, containing-cells machinery, and the
+mask-only culling layer are deleted. Closed patch domains + the exact
+min-key depth test replace cross-patch dedup (equal winning keys provably
+imply the same texel and color; the pinhole argument rules out half-open
+domains). Footprints sweep each cell's actual surface band
+([relief_min, relief_max] + derived residual slack) instead of the full
+relief prism — the source of the big win. Output verified IDENTICAL on all
+24 scenarios (pixel diff + unchanged golden hashes): the image-approval gate
+had nothing to adjudicate. New exhaustive oracle (all patches x all pixels,
+4 cameras x 2 sizes) pins footprint completeness. Review approved
+(doc-only findings, fixed in-tree). Bench medians: globe front 2.30 ms
+(regression from 1.69 — the old march was degenerate-cheap on axis-aligned
+views), globe orbit 5.35 ms, globe oblique 5.20 ms, gyroscope front 7.57 ms,
+orbit 13.6 ms, oblique 13.9 ms, orbit_sweep 105 ms.
+
+## Final Results (with Task 8)
+
+| benchmark                      | baseline  | final     | speedup |
+|--------------------------------|-----------|-----------|---------|
+| render/globe/front             | 79.1 ms   | 2.3 ms    | 34x     |
+| render/globe/default_orbit     | 138.1 ms  | 5.4 ms    | 26x     |
+| render/globe/oblique           | 133.4 ms  | 5.2 ms    | 26x     |
+| render/gyroscope/front         | 202.7 ms  | 7.6 ms    | 27x     |
+| render/gyroscope/default_orbit | 277.9 ms  | 13.6 ms   | 20x     |
+| render/gyroscope/oblique       | 282.4 ms  | 13.9 ms   | 20x     |
+| orbit_sweep/globe (8 frames)   | 1.134 s   | 0.105 s   | 11x     |

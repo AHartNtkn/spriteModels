@@ -2,7 +2,6 @@ use num_rational::Ratio;
 use relief_core::{
     Bounds, Chart, DecodedTexel, FrameInverse, ReliefField, ResolvedCharts, SourcePoint,
 };
-use std::cmp::Ordering;
 use thiserror::Error;
 
 use crate::{
@@ -18,13 +17,14 @@ const POLYNOMIAL_EPSILON: f64 = 1.0e-10;
 /// Static upper bound on the clipped ray-parameter range length. The ray
 /// parameter is the inverse solve's *free* source variable itself
 /// (`PreparedInverse` sets `var_slope[free] = 1` and `var_offset[free] = 0`,
-/// and those survive to the f64 coefficients exactly), and `solve_preimages`
-/// clips the parameter range so every source variable — the free one included —
-/// stays inside its box. The clipped range is therefore contained in the free
-/// variable's box: source coordinates span at most 63 (`Bounds::new` rejects
-/// sides outside `1..=63`) and relief spans at most
+/// and those survive to the f64 coefficients exactly), and
+/// [`cell_intersections`] clips the parameter range so every source variable
+/// — the free one included — stays inside the patch's box, itself a sub-box
+/// of the free variable's own box. The clipped range is therefore contained
+/// in the free variable's box: source coordinates span at most 63
+/// (`Bounds::new` rejects sides outside `1..=63`) and relief spans at most
 /// `CanonicalView::maximum_inward_depth = 4 * opposing_axis <= 4 * 63`. Hence
-/// `4 * 63 = 252`, and every root-bearing segment `[start, end]` — a
+/// `4 * 63 = 252`, and every patch's clipped interval `[start, end]` — a
 /// sub-interval of that range — has span at most 252.
 const MAX_PARAMETER_SPAN: f64 = 252.0;
 
@@ -42,18 +42,18 @@ const MAX_PARAMETER_SPAN: f64 = 252.0;
 /// derived, not chosen.
 const MAX_QUANTUM_PROBES: u32 = 34;
 
-/// Upper bound on `|t|` for every ray parameter at which `solve_preimages`
-/// evaluates the root-acceptance box checks. The clipped parameter range is a
-/// sub-interval of `[0, MAX_PARAMETER_SPAN]` (the range is clipped against the
-/// free variable's own box `[0, extent]` with `extent <= 252`, exactly — the
-/// free variable has offset `0.0` and slope `1.0`, so `clip_affine_range`
-/// computes the box bounds themselves). Segment endpoints are boundaries
-/// inside that range; direct partition hits reconstruct `t` inside
-/// `[start, end]`, and bisected roots reconstruct the unit preimage of a
-/// parameter quantum within half a quantum (`2^-25`) of a bracket endpoint
-/// inside `[start, end]`, perturbed by a few ulps of f64 reconstruction noise.
-/// The slack of `1` therefore dominates every excursion outside the clipped
-/// range by more than seven orders of magnitude.
+/// Upper bound on `|t|` for every ray parameter at which
+/// [`cell_intersections`] evaluates the root-acceptance box checks. The
+/// clipped parameter range is a sub-interval of `[0, MAX_PARAMETER_SPAN]`
+/// (the patch box is a sub-box of the free variable's own box `[0, extent]`
+/// with `extent <= 252`, and the free variable has offset `0.0` and slope
+/// `1.0`, so clipping against it yields sub-bounds of the box
+/// itself). Direct partition hits reconstruct `t` inside `[start, end]`, and
+/// bisected roots reconstruct the unit preimage of a parameter quantum within
+/// half a quantum (`2^-25`) of a bracket endpoint inside `[start, end]`,
+/// perturbed by a few ulps of f64 reconstruction noise. The slack of `1`
+/// therefore dominates every excursion outside the clipped range by more than
+/// seven orders of magnitude.
 const MAX_ACCEPTED_PARAMETER: f64 = MAX_PARAMETER_SPAN + 1.0;
 
 /// A fixed-capacity, stack-allocated ordered collection for values whose
@@ -155,21 +155,6 @@ pub enum RenderError {
     FrameBufferTooLarge,
 }
 
-/// A recovered source-cell hit along the inverse line. `parameter` is the ray
-/// parameter quantized to denominator `ROOT_SCALE = 2^24`, stored as the integer
-/// numerator `round(t * 2^24)`; the implicit denominator is shared by every
-/// preimage, so integer comparison of `parameter` is exact rational comparison
-/// and `parameter as f64 / ROOT_SCALE as f64` is bit-identical to converting
-/// the reduced `Ratio::new(parameter, ROOT_SCALE)` to `f64` (both
-/// `|parameter| <= 2^53` and `2^24 <= 2^53`, so both are correctly rounded
-/// conversions of the same value).
-#[derive(Clone, Copy, Debug)]
-struct Preimage {
-    parameter: i64,
-    source_x: u32,
-    source_y: u32,
-}
-
 /// One quadrant patch of a foreground cell: the relief surface values at its
 /// four half-texel corners, each resolved at prepare time as the f64 quotient
 /// `weighted / total` of the exact-rational hat-kernel terms sampled at that
@@ -180,21 +165,40 @@ struct ReliefPatch {
     corners: [f64; 4],
 }
 
+/// One prepared foreground cell: its four quadrant patches plus the exact
+/// range of the cell's surface — the minimum and maximum of the sixteen patch
+/// corner values. The bilinear interpolant of each patch attains its extrema
+/// at corners, so `[relief_min, relief_max]` contains every surface value of
+/// the cell, which is what bounds the relief extent of the cell's swept
+/// screen footprint (see [`relief_residual_slack`]).
+#[derive(Clone, Copy, Debug)]
+struct PreparedCell {
+    patches: [ReliefPatch; 4],
+    relief_min: f64,
+    relief_max: f64,
+}
+
 #[derive(Clone, Debug)]
 struct PreparedRelief {
     width: u32,
     height: u32,
-    cells: Vec<Option<[ReliefPatch; 4]>>,
+    cells: Vec<Option<PreparedCell>>,
+    /// Chart-wide maximum of `relief_max - relief_min` over foreground cells.
+    max_cell_spread: f64,
+    /// Chart-wide maximum of `|corner|` over all patch corners.
+    max_corner_magnitude: f64,
 }
 
 impl PreparedRelief {
     fn new(field: &ReliefField) -> Self {
         let (width, height) = field.dimensions();
         let mut cells = Vec::with_capacity((width * height) as usize);
+        let mut max_cell_spread = 0.0_f64;
+        let mut max_corner_magnitude = 0.0_f64;
         for y in 0..height {
             for x in 0..width {
                 cells.push(field.foreground_cell(x, y).map(|cell| {
-                    std::array::from_fn(|quadrant| {
+                    let patches: [ReliefPatch; 4] = std::array::from_fn(|quadrant| {
                         let right = quadrant % 2 == 1;
                         let bottom = quadrant / 2 == 1;
                         let left = Ratio::new(2 * i64::from(x) + i64::from(right), 2);
@@ -221,7 +225,24 @@ impl PreparedRelief {
                             ratio_to_f64(weighted) / ratio_to_f64(total)
                         });
                         ReliefPatch { corners }
-                    })
+                    });
+                    let mut relief_min = f64::INFINITY;
+                    let mut relief_max = f64::NEG_INFINITY;
+                    for patch in &patches {
+                        for &corner in &patch.corners {
+                            relief_min = relief_min.min(corner);
+                            relief_max = relief_max.max(corner);
+                        }
+                    }
+                    max_cell_spread = max_cell_spread.max(relief_max - relief_min);
+                    max_corner_magnitude = max_corner_magnitude
+                        .max(relief_min.abs())
+                        .max(relief_max.abs());
+                    PreparedCell {
+                        patches,
+                        relief_min,
+                        relief_max,
+                    }
                 }));
             }
         }
@@ -229,6 +250,8 @@ impl PreparedRelief {
             width,
             height,
             cells,
+            max_cell_spread,
+            max_corner_magnitude,
         }
     }
 
@@ -236,41 +259,18 @@ impl PreparedRelief {
         self.cells[(y * self.width + x) as usize].is_some()
     }
 
-    /// Bound: each axis independently matches either exactly one quadrant
-    /// half (the local coordinate is strictly on one side of the axis'
-    /// midline) or exactly two (the local coordinate is within
-    /// `COORDINATE_EPSILON` of the shared midline, touching both halves).
-    /// The horizontal and vertical matches combine multiplicatively (every
-    /// pair is emitted), so at most 2 * 2 = 4 quadrants are ever produced.
-    fn quadrants_at(&self, source_x: u32, source_y: u32, x: f64, y: f64) -> Bounded<usize, 4> {
-        let local_x = (x - f64::from(source_x)).clamp(0.0, 1.0);
-        let local_y = (y - f64::from(source_y)).clamp(0.0, 1.0);
-        let horizontal: &[usize] = if (local_x - 0.5).abs() <= COORDINATE_EPSILON {
-            &[0, 1]
-        } else if local_x < 0.5 {
-            &[0]
-        } else {
-            &[1]
-        };
-        let vertical: &[usize] = if (local_y - 0.5).abs() <= COORDINATE_EPSILON {
-            &[0, 1]
-        } else if local_y < 0.5 {
-            &[0]
-        } else {
-            &[1]
-        };
-        let mut quadrants = Bounded::new();
-        for bottom in vertical {
-            for right in horizontal {
-                quadrants.push(right + 2 * bottom);
-            }
-        }
-        quadrants
+    /// The exact range of the cell's surface values: min and max over the
+    /// sixteen patch corners (see [`PreparedCell`]).
+    fn relief_bounds(&self, x: u32, y: u32) -> (f64, f64) {
+        let cell = self.cells[(y * self.width + x) as usize]
+            .expect("only foreground cells reach analytic evaluation");
+        (cell.relief_min, cell.relief_max)
     }
 
     fn patch_corners(&self, source_x: u32, source_y: u32, quadrant: usize) -> [f64; 4] {
         self.cells[(source_y * self.width + source_x) as usize]
-            .expect("only foreground cells reach analytic evaluation")[quadrant]
+            .expect("only foreground cells reach analytic evaluation")
+            .patches[quadrant]
             .corners
     }
 
@@ -347,22 +347,9 @@ impl PreparedModel {
     }
 }
 
-/// Scratch buffers reused across every pixel x chart segment inside a single
-/// `render_model` call. `boundaries` and `preimages` are unbounded in the
-/// worst case (their length depends on chart width/height, not a small
-/// constant), so they remain heap `Vec`s rather than `Bounded` arrays — but
-/// allocated once per `render_model` call and only ever `.clear()`ed, a
-/// `Vec`'s backing storage stops reallocating once it reaches its
-/// steady-state capacity, unlike a fresh `Vec::new()` per pixel x chart x
-/// segment.
-#[derive(Default)]
-struct RenderScratch {
-    boundaries: Vec<f64>,
-    preimages: Vec<Preimage>,
-}
-
-/// Per-source-variable upper bound on the absolute error between the f64 line
-/// evaluation `offset + slope * t` performed by `solve_preimages` and the
+/// Frame-wide line magnitude facts, headline among them the per-source-variable
+/// upper bound (`deltas`) on the absolute error between the f64 line
+/// evaluation `offset + slope * t` performed by [`cell_intersections`] and the
 /// exact rational line value at the same `t`, over every pixel of the frame
 /// and every parameter the solver can test (`|t| <= MAX_ACCEPTED_PARAMETER`).
 ///
@@ -380,7 +367,11 @@ struct RenderScratch {
 /// are affine in the pixel coordinates, so the frame-wide maximum of
 /// `|offset|` is attained at a corner of the pixel rectangle; evaluating the
 /// four corners covers every pixel.
-fn source_evaluation_error_bounds(inverse: &FrameInverse, width: u32, height: u32) -> [f64; 3] {
+fn source_evaluation_error_bounds(
+    inverse: &FrameInverse,
+    width: u32,
+    height: u32,
+) -> FrameLineBounds {
     let corners = [
         (0, 0),
         (width - 1, 0),
@@ -396,29 +387,136 @@ fn source_evaluation_error_bounds(inverse: &FrameInverse, width: u32, height: u3
             slope[variable] = coefficients[variable][1].abs();
         }
     }
-    std::array::from_fn(|variable| {
-        8.0 * f64::EPSILON * (offset_bound[variable] + slope[variable] * MAX_ACCEPTED_PARAMETER)
-    })
+    FrameLineBounds {
+        deltas: std::array::from_fn(|variable| {
+            8.0 * f64::EPSILON * (offset_bound[variable] + slope[variable] * MAX_ACCEPTED_PARAMETER)
+        }),
+        offset_bounds: offset_bound,
+        slope_bounds: slope,
+    }
+}
+
+/// Frame-wide magnitude facts about a chart's inverse lines, all maximized
+/// over the pixel rectangle (offsets are affine in the pixel coordinates, so
+/// the four corners cover every pixel; slopes are frame constants).
+struct FrameLineBounds {
+    /// The [`source_evaluation_error_bounds`] deltas per source variable.
+    deltas: [f64; 3],
+    /// Upper bounds on `|offset|` per source variable.
+    offset_bounds: [f64; 3],
+    /// `|slope|` per source variable.
+    slope_bounds: [f64; 3],
+}
+
+/// Upper bound `R` on how far outside a cell's surface range
+/// `[relief_min, relief_max]` the f64 relief-line value of an *accepted* root
+/// can lie — the quantity that lets the forward splat sweep each cell's
+/// footprint over its actual surface band instead of the chart's whole
+/// `[0, maximum_relief]` depth prism.
+///
+/// Every parameter `t` that [`cell_intersections`] accepts came out of
+/// [`roots_in_unit_interval`] for some patch quadratic `P` (assembled from
+/// the f64 line coefficients and the patch's f64 corners) over a clipped
+/// interval inside the patch's box, in one of these ways, with
+/// `tol = POLYNOMIAL_EPSILON * scale <= POLYNOMIAL_EPSILON * K`:
+///
+/// - a direct tolerance hit: `|P(s)| <= tol`;
+/// - a truncated-to-constant polynomial: `|P(s)| <= 3 * tol` everywhere (the
+///   constant term passed the tolerance test and the two truncated
+///   coefficients were each within `tol` of zero);
+/// - a sign-verified quantum of a true root `s*` of `P`: `P(s*) = 0` and the
+///   accepted parameter is within `2^-24` of `t(s*)` (the proven quantum is
+///   the correct rounding of the root's parameter — within a half quantum,
+///   `2^-25` — and the unit round trip perturbs it by ulps; `2^-24` covers
+///   both, see [`correctly_rounded_root`]).
+///
+/// Writing `g(t) = relief_line(t) - B(u(t), v(t))` for the *exactly
+/// evaluated* residual of the f64 line against the patch bilinear `B`, the
+/// accepted parameter therefore satisfies
+/// `|g(t)| <= 3*tol + A + G * 2^-24`, where `A` bounds the f64 assembly and
+/// Horner evaluation error `|P - g|` on the unit interval and `G` bounds
+/// `|dg/dt|`. Acceptance further pins `(x, y)(t)` inside the patch box
+/// inflated by `COORDINATE_EPSILON`, so `(u, v)` lie within `4 *
+/// COORDINATE_EPSILON` outside `[0, 1]^2`; the bilinear's basis weights still
+/// sum to exactly 1 there, with total negative mass at most `~8 *
+/// COORDINATE_EPSILON`, so `B` lies within `E = 32 * S * COORDINATE_EPSILON`
+/// of the corner range (a generous cover). Hence the accepted root's f64
+/// relief-line value lies in `[relief_min - R, relief_max + R]` with
+/// `R = 3*tol + A + G * 2^-24 + E`.
+///
+/// The magnitude bounds, with `S` the chart's largest cell surface spread
+/// (`|gu|, |gv| <= S`, `|cross| <= 2S` for every patch), `C` the largest
+/// corner magnitude, `T = MAX_ACCEPTED_PARAMETER`, `sx, sy, sr` the absolute
+/// line slopes and `Or` the frame-wide `|relief offset|` bound, and using
+/// `|u0|, |v0| <= 2` (the clipped interval starts inside the patch slab, so
+/// they lie within noise of `[0, 1]`) and `|du|, |dv| <= 2 * sx * T,
+/// 2 * sy * T`:
+///
+/// - `|c0| <= Or + sr*T + C + 12*S =: K0`
+/// - `|c1| <= sr*T + 10*S*T*(sx + sy) =: K1`
+/// - `|c2| <= 8*S*sx*sy*T^2 =: K2`, `K = max(1, K0, K1, K2)`
+/// - `A <= 64 * f64::EPSILON * K`: the assembly performs at most ~20
+///   correctly rounded operations on intermediates of magnitude at most
+///   `4*K` and the Horner evaluation 3 more, giving `<= 46 * EPSILON * K`;
+///   the factor 64 leaves spare that dominates the underestimate of the `K`s
+///   by their computed f64 images and the roundings of this expression
+///   itself.
+/// - `G <= sr + 10*S*(sx + sy) + 16*S*sx*sy*T` (`|dP/dt| = |c1 + 2*c2*s| /
+///   span` with the `c1`, `c2` bounds above, whose span factors cancel).
+///
+/// `R` also absorbs (with orders of magnitude to spare, via the `3*tol >=
+/// 3e-10 * C` term against `~2e-16 * C`) the single-rounding gap between the
+/// f64 corner values defining `relief_min/relief_max` and their exact
+/// rational counterparts, so sweeping the *exact* corner range plus `R` is
+/// covered as well. Every term errs toward a larger `R`, i.e. toward
+/// enumerating more candidate pixels — never fewer.
+fn relief_residual_slack(bounds: &FrameLineBounds, relief: &PreparedRelief) -> f64 {
+    let spread = relief.max_cell_spread;
+    let corner = relief.max_corner_magnitude;
+    let [sx, sy, sr] = bounds.slope_bounds;
+    let relief_offset = bounds.offset_bounds[2];
+    let t = MAX_ACCEPTED_PARAMETER;
+    let k0 = relief_offset + sr * t + corner + 12.0 * spread;
+    let k1 = sr * t + 10.0 * spread * t * (sx + sy);
+    let k2 = 8.0 * spread * sx * sy * t * t;
+    let k = 1.0_f64.max(k0).max(k1).max(k2);
+    let tolerance = POLYNOMIAL_EPSILON * k;
+    let assembly = 64.0 * f64::EPSILON * k;
+    let derivative = sr + 10.0 * spread * (sx + sy) + 16.0 * spread * sx * sy * t;
+    let drift = derivative * (0.5 / ROOT_SCALE as f64) * 2.0;
+    let extrapolation = 32.0 * spread * COORDINATE_EPSILON;
+    3.0 * tolerance + assembly + drift + extrapolation
 }
 
 /// One screen axis of the forward splat: converts a foreground cell's swept
-/// source box into a conservative range of pixel indices on this axis.
+/// source box — the cell's unit texel crossed with the cell's own surface
+/// band `[relief_min, relief_max]` widened by `relief_residual_slack`, the
+/// union of the swept boxes of its four quadrant patches — into a
+/// conservative range of pixel indices on this axis.
 ///
 /// The exact screen coordinate of a swept source point `(x, y, relief)` is
 /// the affine map `coefficients[0]*x + coefficients[1]*y +
 /// coefficients[2]*relief + constant`, so the image of an axis-aligned box is
 /// the interval centered on the image of the box center with radius the sum
 /// of `|coefficient| * half_extent` — the exact axis-aligned bound of the
-/// zonotope image. A pixel `p` can receive a committed fragment from a cell
-/// only when its exact screen coordinate `p + origin` lies inside the image
-/// of the cell's *inflated* swept box (see `render_model` for the inflation
-/// argument), so the integer range `[ceil(low), floor(high)]`, widened by the
-/// derived f64-noise `margin`, covers every committing pixel.
+/// zonotope image. A pixel `p` can receive a committed fragment from one of
+/// the cell's patches only when its exact screen coordinate `p + origin` lies
+/// inside the image of that patch's *inflated* swept box (see `render_model`
+/// for the inflation argument), which is contained in the image of the
+/// cell's inflated swept box, so the integer range `[ceil(low), floor(high)]`,
+/// widened by the derived f64-noise `margin`, covers every committing pixel
+/// of all four patches. The cell-level range is deliberate: the four patch
+/// footprints differ by half a texel per source axis but share the full
+/// relief sweep, which dominates them, so enumerating them separately would
+/// multiply the candidate set roughly fourfold while the per-patch clip in
+/// `cell_intersections` already rejects, exactly, every candidate outside a
+/// given patch's own footprint.
 #[derive(Clone, Copy, Debug)]
 struct SplatAxis {
     coefficients: [f64; 3],
     constant: f64,
-    radius: f64,
+    radius_xy: f64,
+    relief_pad: f64,
     origin: f64,
     margin: i64,
 }
@@ -429,30 +527,42 @@ impl SplatAxis {
     /// (`sx0`/`sy0`), `deltas` are the [`source_evaluation_error_bounds`],
     /// and `field` supplies the source extents.
     ///
-    /// The swept box of cell `(cx, cy)` is inflated by
-    /// `COORDINATE_EPSILON + delta` per source variable: an accepted root's
-    /// f64 coordinates pass the box check with `COORDINATE_EPSILON` slack,
-    /// and the exact line point at the same parameter is within `delta` of
-    /// those f64 coordinates, so the exact point lies in the inflated box.
+    /// The swept box of a foreground cell — half-extents `1/2` per source
+    /// axis, and per cell `spread / 2 + relief_residual_slack` around the
+    /// midpoint of the cell's surface range in relief (see
+    /// [`relief_residual_slack`] for why every accepted root's relief lies in
+    /// that band) — is inflated by `COORDINATE_EPSILON + delta` per source
+    /// variable: an accepted root's f64 source coordinates pass its patch's
+    /// box check with `COORDINATE_EPSILON` slack — and the patch box is a
+    /// sub-box of the cell box — and the exact line point at the same
+    /// parameter is within `delta` of the f64 values, so the exact point lies
+    /// in the inflated box. The x/y part of the zonotope radius is
+    /// frame-constant and precomputed; the relief part is assembled per cell
+    /// in [`SplatAxis::pixel_range`] from the cell's own half-extent.
     ///
     /// `margin` bounds the f64 rounding noise of the whole
     /// [`SplatAxis::pixel_range`] chain, in pixels. Every intermediate value
-    /// in that chain (center terms, radius terms, and their sums with the
-    /// origin) has exact magnitude at most `magnitude` below, and the chain
-    /// performs at most 26 correctly rounded operations/conversions (5
-    /// rational-to-f64 conversions, 7 half-extent operations, 5 radius
-    /// operations, and 9 center/interval operations per endpoint), each
-    /// contributing at most `(f64::EPSILON / 2) * magnitude * (1 + tiny)` of
-    /// absolute error — at most `13 * f64::EPSILON * magnitude` in total. The
-    /// factor `32` leaves a spare factor of ~2.4, which dominates the
-    /// underestimate of
+    /// in that chain (center terms, radius terms, the per-cell relief
+    /// half-extent assembly, and the sums with the origin) has exact
+    /// magnitude at most `magnitude` below, and the chain performs at most
+    /// 33 correctly rounded operations/conversions (5 rational-to-f64
+    /// conversions, 7 half-extent operations, 5 radius operations, 5 per-cell
+    /// relief mid/half operations, and 11 center/radius/interval operations
+    /// per endpoint — the cell centers themselves are exact f64 values: an
+    /// integer `<= 63` plus a half), each contributing at most
+    /// `(f64::EPSILON / 2) * magnitude * (1 + tiny)` of absolute error — at
+    /// most `17 * f64::EPSILON * magnitude` in total. The factor `32` leaves
+    /// a spare factor of ~1.9, which dominates the underestimate of
     /// `magnitude` by its own f64 evaluation and the roundings of the margin
-    /// expression itself; the trailing `+ 1` covers the integer
-    /// `ceil`/`floor` boundary semantics (a computed endpoint within the
-    /// noise bound of an exact integer boundary can shift the rounded index
-    /// by one). Widening only ever *adds* certainly-safe candidate pixels
-    /// (each still runs the full unchanged solve), so every step of this
-    /// bound errs in the conservative direction.
+    /// expression itself. The computed interval endpoint therefore lies
+    /// within `eta = 32 * EPSILON * magnitude < 1` of the exact one, and
+    /// `ceil(exact) >= ceil(computed - eta) >= ceil(computed) - ceil(eta)`
+    /// (from `ceil(a) <= ceil(a - b) + ceil(b)`), so widening the integer
+    /// range by `margin = ceil(eta)` covers the exact range — including the
+    /// case where the noise crosses an integer boundary, which is exactly
+    /// what the `ceil` accounts for. Widening only ever *adds* certainly-safe
+    /// candidate pixels (each still runs the full unchanged solve), so every
+    /// step of this bound errs in the conservative direction.
     fn new(
         screen_row: [Ratio<i64>; 3],
         parallax: Ratio<i64>,
@@ -468,97 +578,51 @@ impl SplatAxis {
         ];
         let constant = ratio_to_f64(screen_row[2]);
         let origin = ratio_to_f64(origin);
-        let half_extents = [
-            0.5 + COORDINATE_EPSILON + deltas[0],
-            0.5 + COORDINATE_EPSILON + deltas[1],
-            0.5 * maximum_relief + COORDINATE_EPSILON + deltas[2],
-        ];
-        let radius = coefficients[0].abs() * half_extents[0]
-            + coefficients[1].abs() * half_extents[1]
-            + coefficients[2].abs() * half_extents[2];
+        let radius_xy = coefficients[0].abs() * (0.5 + COORDINATE_EPSILON + deltas[0])
+            + coefficients[1].abs() * (0.5 + COORDINATE_EPSILON + deltas[1]);
+        let relief_pad = COORDINATE_EPSILON + deltas[2];
+        // The magnitude bound uses the chart-wide relief cap: every per-cell
+        // relief midpoint and half-extent is bounded by `maximum_relief`
+        // plus the (tiny) residual slack, which `+ 1.0` dominates.
         let magnitude = coefficients[0].abs() * (f64::from(field.width) + 1.0 + deltas[0])
             + coefficients[1].abs() * (f64::from(field.height) + 1.0 + deltas[1])
             + coefficients[2].abs() * (maximum_relief + 1.0 + deltas[2])
             + constant.abs()
             + origin.abs()
             + 1.0;
-        let margin = (32.0 * f64::EPSILON * magnitude).ceil() as i64 + 1;
+        let margin = (32.0 * f64::EPSILON * magnitude).ceil() as i64;
         Self {
             coefficients,
             constant,
-            radius,
+            radius_xy,
+            relief_pad,
             origin,
             margin,
         }
     }
 
-    /// The conservative pixel-index range cell `(cell_x, cell_y)`'s inflated
-    /// swept box can touch on this axis, clamped to `[0, extent)`; `None`
-    /// when the clamped range is empty.
+    /// The conservative pixel-index range the inflated swept box of the cell
+    /// centered at `(center_x, center_y, relief_mid)`, with relief
+    /// half-extent `relief_half` (the cell's surface half-spread plus the
+    /// chart's [`relief_residual_slack`]), can touch on this axis, clamped to
+    /// `[0, extent)`; `None` when the clamped range is empty.
     fn pixel_range(
         &self,
-        cell_x: f64,
-        cell_y: f64,
-        middle_relief: f64,
+        center_x: f64,
+        center_y: f64,
+        relief_mid: f64,
+        relief_half: f64,
         extent: u32,
     ) -> Option<(u32, u32)> {
-        let center = self.coefficients[0] * (cell_x + 0.5)
-            + self.coefficients[1] * (cell_y + 0.5)
-            + self.coefficients[2] * middle_relief
+        let center = self.coefficients[0] * center_x
+            + self.coefficients[1] * center_y
+            + self.coefficients[2] * relief_mid
             + self.constant;
-        let first = ((center - self.radius - self.origin).ceil() as i64 - self.margin).max(0);
-        let last = ((center + self.radius - self.origin).floor() as i64 + self.margin)
+        let radius = self.radius_xy + self.coefficients[2].abs() * (relief_half + self.relief_pad);
+        let first = ((center - radius - self.origin).ceil() as i64 - self.margin).max(0);
+        let last = ((center + radius - self.origin).floor() as i64 + self.margin)
             .min(i64::from(extent) - 1);
         (first <= last).then_some((first as u32, last as u32))
-    }
-}
-
-/// A per-chart bitmask over the frame's pixels: the union of the conservative
-/// pixel rectangles of the chart's foreground cells. Guarantees each
-/// (pixel, chart) pair is solved at most once even though neighboring cells'
-/// rectangles overlap heavily. Reused across charts via [`PixelMask::reset`].
-struct PixelMask {
-    words_per_row: usize,
-    words: Vec<u64>,
-}
-
-impl PixelMask {
-    fn new() -> Self {
-        Self {
-            words_per_row: 0,
-            words: Vec::new(),
-        }
-    }
-
-    fn reset(&mut self, width: u32, height: u32) {
-        self.words_per_row = (width as usize).div_ceil(64);
-        self.words.clear();
-        self.words.resize(self.words_per_row * height as usize, 0);
-    }
-
-    /// Marks pixels `first_x..=last_x` of row `y`. Callers guarantee
-    /// `first_x <= last_x < width` and `y < height` (the [`SplatAxis`] ranges
-    /// are clamped to the frame).
-    fn mark_row(&mut self, y: u32, first_x: u32, last_x: u32) {
-        let row = y as usize * self.words_per_row;
-        let first_word = first_x as usize / 64;
-        let last_word = last_x as usize / 64;
-        let first_mask = !0_u64 << (first_x as usize % 64);
-        let last_mask = !0_u64 >> (63 - last_x as usize % 64);
-        if first_word == last_word {
-            self.words[row + first_word] |= first_mask & last_mask;
-        } else {
-            self.words[row + first_word] |= first_mask;
-            for word in &mut self.words[row + first_word + 1..row + last_word] {
-                *word = !0;
-            }
-            self.words[row + last_word] |= last_mask;
-        }
-    }
-
-    fn row(&self, y: u32) -> &[u64] {
-        let start = y as usize * self.words_per_row;
-        &self.words[start..start + self.words_per_row]
     }
 }
 
@@ -572,21 +636,22 @@ struct FrameChart<'a> {
     facing: FacingCoefficients,
     maximum_relief: f64,
     splat: [SplatAxis; 2],
+    /// The chart's [`relief_residual_slack`]: added to every cell's surface
+    /// half-spread when sweeping its footprint.
+    relief_slack: f64,
 }
 
-pub fn render_model(
-    prepared: &PreparedModel,
+/// Builds the per-chart frame state for one `(model, request)` pair: the
+/// frame origin, the fixed-point inverse line factoring, the facing
+/// coefficients, and the forward-splat axes. Shared by [`render_model`] and
+/// the exhaustive per-pixel test oracle so both traversals feed identical
+/// inputs into the identical per-patch solve — the only difference between
+/// them is which (patch, pixel) pairs they visit.
+fn prepare_frame_charts<'a>(
+    prepared: &'a PreparedModel,
     request: &RenderRequest,
-) -> Result<FrameBuffer, RenderError> {
+) -> Vec<FrameChart<'a>> {
     let bounds = prepared.charts.bounds();
-    (request.width as usize)
-        .checked_mul(request.height as usize)
-        .ok_or(RenderError::FrameBufferTooLarge)?;
-    let mut frame = FrameBuffer::transparent(request.width, request.height);
-    if request.width == 0 || request.height == 0 {
-        return Ok(frame);
-    }
-
     let Some(TargetExtents {
         min_x,
         max_x,
@@ -594,7 +659,7 @@ pub fn render_model(
         max_y,
     }) = projected_extents(bounds, &prepared.charts, &request.target)
     else {
-        return Ok(frame);
+        return Vec::new();
     };
     let offset_x = Ratio::new(i64::from(request.width), 2) - (min_x + max_x) / 2;
     let offset_y = Ratio::new(i64::from(request.height), 2) - (min_y + max_y) / 2;
@@ -607,7 +672,7 @@ pub fn render_model(
     // would have for every pixel (the singular condition depends only on the
     // matrix, not the screen coordinates), so a chart that fails it contributes
     // nothing to any pixel and is dropped from the frame entirely.
-    let frame_charts: Vec<FrameChart> = prepared
+    prepared
         .charts
         .charts()
         .iter()
@@ -618,7 +683,9 @@ pub fn render_model(
                 warp.prepare_inverse()?
                     .inverse_frame(sx0, sy0, request.width, request.height);
             let facing = request.target.facing_coefficients(chart.view(), bounds);
-            let deltas = source_evaluation_error_bounds(&inverse, request.width, request.height);
+            let line_bounds =
+                source_evaluation_error_bounds(&inverse, request.width, request.height);
+            let relief_slack = relief_residual_slack(&line_bounds, &entry.relief);
             let screen = warp.screen();
             let parallax = warp.parallax();
             let splat = [
@@ -626,7 +693,7 @@ pub fn render_model(
                     screen[0],
                     parallax[0],
                     sx0,
-                    deltas,
+                    line_bounds.deltas,
                     entry.maximum_relief,
                     &entry.relief,
                 ),
@@ -634,7 +701,7 @@ pub fn render_model(
                     screen[1],
                     parallax[1],
                     sy0,
-                    deltas,
+                    line_bounds.deltas,
                     entry.maximum_relief,
                     &entry.relief,
                 ),
@@ -646,104 +713,224 @@ pub fn render_model(
                 facing,
                 maximum_relief: entry.maximum_relief,
                 splat,
+                relief_slack,
             })
         })
-        .collect();
+        .collect()
+}
 
-    let mut scratch = RenderScratch::default();
-    let mut mask = PixelMask::new();
+pub fn render_model(
+    prepared: &PreparedModel,
+    request: &RenderRequest,
+) -> Result<FrameBuffer, RenderError> {
+    (request.width as usize)
+        .checked_mul(request.height as usize)
+        .ok_or(RenderError::FrameBufferTooLarge)?;
+    let mut frame = FrameBuffer::transparent(request.width, request.height);
+    if request.width == 0 || request.height == 0 {
+        return Ok(frame);
+    }
+    let frame_charts = prepare_frame_charts(prepared, request);
 
-    // Forward splat: for each chart, mark the conservative screen footprint
-    // of every foreground cell's swept box, then run the unchanged per-pixel
-    // inverse solve only on the marked pixels.
+    // Per-patch forward splat: for each chart, for each foreground cell,
+    // enumerate the pixels of the cell's conservative swept-box screen
+    // footprint — the union of its four quadrant patches' footprints (see
+    // `SplatAxis` for why the union is enumerated once) — and intersect each
+    // pixel's inverse line against each of the four patches individually
+    // (see `cell_intersections` for the per-patch semantics).
     //
-    // Exactness: a fragment is committed for (pixel, chart) only when a root
-    // passes `solve_preimages`' acceptance box check, which pins the root's
-    // f64 source coordinates inside a foreground cell's box inflated by
+    // Coverage: a fragment is committed for (pixel, patch) only when a root
+    // passes `cell_intersections`' acceptance box check, which pins the
+    // root's f64 source coordinates inside the patch's box inflated by
     // `COORDINATE_EPSILON` and its f64 relief inside `[0, maximum_relief]`
-    // inflated likewise. The exact line point at that parameter is within the
+    // inflated likewise, at a parameter `|t| <= MAX_ACCEPTED_PARAMETER`. The
+    // exact line point at that parameter is within the
     // `source_evaluation_error_bounds` of those f64 values, and the exact
     // line point maps forward to exactly the pixel's screen coordinate (the
-    // inverse line is the exact solution set of the warp equations). The
-    // pixel's screen coordinate therefore lies inside the zonotope bbox of
-    // the inflated swept box, which the `SplatAxis` ranges cover
-    // conservatively — so every pixel outside the mask provably commits
-    // nothing, and every pixel inside runs the identical whole-ray solve the
-    // exhaustive scan ran, producing identical fragments. Chart-major commit
-    // order cannot change the frame: `commit_fragment` keeps the strictly
-    // smallest `FragmentKey` and equal keys imply the same chart (ranks are
-    // unique per resolved chart) and the same source texel, hence the same
-    // color.
+    // inverse line is the exact rational solution set of the warp equations).
+    // The pixel's screen coordinate therefore lies inside the zonotope bbox
+    // of the patch's inflated swept box, which is contained in its cell's,
+    // which the `SplatAxis` ranges cover conservatively — so a pixel outside
+    // the cell's footprint provably commits nothing for any of the cell's
+    // patches, and enumerating the footprint visits every pixel the cell's
+    // patches can color (asserted against the exhaustive per-pixel oracle in
+    // the tests).
+    //
+    // Order independence: `commit_fragment` keeps the unique minimum
+    // `FragmentKey` under an exact total order, so the frame is the pointwise
+    // minimum over the accepted-fragment multiset — independent of the
+    // cell-major visit order, and of a patch pair accepting the same
+    // boundary intersection twice (see `cell_intersections`' attribution
+    // note). Equal keys imply the same chart (ranks are unique per resolved
+    // chart) and the same source texel, hence the same color.
+    let mut scratch = RenderScratch::default();
     for pass in &frame_charts {
-        mask.reset(request.width, request.height);
-        let middle_relief = 0.5 * pass.maximum_relief;
-        for source_y in 0..pass.relief.height {
-            for source_x in 0..pass.relief.width {
-                if !pass.relief.is_foreground(source_x, source_y) {
+        // Pass A: collect one splat job per foreground cell (its footprint
+        // rectangle and texel color) and the union rectangle of all of them.
+        scratch.jobs.clear();
+        let mut union_rect: Option<[u32; 4]> = None;
+        for cell_y in 0..pass.relief.height {
+            for cell_x in 0..pass.relief.width {
+                if !pass.relief.is_foreground(cell_x, cell_y) {
                     continue;
                 }
-                let cell_x = f64::from(source_x);
-                let cell_y = f64::from(source_y);
-                let Some((first_x, last_x)) =
-                    pass.splat[0].pixel_range(cell_x, cell_y, middle_relief, request.width)
+                let Some(DecodedTexel::Relief { rgb, .. }) = pass.chart.texel_at(cell_x, cell_y)
                 else {
+                    unreachable!(
+                        "foreground cells decode to relief texels (ComponentMap::label only \
+                         labels relief texels)"
+                    );
+                };
+                // Cell centers are exact in f64: an integer `<= 63` plus a
+                // half.
+                let center_x = f64::from(cell_x) + 0.5;
+                let center_y = f64::from(cell_y) + 0.5;
+                // The cell's footprint sweeps its own surface band — the
+                // cell's corner range plus the derived residual slack — not
+                // the chart's whole depth prism (see `relief_residual_slack`).
+                let (relief_min, relief_max) = pass.relief.relief_bounds(cell_x, cell_y);
+                let relief_mid = 0.5 * (relief_min + relief_max);
+                let relief_half = 0.5 * (relief_max - relief_min) + pass.relief_slack;
+                let Some((first_x, last_x)) = pass.splat[0].pixel_range(
+                    center_x,
+                    center_y,
+                    relief_mid,
+                    relief_half,
+                    request.width,
+                ) else {
                     continue;
                 };
-                let Some((first_y, last_y)) =
-                    pass.splat[1].pixel_range(cell_x, cell_y, middle_relief, request.height)
-                else {
+                let Some((first_y, last_y)) = pass.splat[1].pixel_range(
+                    center_x,
+                    center_y,
+                    relief_mid,
+                    relief_half,
+                    request.height,
+                ) else {
                     continue;
                 };
-                for y in first_y..=last_y {
-                    mask.mark_row(y, first_x, last_x);
-                }
+                union_rect = Some(match union_rect {
+                    None => [first_x, last_x, first_y, last_y],
+                    Some([ux0, ux1, uy0, uy1]) => [
+                        ux0.min(first_x),
+                        ux1.max(last_x),
+                        uy0.min(first_y),
+                        uy1.max(last_y),
+                    ],
+                });
+                scratch.jobs.push(CellJob {
+                    cell: Cell {
+                        x: cell_x,
+                        y: cell_y,
+                        rgb,
+                    },
+                    first_x,
+                    last_x,
+                    first_y,
+                    last_y,
+                });
+            }
+        }
+        let Some([rect_x0, rect_x1, rect_y0, rect_y1]) = union_rect else {
+            continue;
+        };
+
+        // Fetch every covered pixel's inverse-line coefficients exactly once
+        // per (pixel, chart): the identical `variable_f64` values the solve
+        // would fetch itself, hoisted because each of the many cell
+        // footprints covering a pixel would otherwise refetch them.
+        let rect_width = (rect_x1 - rect_x0 + 1) as usize;
+        scratch.lines.clear();
+        for y in rect_y0..=rect_y1 {
+            for x in rect_x0..=rect_x1 {
+                scratch.lines.push(pass.inverse.variable_f64(x, y));
             }
         }
 
-        for y in 0..request.height {
-            for (word_index, &word) in mask.row(y).iter().enumerate() {
-                let mut bits = word;
-                while bits != 0 {
-                    let x = word_index as u32 * 64 + bits.trailing_zeros();
-                    bits &= bits - 1;
-                    let coefficients = pass.inverse.variable_f64(x, y);
-
-                    solve_preimages(
-                        &mut scratch,
-                        pass.relief,
-                        &coefficients,
-                        pass.facing,
-                        pass.maximum_relief,
-                    );
-                    for preimage in &scratch.preimages {
-                        let Some(DecodedTexel::Relief { rgb, .. }) =
-                            pass.chart.texel_at(preimage.source_x, preimage.source_y)
-                        else {
-                            continue;
-                        };
-                        commit_fragment(
-                            &mut frame,
-                            x,
-                            y,
-                            FragmentKey {
-                                depth: pass.inverse.depth_at(
-                                    x,
-                                    y,
-                                    Ratio::new(preimage.parameter, ROOT_SCALE),
-                                ),
-                                chart_rank: pass.chart.view().rank(),
-                                source_y: preimage.source_y,
-                                source_x: preimage.source_x,
-                            },
-                            rgb,
-                        );
-                    }
+        // Pass B: splat every job's four patches over its footprint pixels.
+        for job in &scratch.jobs {
+            for y in job.first_y..=job.last_y {
+                let row = (y - rect_y0) as usize * rect_width;
+                for x in job.first_x..=job.last_x {
+                    let coefficients = &scratch.lines[row + (x - rect_x0) as usize];
+                    splat_cell_pixel(&mut frame, pass, coefficients, job.cell, x, y);
                 }
             }
         }
     }
 
     Ok(frame)
+}
+
+/// One foreground cell scheduled for splatting, with its conservative
+/// footprint pixel rectangle (`first_x..=last_x` x `first_y..=last_y`,
+/// already clamped to the frame).
+struct CellJob {
+    cell: Cell,
+    first_x: u32,
+    last_x: u32,
+    first_y: u32,
+    last_y: u32,
+}
+
+/// Scratch reused across the charts of one `render_model` call. `jobs` holds
+/// the current chart's cell jobs; `lines` holds, for every pixel of the
+/// union rectangle of the jobs' footprints, the pixel's inverse-line f64
+/// coefficients (`FrameInverse::variable_f64`), row-major from the
+/// rectangle's origin. Both are unbounded (they scale with chart and frame
+/// size), so they stay heap `Vec`s — allocated once and `.clear()`ed per
+/// chart, their backing storage stops reallocating at steady state.
+#[derive(Default)]
+struct RenderScratch {
+    jobs: Vec<CellJob>,
+    lines: Vec<[[f64; 2]; 3]>,
+}
+
+/// One foreground cell being splatted: its source coordinates and texel
+/// color. Its four quadrant patches are solved individually by
+/// [`cell_intersections`].
+#[derive(Clone, Copy)]
+struct Cell {
+    x: u32,
+    y: u32,
+    rgb: [u8; 3],
+}
+
+/// Intersects pixel `(x, y)`'s inverse line — whose f64 coefficients the
+/// caller fetched once per (pixel, chart) via `FrameInverse::variable_f64` —
+/// with each of the four quadrant patches of one foreground cell and commits
+/// every accepted intersection through the exact depth test.
+fn splat_cell_pixel(
+    frame: &mut FrameBuffer,
+    pass: &FrameChart,
+    coefficients: &[[f64; 2]; 3],
+    cell: Cell,
+    x: u32,
+    y: u32,
+) {
+    for parameter in cell_intersections(
+        pass.relief,
+        coefficients,
+        pass.facing,
+        pass.maximum_relief,
+        cell.x,
+        cell.y,
+    ) {
+        commit_fragment(
+            frame,
+            x,
+            y,
+            FragmentKey {
+                depth: pass
+                    .inverse
+                    .depth_at(x, y, Ratio::new(parameter, ROOT_SCALE)),
+                chart_rank: pass.chart.view().rank(),
+                source_y: cell.y,
+                source_x: cell.x,
+            },
+            cell.rgb,
+        );
+    }
 }
 
 fn projected_extents(
@@ -757,149 +944,165 @@ fn projected_extents(
         .map(|_| target.framing_extents(bounds))
 }
 
-/// Fills `scratch.preimages` with the preimages of `line` under `field`,
-/// using `scratch.boundaries` as working storage for the segment-boundary
-/// parameter set. Both buffers are cleared on entry and, on every return
-/// path, hold the complete result for this call (never a stale mix with a
-/// previous call) — the caller reads `scratch.preimages` after this returns.
-fn solve_preimages(
-    scratch: &mut RenderScratch,
+/// Intersects one pixel's inverse line with the four quadrant patches of a
+/// single foreground cell, returning the quantized ray parameters of every
+/// accepted, camera-facing intersection. Capacity 12: each of the 4 patches
+/// contributes at most the 3 candidates [`roots_in_unit_interval`] can return
+/// (bound documented there).
+///
+/// # Per-patch semantics
+///
+/// - **Clipping.** Each patch's ray-parameter interval is the intersection of
+///   the parameter intervals in which the line's source x and y lie in the
+///   patch's half-texel slabs ([`half_slab_ranges`], computed once per cell —
+///   adjacent patches share boundary planes) and its relief lies in the
+///   chart's full range `[0, maximum_relief]` (computed once, shared by all
+///   four patches: the relief planes bound the whole chart). A patch interval
+///   without interior (`end - start <= 0`) means the line meets the patch's
+///   closed box in at most a single parameter: it grazes the box boundary
+///   without passing through the patch, so there is no interval to solve
+///   over. A genuine surface intersection lying exactly on a shared box face
+///   also lies in the neighboring patch's interval, which has interior there;
+///   only a tangential contact at the chart's outer silhouette corner is
+///   dropped — a measure-zero grazing contact with an empty solve interval,
+///   which cannot own an interior fragment.
+/// - **Acceptance.** A root is accepted when its f64 line coordinates lie in
+///   its patch's box inflated by `COORDINATE_EPSILON` per variable — an
+///   f64-noise tolerance scoped to the patch. Rejecting on the exact box would drop genuine
+///   boundary intersections whose computed image lands a few ulps outside;
+///   the inflation errs toward acceptance, and the forward-splat footprint is
+///   inflated to match (see [`SplatAxis`]).
+/// - **Attribution.** Patch domains are *closed*, so an intersection exactly
+///   on a shared patch edge is recovered by both neighbors — deliberately.
+///   Within a chart component the piecewise-bilinear surface is continuous
+///   across patch edges (adjacent patches sample identical corner values at
+///   shared half-texel grid points: the hat-kernel closure sample depends
+///   only on the point and the component), so both patches recover the same
+///   geometric point, each attributing it to its own source texel. Both
+///   fragments commit, and `commit_fragment` keeps the unique minimum
+///   `FragmentKey` under an exact total order — the frame is a well-defined
+///   pointwise minimum over the accepted-fragment multiset, so duplicate
+///   acceptance can never change it non-deterministically, and within-cell
+///   duplicates (same texel) cannot change its color at all. Half-open patch
+///   domains (`[lo, hi)` on interior edges) were rejected from first
+///   principles: the two neighbors reconstruct a shared-edge root through
+///   *different* quadratics, so each would test its own noise-perturbed f64
+///   coordinate against a strict boundary, and both tests can fail (one
+///   computes `hi + ulp`, the other `lo - ulp`), losing the intersection
+///   entirely and turning patch seams into pinholes. Closed domains can only
+///   duplicate, never lose, and the exact minimum absorbs duplicates by
+///   construction — no cross-patch epsilon coordination exists or is needed.
+fn cell_intersections(
     field: &PreparedRelief,
     coefficients: &[[f64; 2]; 3],
     facing: FacingCoefficients,
     maximum_relief: f64,
-) {
-    let RenderScratch {
-        boundaries,
-        preimages,
-    } = scratch;
-    boundaries.clear();
-    preimages.clear();
-
+    cell_x: u32,
+    cell_y: u32,
+) -> Bounded<i64, 12> {
+    let mut intersections = Bounded::new();
     let [
         [x_offset, x_slope],
         [y_offset, y_slope],
         [relief_offset, relief_slope],
     ] = *coefficients;
-    let (width, height) = (field.width, field.height);
-    let mut parameter_range = [f64::NEG_INFINITY, f64::INFINITY];
-    if !clip_affine_range(
-        &mut parameter_range,
-        x_offset,
-        x_slope,
-        0.0,
-        f64::from(width),
-    ) || !clip_affine_range(
-        &mut parameter_range,
-        y_offset,
-        y_slope,
-        0.0,
-        f64::from(height),
-    ) || !clip_affine_range(
-        &mut parameter_range,
-        relief_offset,
-        relief_slope,
-        0.0,
-        maximum_relief,
-    ) {
-        return;
-    }
-    let [range_start, range_end] = parameter_range;
-    if !range_start.is_finite() || !range_end.is_finite() {
-        return;
-    }
+    // Exact in f64: integers `<= 63`.
+    let cell_left = f64::from(cell_x);
+    let cell_top = f64::from(cell_y);
 
-    merge_boundaries(
-        boundaries,
-        range_start,
-        range_end,
-        GridCrossings::new(x_offset, x_slope, width, range_start, range_end),
-        GridCrossings::new(y_offset, y_slope, height, range_start, range_end),
-    );
-    boundaries.dedup_by(|left, right| (*left - *right).abs() <= COORDINATE_EPSILON);
+    // The relief planes bound the whole chart, so their parameter interval is
+    // shared by all four patches. A (near-)constant relief line (slope below
+    // `COORDINATE_EPSILON`: over `|t| <= MAX_ACCEPTED_PARAMETER` such a
+    // coordinate varies below the noise tolerance) constrains no parameter
+    // — it either lies in the
+    // inflated range (no constraint) or misses the chart entirely.
+    let relief_range = if relief_slope.abs() <= COORDINATE_EPSILON {
+        if relief_offset < -COORDINATE_EPSILON
+            || relief_offset > maximum_relief + COORDINATE_EPSILON
+        {
+            return intersections;
+        }
+        [f64::NEG_INFINITY, f64::INFINITY]
+    } else {
+        let first = (0.0 - relief_offset) / relief_slope;
+        let second = (maximum_relief - relief_offset) / relief_slope;
+        [first.min(second), first.max(second)]
+    };
+    let x_slabs = half_slab_ranges(x_offset, x_slope, cell_left);
+    let y_slabs = half_slab_ranges(y_offset, y_slope, cell_top);
 
-    for window in boundaries.windows(2) {
-        let start = window[0];
-        let end = window[1];
-        if end - start <= COORDINATE_EPSILON {
+    for quadrant in 0..4 {
+        let right = quadrant % 2 == 1;
+        let bottom = quadrant / 2 == 1;
+        let Some(x_range) = x_slabs[usize::from(right)] else {
+            continue;
+        };
+        let Some(y_range) = y_slabs[usize::from(bottom)] else {
+            continue;
+        };
+        let start = x_range[0].max(y_range[0]).max(relief_range[0]);
+        let end = x_range[1].min(y_range[1]).min(relief_range[1]);
+        // The free source variable has offset exactly `0.0` and slope exactly
+        // `1.0` (`PreparedInverse`), so at least one of the three axes above
+        // produced finite bounds; a non-finite endpoint would mean that
+        // invariant is broken and must be loud.
+        assert!(
+            start.is_finite() && end.is_finite(),
+            "patch-clipped parameter range [{start}, {end}] is not finite: the free-variable \
+             clip invariant does not hold"
+        );
+        let span = end - start;
+        if span <= 0.0 {
             continue;
         }
-        let middle = (start + end) * 0.5;
-        let middle_x = x_offset + x_slope * middle;
-        let middle_y = y_offset + y_slope * middle;
+        let x_lo = cell_left + if right { 0.5 } else { 0.0 };
+        let y_lo = cell_top + if bottom { 0.5 } else { 0.0 };
+        let x_hi = x_lo + 0.5;
+        let y_hi = y_lo + 0.5;
 
-        for source_y in containing_cells(middle_y, height) {
-            for source_x in containing_cells(middle_x, width) {
-                if !field.is_foreground(source_x, source_y) {
-                    continue;
-                }
-                for quadrant in field.quadrants_at(source_x, source_y, middle_x, middle_y) {
-                    // Residual of the ray against the patch surface in the
-                    // segment's unit variable `s` (`parameter = start + span * s`):
-                    // `g(s) = relief_line(s) - bilinear(u(s), v(s))`. The
-                    // bilinear expands to `c00 + gu*u + gv*v + cross*u*v` and
-                    // `u`, `v` are affine in `s` (the quadrant's unit
-                    // coordinates are the source coordinates scaled by 2 and
-                    // shifted by the quadrant half), so `g` is quadratic in
-                    // `s` with the closed-form coefficients assembled below.
-                    let corners = field.patch_corners(source_x, source_y, quadrant);
-                    let span = end - start;
-                    let right = quadrant % 2 == 1;
-                    let bottom = quadrant / 2 == 1;
-                    let u0 = 2.0 * (x_offset + x_slope * start - f64::from(source_x))
-                        - if right { 1.0 } else { 0.0 };
-                    let v0 = 2.0 * (y_offset + y_slope * start - f64::from(source_y))
-                        - if bottom { 1.0 } else { 0.0 };
-                    let du = 2.0 * x_slope * span;
-                    let dv = 2.0 * y_slope * span;
-                    let gu = corners[1] - corners[0];
-                    let gv = corners[2] - corners[0];
-                    let cross = corners[0] - corners[1] - corners[2] + corners[3];
-                    let polynomial = [
-                        relief_offset + relief_slope * start
-                            - (corners[0] + gu * u0 + gv * v0 + cross * u0 * v0),
-                        relief_slope * span - (gu * du + gv * dv + cross * (u0 * dv + du * v0)),
-                        -(cross * du * dv),
-                    ];
+        // Residual of the ray against the patch surface in the clipped
+        // interval's unit variable `s` (`parameter = start + span * s`):
+        // `g(s) = relief_line(s) - bilinear(u(s), v(s))`. The bilinear
+        // expands to `c00 + gu*u + gv*v + cross*u*v` and `u`, `v` are affine
+        // in `s` (the quadrant's unit coordinates are the source coordinates
+        // scaled by 2 and shifted by the quadrant half), so `g` is quadratic
+        // in `s` with the closed-form coefficients assembled below.
+        let corners = field.patch_corners(cell_x, cell_y, quadrant);
+        let u0 = 2.0 * (x_offset + x_slope * start - cell_left) - if right { 1.0 } else { 0.0 };
+        let v0 = 2.0 * (y_offset + y_slope * start - cell_top) - if bottom { 1.0 } else { 0.0 };
+        let du = 2.0 * x_slope * span;
+        let dv = 2.0 * y_slope * span;
+        let gu = corners[1] - corners[0];
+        let gv = corners[2] - corners[0];
+        let cross = corners[0] - corners[1] - corners[2] + corners[3];
+        let polynomial = [
+            relief_offset + relief_slope * start
+                - (corners[0] + gu * u0 + gv * v0 + cross * u0 * v0),
+            relief_slope * span - (gu * du + gv * dv + cross * (u0 * dv + du * v0)),
+            -(cross * du * dv),
+        ];
 
-                    for unit in roots_in_unit_interval(polynomial, start, end) {
-                        let parameter = start + (end - start) * unit;
-                        let x = x_offset + x_slope * parameter;
-                        let y = y_offset + y_slope * parameter;
-                        let relief = relief_offset + relief_slope * parameter;
-                        if x < f64::from(source_x) - COORDINATE_EPSILON
-                            || x > f64::from(source_x) + 1.0 + COORDINATE_EPSILON
-                            || y < f64::from(source_y) - COORDINATE_EPSILON
-                            || y > f64::from(source_y) + 1.0 + COORDINATE_EPSILON
-                            || relief < -COORDINATE_EPSILON
-                            || relief > maximum_relief + COORDINATE_EPSILON
-                        {
-                            continue;
-                        }
-                        if !branch_faces_camera(field, source_x, source_y, quadrant, facing, x, y) {
-                            continue;
-                        }
-                        preimages.push(Preimage {
-                            parameter: quantized_parameter(parameter),
-                            source_x,
-                            source_y,
-                        });
-                    }
-                }
+        for unit in roots_in_unit_interval(polynomial, start, end) {
+            let parameter = start + span * unit;
+            let x = x_offset + x_slope * parameter;
+            let y = y_offset + y_slope * parameter;
+            let relief = relief_offset + relief_slope * parameter;
+            if x < x_lo - COORDINATE_EPSILON
+                || x > x_hi + COORDINATE_EPSILON
+                || y < y_lo - COORDINATE_EPSILON
+                || y > y_hi + COORDINATE_EPSILON
+                || relief < -COORDINATE_EPSILON
+                || relief > maximum_relief + COORDINATE_EPSILON
+            {
+                continue;
             }
+            if !branch_faces_camera(field, cell_x, cell_y, quadrant, facing, x, y) {
+                continue;
+            }
+            intersections.push(quantized_parameter(parameter));
         }
     }
-
-    preimages.sort_by(|left, right| {
-        (left.source_y, left.source_x)
-            .cmp(&(right.source_y, right.source_x))
-            .then_with(|| left.parameter.cmp(&right.parameter))
-    });
-    preimages.dedup_by(|left, right| {
-        left.source_x == right.source_x
-            && left.source_y == right.source_y
-            && (parameter_f64(left.parameter) - parameter_f64(right.parameter)).abs() <= 1.0e-7
-    });
+    intersections
 }
 
 fn branch_faces_camera(
@@ -942,172 +1145,40 @@ fn branch_faces_camera(
     })
 }
 
-fn clip_affine_range(
-    range: &mut [f64; 2],
-    offset: f64,
-    slope: f64,
-    minimum: f64,
-    maximum: f64,
-) -> bool {
+/// One source axis's contribution to the per-patch parameter clips of a
+/// single (cell, pixel): the closed parameter intervals in which the line's
+/// coordinate on this axis lies inside the axis's two half-texel slabs
+/// (`[lo, lo + 1/2]` and `[lo + 1/2, lo + 1]`, all bounds exact in f64:
+/// integers `<= 63` plus dyadic halves). `None` means the slab is missed
+/// entirely: a (near-)constant coordinate outside it, under the
+/// `COORDINATE_EPSILON` slope rule and inflated-bounds test.
+/// A constant coordinate inside a slab constrains no
+/// parameter, yielding the unbounded interval.
+///
+/// The three boundary-plane parameters are computed once and both slab
+/// intervals assembled from them. Adjacent quadrants share their middle
+/// boundary plane, whose parameter is the same division either way, so this
+/// is common-subexpression elimination across the per-patch clips — not a
+/// change of semantics: each slab's interval is exactly `[min, max]` of its
+/// own two boundary parameters.
+fn half_slab_ranges(offset: f64, slope: f64, lo: f64) -> [Option<[f64; 2]>; 2] {
     if slope.abs() <= COORDINATE_EPSILON {
-        return offset >= minimum - COORDINATE_EPSILON && offset <= maximum + COORDINATE_EPSILON;
-    }
-    let first = (minimum - offset) / slope;
-    let second = (maximum - offset) / slope;
-    range[0] = range[0].max(first.min(second));
-    range[1] = range[1].min(first.max(second));
-    range[0] <= range[1] + COORDINATE_EPSILON
-}
-
-/// Enumerates one source axis's half-texel grid-line crossings of the ray as
-/// ray parameters, in ascending `f64::total_cmp` order, without allocating.
-///
-/// Each crossing is `(coordinate - offset) / slope` with
-/// `coordinate = f64::from(half_step) * 0.5` for `half_step in 0..=extent*2`,
-/// computed directly from the half-step index with no intermediate rounding,
-/// so the emitted value for a given index is deterministic.
-///
-/// The parameter is a monotone (rounding-preserving) function of `coordinate`:
-/// increasing when `slope > 0`, decreasing when `slope < 0`. Iterating the
-/// half-step index in the matching direction (ascending for positive slope,
-/// descending for negative) therefore yields crossings already in
-/// `total_cmp` order — including the `-0.0`/`+0.0` boundary, where the negative
-/// side (smaller `total_cmp`) is always reached first. Only crossings strictly
-/// inside `(range_start, range_end)` are emitted; a negligible slope yields no
-/// crossings.
-struct GridCrossings {
-    offset: f64,
-    slope: f64,
-    range_start: f64,
-    range_end: f64,
-    lo: u32,
-    hi: u32,
-    forward: bool,
-    active: bool,
-    exhausted: bool,
-}
-
-impl GridCrossings {
-    fn new(offset: f64, slope: f64, extent: u32, range_start: f64, range_end: f64) -> Self {
-        Self {
-            offset,
-            slope,
-            range_start,
-            range_end,
-            lo: 0,
-            hi: extent * 2,
-            forward: slope > 0.0,
-            active: slope.abs() > COORDINATE_EPSILON,
-            exhausted: false,
-        }
-    }
-
-    fn next_half_step(&mut self) -> Option<u32> {
-        if !self.active || self.exhausted {
-            return None;
-        }
-        let index = if self.forward { self.lo } else { self.hi };
-        if self.lo == self.hi {
-            self.exhausted = true;
-        } else if self.forward {
-            self.lo += 1;
-        } else {
-            self.hi -= 1;
-        }
-        Some(index)
-    }
-}
-
-impl Iterator for GridCrossings {
-    type Item = f64;
-
-    fn next(&mut self) -> Option<f64> {
-        loop {
-            let half_step = self.next_half_step()?;
-            let coordinate = f64::from(half_step) * 0.5;
-            let parameter = (coordinate - self.offset) / self.slope;
-            if parameter > self.range_start && parameter < self.range_end {
-                return Some(parameter);
-            }
-        }
-    }
-}
-
-/// Merges the two per-axis crossing streams (each already in `total_cmp` order)
-/// with the two range endpoints into `boundaries`, in `total_cmp` order. The
-/// output multiset is exactly `{range_start, range_end}` plus every interior
-/// crossing, in the same order a `sort_by(f64::total_cmp)` over that multiset
-/// would produce, so the subsequent epsilon dedup makes deterministic
-/// decisions. Streams supply identical values only when their `f64` bit
-/// patterns are identical, so the choice of source on a tie cannot change
-/// which bit pattern survives.
-fn merge_boundaries(
-    boundaries: &mut Vec<f64>,
-    range_start: f64,
-    range_end: f64,
-    mut x_axis: GridCrossings,
-    mut y_axis: GridCrossings,
-) {
-    boundaries.clear();
-    let mut heads = [
-        x_axis.next(),
-        y_axis.next(),
-        Some(range_start),
-        Some(range_end),
-    ];
-    loop {
-        let mut best: Option<usize> = None;
-        for (index, head) in heads.iter().enumerate() {
-            if let Some(value) = *head {
-                match best {
-                    Some(current)
-                        if heads[current].unwrap().total_cmp(&value) != Ordering::Greater => {}
-                    _ => best = Some(index),
-                }
-            }
-        }
-        let Some(index) = best else { break };
-        boundaries.push(heads[index].unwrap());
-        heads[index] = match index {
-            0 => x_axis.next(),
-            1 => y_axis.next(),
-            _ => None,
+        let inside = |low: f64, high: f64| {
+            offset >= low - COORDINATE_EPSILON && offset <= high + COORDINATE_EPSILON
         };
-    }
-}
-
-/// Bound: `coordinate` addresses a 1-D grid of `extent` unit cells.
-/// It is either strictly interior to exactly one cell (1 result), or within
-/// `COORDINATE_EPSILON` of an integer boundary shared by exactly two
-/// adjacent cells (2 results) — except at the two extreme boundaries (`0`
-/// or `extent`), which border only one cell each. Hence at most 2 cells are
-/// ever produced by a single call. (`solve_preimages` calls this once for
-/// each of the two source axes and takes their Cartesian product, so a
-/// texel position touches at most 2 * 2 = 4 source cells overall.)
-fn containing_cells(coordinate: f64, extent: u32) -> Bounded<u32, 2> {
-    let mut cells = Bounded::new();
-    if extent == 0
-        || coordinate < -COORDINATE_EPSILON
-        || coordinate > f64::from(extent) + COORDINATE_EPSILON
-    {
-        return cells;
-    }
-
-    let rounded = coordinate.round();
-    if (coordinate - rounded).abs() <= COORDINATE_EPSILON {
-        let boundary = rounded.clamp(0.0, f64::from(extent)) as u32;
-        match boundary {
-            0 => cells.push(0),
-            value if value == extent => cells.push(extent - 1),
-            value => {
-                cells.push(value - 1);
-                cells.push(value);
-            }
-        }
+        [
+            inside(lo, lo + 0.5).then_some([f64::NEG_INFINITY, f64::INFINITY]),
+            inside(lo + 0.5, lo + 1.0).then_some([f64::NEG_INFINITY, f64::INFINITY]),
+        ]
     } else {
-        cells.push((coordinate.floor() as u32).min(extent - 1));
+        let first = (lo - offset) / slope;
+        let middle = (lo + 0.5 - offset) / slope;
+        let last = (lo + 1.0 - offset) / slope;
+        [
+            Some([first.min(middle), first.max(middle)]),
+            Some([middle.min(last), middle.max(last)]),
+        ]
     }
-    cells
 }
 
 /// Finds the quadratic's roots in its unit variable `[0, 1]`. The segment
@@ -1385,14 +1456,6 @@ fn quantized_parameter(value: f64) -> i64 {
     (value * ROOT_SCALE as f64).round() as i64
 }
 
-/// Converts a quantized parameter numerator back to `f64` as
-/// `numerator / ROOT_SCALE`. Both operands are `f64`-exact (see
-/// [`quantized_parameter`]), so this is bit-identical to converting the
-/// reduced `Ratio::new(numerator, ROOT_SCALE)` to `f64`.
-fn parameter_f64(parameter: i64) -> f64 {
-    parameter as f64 / ROOT_SCALE as f64
-}
-
 #[cfg(test)]
 mod tests {
     use num_rational::Ratio;
@@ -1402,15 +1465,15 @@ mod tests {
     };
 
     use crate::{
-        CameraBasis, FragmentKey, FrameBuffer, PreparedModel, RenderRequest, TargetView,
-        framebuffer::commit_fragment, presets::TargetExtents,
+        CameraBasis, FrameBuffer, PreparedModel, RenderRequest, TargetView,
+        presets::{FacingCoefficients, TargetExtents},
     };
 
     use super::{
-        Bounded, MAX_PARAMETER_SPAN, MAX_QUANTUM_PROBES, PixelMask, PreparedRelief, ROOT_SCALE,
-        RenderScratch, SplatAxis, correctly_rounded_root, projected_extents, quantized_parameter,
-        ratio_to_f64, render_model, roots_in_unit_interval, solve_preimages,
-        source_evaluation_error_bounds,
+        Bounded, Cell, MAX_PARAMETER_SPAN, MAX_QUANTUM_PROBES, PreparedRelief, ROOT_SCALE,
+        SplatAxis, cell_intersections, correctly_rounded_root, prepare_frame_charts,
+        projected_extents, quantized_parameter, ratio_to_f64, relief_residual_slack, render_model,
+        roots_in_unit_interval, source_evaluation_error_bounds, splat_cell_pixel,
     };
 
     /// Half of one ray-parameter quantum, exactly `2^-25`: the tolerance the
@@ -1674,6 +1737,38 @@ mod tests {
         assert!(2.0_f64.powi(MAX_QUANTUM_PROBES as i32 - 3) < candidates);
     }
 
+    /// The distinct geometric intersections of one pixel's line against every
+    /// foreground patch of `field` — the per-pixel union the per-patch
+    /// traversal commits from. Distinctness is exact (integer quanta and
+    /// integer source coordinates): adjacent patches recovering the same
+    /// shared-edge intersection produce identical `(source_x, parameter)`
+    /// pairs here (the surface is continuous across patch edges within a
+    /// component), and collapsing them yields the geometric hit set the
+    /// assertions speak about.
+    fn distinct_intersections(
+        field: &PreparedRelief,
+        coefficients: &[[f64; 2]; 3],
+        facing: FacingCoefficients,
+        maximum_relief: f64,
+    ) -> Vec<(u32, i64)> {
+        let mut hits = Vec::new();
+        for cell_y in 0..field.height {
+            for cell_x in 0..field.width {
+                if !field.is_foreground(cell_x, cell_y) {
+                    continue;
+                }
+                for parameter in
+                    cell_intersections(field, coefficients, facing, maximum_relief, cell_x, cell_y)
+                {
+                    hits.push((cell_x, parameter));
+                }
+            }
+        }
+        hits.sort_unstable();
+        hits.dedup();
+        hits
+    }
+
     #[test]
     fn normalized_tent_fold_retains_all_three_source_preimages() {
         let chart = Chart::from_rgba(
@@ -1704,16 +1799,12 @@ mod tests {
 
         let facing = TargetView::front()
             .facing_coefficients(CanonicalView::Front, Bounds::new(3, 1, 4).unwrap());
-        let mut scratch = RenderScratch::default();
-        solve_preimages(&mut scratch, &prepared, &coefficients, facing, 16.0);
-        let locations: Vec<_> = scratch
-            .preimages
-            .iter()
-            .map(|preimage| {
+        let locations: Vec<_> = distinct_intersections(&prepared, &coefficients, facing, 16.0)
+            .into_iter()
+            .map(|(source_x, parameter)| {
                 (
-                    preimage.source_x,
-                    (ratio_to_f64(relief_at(&variables, preimage.parameter)) * 1_000.0).round()
-                        / 1_000.0,
+                    source_x,
+                    (ratio_to_f64(relief_at(&variables, parameter)) * 1_000.0).round() / 1_000.0,
                 )
             })
             .collect();
@@ -1747,58 +1838,17 @@ mod tests {
         let coefficients = frame.variable_f64(0, 0);
         let facing = target.facing_coefficients(CanonicalView::Front, bounds);
 
-        let mut scratch = RenderScratch::default();
-        solve_preimages(&mut scratch, &prepared, &coefficients, facing, 16.0);
-        let locations: Vec<_> = scratch
-            .preimages
-            .iter()
-            .map(|preimage| {
+        let locations: Vec<_> = distinct_intersections(&prepared, &coefficients, facing, 16.0)
+            .into_iter()
+            .map(|(source_x, parameter)| {
                 (
-                    preimage.source_x,
-                    (ratio_to_f64(relief_at(&variables, preimage.parameter)) * 1_000.0).round()
-                        / 1_000.0,
+                    source_x,
+                    (ratio_to_f64(relief_at(&variables, parameter)) * 1_000.0).round() / 1_000.0,
                 )
             })
             .collect();
 
         assert_eq!(locations, vec![(1, 4.0), (2, 16.0)]);
-    }
-
-    #[test]
-    fn pixel_mask_marks_ranges_within_a_single_word() {
-        let mut mask = PixelMask::new();
-        mask.reset(10, 2);
-        mask.mark_row(1, 3, 5);
-
-        assert_eq!(mask.row(0), [0]);
-        assert_eq!(mask.row(1), [0b111000]);
-    }
-
-    #[test]
-    fn pixel_mask_marks_ranges_spanning_multiple_words() {
-        let mut mask = PixelMask::new();
-        mask.reset(200, 1);
-        mask.mark_row(0, 60, 130);
-
-        assert_eq!(
-            mask.row(0),
-            [!0_u64 << 60, !0, !0 >> (63 - 130 % 64), 0],
-            "bits 60..=130 must be set across words 0..=2"
-        );
-    }
-
-    #[test]
-    fn pixel_mask_marking_is_idempotent_and_reset_clears() {
-        let mut mask = PixelMask::new();
-        mask.reset(70, 1);
-        mask.mark_row(0, 0, 69);
-        let marked: Vec<u64> = mask.row(0).to_vec();
-        mask.mark_row(0, 10, 63);
-
-        assert_eq!(mask.row(0), marked, "overlapping marks must be idempotent");
-
-        mask.reset(70, 1);
-        assert_eq!(mask.row(0), [0, 0], "reset must clear every word");
     }
 
     /// A model with background holes and two charts: enough structure that
@@ -1847,74 +1897,38 @@ mod tests {
             .resolve()
     }
 
-    /// The pre-splat renderer — every pixel x every chart, no culling — used
-    /// as the oracle that forward splatting is output-identical, fragment
-    /// keys (exact rational depths) included.
-    fn render_reference(prepared: &PreparedModel, request: &RenderRequest) -> FrameBuffer {
-        let bounds = prepared.charts.bounds();
+    /// Exhaustive per-pixel reference for the per-patch semantics: for every
+    /// pixel, iterate ALL foreground patches of ALL charts — no footprint
+    /// culling — and apply the identical per-patch solve
+    /// ([`splat_cell_pixel`], shared with `render_model`). Equality against
+    /// `render_model` proves the load-bearing property of the forward splat:
+    /// footprint enumeration visits every (patch, pixel) pair that commits.
+    /// The traversal order also differs (pixel-major here, patch-major in
+    /// `render_model`), so equality re-verifies commit-order independence.
+    fn render_patch_reference(prepared: &PreparedModel, request: &RenderRequest) -> FrameBuffer {
         let mut frame = FrameBuffer::transparent(request.width, request.height);
-        let Some(TargetExtents {
-            min_x,
-            max_x,
-            min_y,
-            max_y,
-        }) = projected_extents(bounds, &prepared.charts, &request.target)
-        else {
-            return frame;
-        };
-        let offset_x = Ratio::new(i64::from(request.width), 2) - (min_x + max_x) / 2;
-        let offset_y = Ratio::new(i64::from(request.height), 2) - (min_y + max_y) / 2;
-        let sx0 = Ratio::new(1, 2) - offset_x;
-        let sy0 = Ratio::new(1, 2) - offset_y;
-        let frame_charts: Vec<_> = prepared
-            .charts
-            .charts()
-            .iter()
-            .zip(prepared.reliefs.iter())
-            .filter_map(|(chart, entry)| {
-                let warp = request.target.warp_coefficients(chart.view(), bounds);
-                let inverse =
-                    warp.prepare_inverse()?
-                        .inverse_frame(sx0, sy0, request.width, request.height);
-                let facing = request.target.facing_coefficients(chart.view(), bounds);
-                Some((chart, &entry.relief, inverse, facing, entry.maximum_relief))
-            })
-            .collect();
-
-        let mut scratch = RenderScratch::default();
+        let frame_charts = prepare_frame_charts(prepared, request);
         for y in 0..request.height {
             for x in 0..request.width {
-                for (chart, relief, inverse, facing, maximum_relief) in &frame_charts {
-                    let coefficients = inverse.variable_f64(x, y);
-                    solve_preimages(
-                        &mut scratch,
-                        relief,
-                        &coefficients,
-                        *facing,
-                        *maximum_relief,
-                    );
-                    for preimage in &scratch.preimages {
-                        let Some(DecodedTexel::Relief { rgb, .. }) =
-                            chart.texel_at(preimage.source_x, preimage.source_y)
-                        else {
-                            continue;
-                        };
-                        commit_fragment(
-                            &mut frame,
-                            x,
-                            y,
-                            FragmentKey {
-                                depth: inverse.depth_at(
-                                    x,
-                                    y,
-                                    Ratio::new(preimage.parameter, ROOT_SCALE),
-                                ),
-                                chart_rank: chart.view().rank(),
-                                source_y: preimage.source_y,
-                                source_x: preimage.source_x,
-                            },
-                            rgb,
-                        );
+                for pass in &frame_charts {
+                    let coefficients = pass.inverse.variable_f64(x, y);
+                    for cell_y in 0..pass.relief.height {
+                        for cell_x in 0..pass.relief.width {
+                            if !pass.relief.is_foreground(cell_x, cell_y) {
+                                continue;
+                            }
+                            let Some(DecodedTexel::Relief { rgb, .. }) =
+                                pass.chart.texel_at(cell_x, cell_y)
+                            else {
+                                unreachable!("foreground cells decode to relief texels");
+                            };
+                            let cell = Cell {
+                                x: cell_x,
+                                y: cell_y,
+                                rgb,
+                            };
+                            splat_cell_pixel(&mut frame, pass, &coefficients, cell, x, y);
+                        }
                     }
                 }
             }
@@ -1942,7 +1956,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_splat_matches_the_exhaustive_pixel_scan() {
+    fn per_patch_splat_matches_the_exhaustive_patch_scan() {
         let charts = perforated_two_chart_model();
         let prepared = PreparedModel::new(&charts);
         let zero = Ratio::from_integer(0);
@@ -1963,7 +1977,7 @@ mod tests {
             for (width, height) in [(40, 32), (9, 7)] {
                 let request = RenderRequest::new(width, height, target.clone());
                 let rendered = render_model(&prepared, &request).expect("render must succeed");
-                let reference = render_reference(&prepared, &request);
+                let reference = render_patch_reference(&prepared, &request);
                 assert_frames_identical(
                     &rendered,
                     &reference,
@@ -1992,10 +2006,12 @@ mod tests {
     }
 
     /// The conservative pixel ranges must cover the exact rational forward
-    /// image of every foreground cell's swept box: for each cell and screen
-    /// axis, every integer pixel index whose exact screen coordinate lies
-    /// inside the exact zonotope bbox (computed from the eight exact corner
-    /// images via `WarpCoefficients::apply`) must be inside the range.
+    /// image of every foreground cell's swept surface band — the cell's unit
+    /// texel crossed with the *exact rational* range of its surface samples:
+    /// for each cell and screen axis, every integer pixel index whose exact
+    /// screen coordinate lies inside the exact zonotope bbox (computed from
+    /// the eight exact corner images via `WarpCoefficients::apply`) must be
+    /// inside the range `render_model` enumerates candidates from.
     #[test]
     fn splat_axis_ranges_cover_the_exact_swept_box_image() {
         let charts = perforated_two_chart_model();
@@ -2021,7 +2037,8 @@ mod tests {
                 .prepare_inverse()
                 .expect("isometric warp is invertible")
                 .inverse_frame(sx0, sy0, width, height);
-            let deltas = source_evaluation_error_bounds(&inverse, width, height);
+            let line_bounds = source_evaluation_error_bounds(&inverse, width, height);
+            let relief_slack = relief_residual_slack(&line_bounds, &entry.relief);
             let screen = warp.screen();
             let parallax = warp.parallax();
             let axes = [
@@ -2029,7 +2046,7 @@ mod tests {
                     screen[0],
                     parallax[0],
                     sx0,
-                    deltas,
+                    line_bounds.deltas,
                     entry.maximum_relief,
                     &entry.relief,
                 ),
@@ -2037,26 +2054,47 @@ mod tests {
                     screen[1],
                     parallax[1],
                     sy0,
-                    deltas,
+                    line_bounds.deltas,
                     entry.maximum_relief,
                     &entry.relief,
                 ),
             ];
             let origins = [sx0, sy0];
             let extents = [width, height];
-            let maximum_relief =
-                Ratio::from_integer(i64::from(chart.view().maximum_inward_depth(bounds)));
-            let middle_relief = 0.5 * entry.maximum_relief;
+            let relief_field = ReliefField::new(chart);
 
             for source_y in 0..entry.relief.height {
                 for source_x in 0..entry.relief.width {
                     if !entry.relief.is_foreground(source_x, source_y) {
                         continue;
                     }
+                    // The exact rational surface range of the cell: min/max
+                    // over the nine half-texel closure samples (the corner
+                    // set of all four quadrant patches), recomputed here
+                    // independently of the prepared f64 corners.
+                    let foreground = relief_field
+                        .foreground_cell(source_x, source_y)
+                        .expect("prepared foreground cell must exist in the field");
+                    let mut exact_corners = Vec::new();
+                    for half_x in 0..=2_i64 {
+                        for half_y in 0..=2_i64 {
+                            let point = SourcePoint::new(
+                                Ratio::new(2 * i64::from(source_x) + half_x, 2),
+                                Ratio::new(2 * i64::from(source_y) + half_y, 2),
+                            );
+                            let (weighted, total) = foreground
+                                .sample_terms_closure(point)
+                                .expect("cell closure sample must exist");
+                            exact_corners.push(weighted / total);
+                        }
+                    }
+                    let exact_min = *exact_corners.iter().min().unwrap();
+                    let exact_max = *exact_corners.iter().max().unwrap();
+
                     let mut corners = Vec::new();
                     for corner_x in [i64::from(source_x), i64::from(source_x) + 1] {
                         for corner_y in [i64::from(source_y), i64::from(source_y) + 1] {
-                            for relief in [Ratio::from_integer(0), maximum_relief] {
+                            for relief in [exact_min, exact_max] {
                                 corners.push(warp.apply(
                                     SourcePoint::new(
                                         Ratio::from_integer(corner_x),
@@ -2067,6 +2105,11 @@ mod tests {
                             }
                         }
                     }
+                    let center_x = f64::from(source_x) + 0.5;
+                    let center_y = f64::from(source_y) + 0.5;
+                    let (relief_min, relief_max) = entry.relief.relief_bounds(source_x, source_y);
+                    let relief_mid = 0.5 * (relief_min + relief_max);
+                    let relief_half = 0.5 * (relief_max - relief_min) + relief_slack;
                     for (index, axis) in axes.iter().enumerate() {
                         let origin = origins[index];
                         let extent = &extents[index];
@@ -2088,20 +2131,17 @@ mod tests {
                             continue;
                         }
                         let (first, last) = axis
-                            .pixel_range(
-                                f64::from(source_x),
-                                f64::from(source_y),
-                                middle_relief,
-                                *extent,
-                            )
+                            .pixel_range(center_x, center_y, relief_mid, relief_half, *extent)
                             .expect("in-frame swept box must yield a pixel range");
                         assert!(
                             i64::from(first) <= exact_first.max(0),
-                            "cell ({source_x}, {source_y}): range start {first} misses exact {exact_first}"
+                            "cell ({source_x}, {source_y}): range start {first} misses exact \
+                             {exact_first}"
                         );
                         assert!(
                             i64::from(last) >= exact_last.min(i64::from(*extent) - 1),
-                            "cell ({source_x}, {source_y}): range end {last} misses exact {exact_last}"
+                            "cell ({source_x}, {source_y}): range end {last} misses exact \
+                             {exact_last}"
                         );
                     }
                 }
