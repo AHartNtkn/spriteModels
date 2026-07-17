@@ -19,10 +19,12 @@ use crate::{
 };
 
 const MODEL_DRAG_DEGREES_PER_POINT: f32 = 0.25; // same feel as camera orbit
-// Two 63x4-px viewports side by side, plus the settings rows and buttons
-// below, fit comfortably inside the 1280x800 minimum window (see
-// `layout::minimum_window_size`); 4px/model-px keeps a 63px model legible.
-const VIEWPORT_SIZE: f32 = 360.0;
+// The viewports scale up to fill the central region (see `show()`); this is
+// only the floor below which a 63px model stops being legible (4px/model-px,
+// matching the old fixed size) and below which the controls panel below it
+// would be crowded. It fits inside the 1280x800 minimum window (see
+// `layout::minimum_window_size`).
+const VIEWPORT_MIN_PX: f32 = 240.0;
 /// Horizontal inner margin `Frame::central_panel`'s default frame applies on
 /// each side (`inner_margin(8)`), used by `show()` to size the guard that
 /// keeps the charts panel from starving the central region's viewports.
@@ -313,17 +315,19 @@ impl ImportDialogState {
             + (CHART_GRID_COLUMNS - 1) as f32 * column_gap
             + 2.0 * CHART_PANEL_SIDE_MARGIN_PX;
         // The central region (added below) holds the mesh and converted
-        // viewports side by side at a fixed `VIEWPORT_SIZE` each, separated
-        // by one `ui.spacing().item_spacing.x` gap (the `ui.horizontal`
-        // call around them), inside `Frame::central_panel`'s default 8px
-        // inner margin on both the left and right edge of the central
-        // region. The charts panel must never eat into that footprint.
-        let min_central = 2.0 * VIEWPORT_SIZE + column_gap + 2.0 * CENTRAL_PANEL_MARGIN_PX;
+        // viewports side by side, each scaling up to fill the remaining
+        // space but never below `VIEWPORT_MIN_PX`, separated by one
+        // `ui.spacing().item_spacing.x` gap (the `ui.horizontal` call around
+        // them), inside `Frame::central_panel`'s default 8px inner margin on
+        // both the left and right edge of the central region. The charts
+        // panel must never shrink the central region below the space two
+        // *minimum*-size viewports need.
+        let min_central = 2.0 * VIEWPORT_MIN_PX + column_gap + 2.0 * CENTRAL_PANEL_MARGIN_PX;
         let available = ui.available_width();
         // The generated-charts grid gets half the window (user requirement)
         // so its tiles can scale up to fill the panel instead of rendering
         // at a fixed, tiny size, but it must not starve the central
-        // region's two fixed-size viewports below `min_central`, nor drop
+        // region's two viewports below their `min_central` floor, nor drop
         // below `min_charts_panel_width`. On a typical window (>= ~1500px
         // wide) this yields exactly half; on the 1280px minimum window the
         // `min_central` guard gives the charts panel slightly less than
@@ -352,41 +356,61 @@ impl ImportDialogState {
             });
         egui::CentralPanel::default().show(ui, |ui| {
             ui.heading(format!("Import 3D Model — {}", self.file_label));
+            // Pinned to the bottom of the central region so the settings and
+            // Cancel/Import buttons stay reachable at their natural height
+            // regardless of window size; whatever vertical space remains
+            // between the heading above and this panel below goes to the
+            // viewports.
+            egui::Panel::bottom("import-controls").show(ui, |ui| {
+                ui.separator();
+                self.show_settings(ui);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let cancel = ui.button("Cancel");
+                    #[cfg(test)]
+                    {
+                        self.cancel_button_rect = cancel.rect;
+                    }
+                    if cancel.clicked() {
+                        outcome = ImportDialogOutcome::Cancel;
+                    }
+                    let importable = self.converted.is_ok();
+                    let import = ui.add_enabled(importable, egui::Button::new("Import"));
+                    #[cfg(test)]
+                    {
+                        self.import_button_rect = import.rect;
+                    }
+                    if import.clicked()
+                        && let Some(model) = self.converted_model()
+                    {
+                        outcome = ImportDialogOutcome::Import(model);
+                    }
+                });
+            });
+            let gap = ui.spacing().item_spacing.x;
+            let avail = ui.available_size(); // central minus the heading and the bottom controls panel
+            // Two squares share the central width, each getting half of what
+            // remains after subtracting the one gap between them.
+            let viewport_side = ((avail.x - gap) / 2.0)
+                // Clamped to the remaining height so the pair stays square
+                // without pushing the bottom controls panel off-screen.
+                .min(avail.y)
+                // Never collapse below the size a 63px model stays legible
+                // at (see `VIEWPORT_MIN_PX`).
+                .max(VIEWPORT_MIN_PX);
+            let viewport_size = egui::vec2(viewport_side, viewport_side);
             ui.horizontal(|ui| {
-                let mesh_rect = allocate_viewport(ui, "import-mesh-viewport");
+                let mesh_rect = allocate_viewport(ui, "import-mesh-viewport", viewport_size);
                 self.handle_viewport_input(ui, mesh_rect, true);
                 self.draw_mesh_viewport(ui, mesh_rect);
-                let converted_rect = allocate_viewport(ui, "import-converted-viewport");
+                let converted_rect =
+                    allocate_viewport(ui, "import-converted-viewport", viewport_size);
                 self.handle_viewport_input(ui, converted_rect, false);
                 self.draw_converted_viewport(ui, converted_rect);
                 #[cfg(test)]
                 {
                     self.mesh_viewport_rect = mesh_rect;
                     self.converted_viewport_rect = converted_rect;
-                }
-            });
-            ui.separator();
-            self.show_settings(ui);
-            ui.separator();
-            ui.horizontal(|ui| {
-                let cancel = ui.button("Cancel");
-                #[cfg(test)]
-                {
-                    self.cancel_button_rect = cancel.rect;
-                }
-                if cancel.clicked() {
-                    outcome = ImportDialogOutcome::Cancel;
-                }
-                let importable = self.converted.is_ok();
-                let import = ui.add_enabled(importable, egui::Button::new("Import"));
-                #[cfg(test)]
-                {
-                    self.import_button_rect = import.rect;
-                }
-                if import.clicked()
-                    && let Some(model) = self.converted_model()
-                {
-                    outcome = ImportDialogOutcome::Import(model);
                 }
             });
         });
@@ -945,7 +969,7 @@ fn paint_chart_tile(
     );
 }
 
-fn allocate_viewport(ui: &mut egui::Ui, id_source: &str) -> egui::Rect {
+fn allocate_viewport(ui: &mut egui::Ui, id_source: &str, size: egui::Vec2) -> egui::Rect {
     // `Sense::hover()`: this call only reserves the rect. `handle_viewport_input`
     // does its own `ui.interact(rect, ..., Sense::drag())` on the identical rect
     // right after — sensing drag here too would register two overlapping
@@ -953,10 +977,7 @@ fn allocate_viewport(ui: &mut egui::Ui, id_source: &str) -> egui::Rect {
     // frame's hit-test is an egui implementation detail, not something to
     // depend on.
     ui.push_id(id_source, |ui| {
-        ui.allocate_exact_size(
-            egui::vec2(VIEWPORT_SIZE, VIEWPORT_SIZE),
-            egui::Sense::hover(),
-        )
+        ui.allocate_exact_size(size, egui::Sense::hover())
     })
     .inner
     .0
