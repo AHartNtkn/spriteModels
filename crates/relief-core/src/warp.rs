@@ -233,17 +233,27 @@ impl AffineForm {
 /// rectangle; because `N` is affine in `x, y` its extreme magnitudes occur at a
 /// corner, so the interior is covered.
 ///
-/// The static bound: camera basis entries are `integer/Dcam` with
-/// `|integer| <= 1024` and `Dcam <= 1024` (editor quantization uses denominator
-/// 1024; presets use denominators dividing 12 with numerators `<= 4`). Model
-/// bounds are `<= 63`, so origin offsets are `<= 63`; `source_u/v/inward` are
-/// unit vectors; the relief unit is `1/8`. The projected columns therefore have
-/// numerators `<= 3*1024*63 < 2^18` over denominators `<= 8*1024 < 2^13`; the
-/// 2×2 determinant, the offsets divided by it, and the screen origin (denominator
-/// `2` numerators `<= 2*(side + bound)`) combine to shared denominators and
-/// per-pixel numerators comfortably below `2^53` for `side <= a few thousand`.
-/// The asserts convert any violation of this domain into a loud panic rather
-/// than a silent precision loss.
+/// Informal magnitude estimate, not a proof: camera basis entries are
+/// `integer/Dcam` with `|integer| <= 1024` and `Dcam <= 1024` (editor
+/// quantization uses denominator 1024; presets use denominators dividing 12
+/// with numerators `<= 4`). Model bounds are `<= 63`, so origin offsets are
+/// `<= 63`; `source_u/v/inward` are unit vectors; the relief unit is `1/8`.
+/// The projected columns therefore have numerators `<= 3*1024*63 < 2^18` over
+/// denominators `<= 8*1024 < 2^13`. Composing these through the 2×2
+/// determinant, the offsets divided by it, and the screen origin (denominator
+/// `2`, numerators `<= 2*(side + bound)`) *suggests* shared denominators and
+/// per-pixel numerators stay comfortably below `2^53` for `side <= a few
+/// thousand` — but no bound has actually been derived through that
+/// composition; this paragraph only motivates why the domain is expected to
+/// fit.
+///
+/// The actual guarantee is the runtime certification, not this estimate:
+/// [`AffineForm::from_rats`] asserts the shared denominator `d <= 2^53`, and
+/// [`PreparedInverse::inverse_frame`] asserts `|numerator| <= 2^53` at the
+/// four corners of the pixel rectangle (the numerator is affine in `x, y`, so
+/// its extremes occur at a corner — see above). Together these convert any
+/// violation of the expected domain, whether or not the estimate above holds,
+/// into a loud panic rather than a silent precision loss.
 #[derive(Clone, Copy, Debug)]
 pub struct FrameInverse {
     var_offset: [AffineForm; 3],
@@ -488,6 +498,11 @@ impl FrameInverse {
     pub fn variable_coefficients_exact(&self, x: u32, y: u32) -> [[Ratio<i64>; 2]; 3] {
         std::array::from_fn(|variable| {
             let (numerator, denominator) = self.numerator_denominator(variable, x, y);
+            debug_assert!(
+                numerator.unsigned_abs() <= MAX_F64_EXACT_INT as u128
+                    && denominator <= MAX_F64_EXACT_INT,
+                "inverse-line i64 cast outside the 2^53-exact range"
+            );
             [
                 Ratio::new(numerator as i64, denominator as i64),
                 self.var_slope[variable],
