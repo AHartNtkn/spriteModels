@@ -76,9 +76,14 @@ fn cube_spanning_the_box_captures_relief_zero_on_all_six_faces() {
 }
 
 #[test]
-fn geometry_past_the_midplane_clamps_to_h_max() {
-    // A quad at z = 0.9 of a unit-depth box: from the Front (depth 8px at
-    // longest 8), its depth is 7.2px = 57.6 relief units, past h_max = 32.
+fn geometry_past_the_midplane_is_dropped() {
+    // A quad at z = 0.9 of a unit-depth box. Extents: x [0,1], y [0,1],
+    // z [0,0.9] (from the sliver below) -> longest = 1, scale = 8,
+    // depth = ceil(0.9 * 8) = ceil(7.2) = 8, so h_max = 4 * 8 = 32, and
+    // centering offset_z = (8 - 7.2) / 2 = 0.4. The quad's box-space depth
+    // from Front is 0.9 * 8 + 0.4 = 7.6px, quantizing to relief
+    // round(8 * 7.6) = 61, past h_max = 32: the texel must be dropped
+    // (empty), not clamped to h_max.
     // A single edge-on triangle spans z = 0..0.9 to give the bounding box
     // its full depth; it projects to (near-)zero area from the Front, so
     // it cannot win the probed interior texel.
@@ -104,9 +109,192 @@ fn geometry_past_the_midplane_clamps_to_h_max() {
     config.side_modes = modes;
     let model = convert(&scene, &config).expect("converts");
     let chart = model.chart(CanonicalView::Front).expect("front chart");
-    let h_max = CanonicalView::Front.maximum_inward_depth(model.bounds());
     let center = chart.rgba()[4 * 8 + 4];
-    assert_eq!(center[3], 255 - h_max, "relief must clamp to h_max");
+    assert_eq!(
+        center,
+        [0, 0, 0, 0],
+        "geometry past the midplane must be dropped (empty texel), not clamped"
+    );
+}
+
+#[test]
+fn deep_feature_belongs_to_the_side_that_reaches_it() {
+    // A two-part scene: a "slab" near the Front face and a "knob" near the
+    // Back face, on disjoint x ranges so each side's coverage is probed
+    // independently. An edge-on sliver at x = 0 spans z = 0..0.9 to give
+    // the bounding box its full depth without covering any probed texel.
+    //
+    // Extents: x [0,1] (slab [0,0.4] union knob [0.6,1.0]), y [0,1],
+    // z [0,0.9] (sliver). longest = max(1, 1, 0.9) = 1, scale = 8 / 1 = 8.
+    // width = ceil(1*8) = 8, height = ceil(1*8) = 8, depth = ceil(0.9*8) =
+    // ceil(7.2) = 8. offset_x = offset_y = 0 (extent*scale already equals
+    // the dim); offset_z = (8 - 7.2) / 2 = 0.4. h_max (Front/Back, driven
+    // by depth) = 4 * 8 = 32.
+    let slab_z = 0.05_f64;
+    let knob_z = 0.9_f64;
+    let scene = TriangleScene {
+        triangles: vec![
+            // Slab: x in [0, 0.4], full y, z = 0.05.
+            tri([0.0, 0.0, 0.05], [0.4, 0.0, 0.05], [0.4, 1.0, 0.05]),
+            tri([0.0, 0.0, 0.05], [0.4, 1.0, 0.05], [0.0, 1.0, 0.05]),
+            // Knob: x in [0.6, 1.0], full y, z = 0.9.
+            tri([0.6, 0.0, 0.9], [1.0, 0.0, 0.9], [1.0, 1.0, 0.9]),
+            tri([0.6, 0.0, 0.9], [1.0, 1.0, 0.9], [0.6, 1.0, 0.9]),
+            // Edge-on sliver at x = 0, giving the box its full z extent.
+            tri([0.0, 0.0, 0.0], [0.0, 0.0, 0.9], [0.0, 0.0001, 0.45]),
+        ],
+        materials: vec![plain_material()],
+    };
+    let mut config = settings(8);
+    let mut modes = config.side_modes;
+    for side in [
+        CanonicalView::Left,
+        CanonicalView::Right,
+        CanonicalView::Top,
+        CanonicalView::Bottom,
+    ] {
+        modes.set(side, SideMode::Off).expect("legal mode");
+    }
+    config.side_modes = modes;
+    let model = convert(&scene, &config).expect("converts");
+    let bounds = model.bounds();
+    assert_eq!(
+        (bounds.width(), bounds.height(), bounds.depth()),
+        (8, 8, 8),
+        "derived bounds"
+    );
+
+    let scale = 8.0_f64;
+    let offset_z = (f64::from(bounds.depth()) - 0.9 * scale) / 2.0;
+    let slab_box_z = slab_z * scale + offset_z;
+    let knob_box_z = knob_z * scale + offset_z;
+
+    let h_max_front = i64::from(CanonicalView::Front.maximum_inward_depth(bounds));
+    let h_max_back = i64::from(CanonicalView::Back.maximum_inward_depth(bounds));
+    assert_eq!((h_max_front, h_max_back), (32, 32), "h_max derivation");
+
+    // Front depth is measured from the z = 0 face.
+    let front_slab_relief = (slab_box_z * 8.0).round() as i64;
+    let front_knob_relief = (knob_box_z * 8.0).round() as i64;
+    assert!(
+        front_slab_relief <= h_max_front,
+        "slab must be reachable from Front"
+    );
+    assert!(
+        front_knob_relief > h_max_front,
+        "knob must be past the midplane from Front"
+    );
+
+    // Back depth is measured from the z = depth face, inward is -z.
+    let back_slab_relief = ((f64::from(bounds.depth()) - slab_box_z) * 8.0).round() as i64;
+    let back_knob_relief = ((f64::from(bounds.depth()) - knob_box_z) * 8.0).round() as i64;
+    assert!(
+        back_knob_relief <= h_max_back,
+        "knob must be reachable from Back"
+    );
+    assert!(
+        back_slab_relief > h_max_back,
+        "slab must be past the midplane from Back"
+    );
+
+    let front = model.chart(CanonicalView::Front).expect("front chart");
+    let back = model.chart(CanonicalView::Back).expect("back chart");
+    let row = 4usize;
+    let width = bounds.width() as usize;
+
+    // Front's frame is unmirrored (source_u = [1,0,0], origin_x = 0): pixel
+    // column px has world x centered at px + 0.5. Slab occupies box x in
+    // [0, 3.2) and knob occupies box x in [4.8, 8); take the floor of each
+    // range's midpoint as a texel comfortably inside it.
+    let slab_x_min = 0.0_f64;
+    let slab_x_max = 0.4 * scale;
+    let knob_x_min = 0.6 * scale;
+    let knob_x_max = 1.0 * scale;
+    let front_slab_col = (((slab_x_min + slab_x_max) / 2.0).floor()) as usize;
+    let front_knob_col = (((knob_x_min + knob_x_max) / 2.0).floor()) as usize;
+
+    // Back's frame mirrors u (source_u = [-1,0,0], origin_x = width): pixel
+    // column px has world x centered at width - (px + 0.5), i.e. screen_x =
+    // width - world_x. The slab/knob ranges swap columns accordingly.
+    let back_slab_col =
+        ((f64::from(bounds.width()) - (slab_x_min + slab_x_max) / 2.0).floor()) as usize;
+    let back_knob_col =
+        ((f64::from(bounds.width()) - (knob_x_min + knob_x_max) / 2.0).floor()) as usize;
+
+    let front_slab_texel = front.rgba()[row * width + front_slab_col];
+    let front_knob_texel = front.rgba()[row * width + front_knob_col];
+    assert_eq!(
+        i64::from(255 - front_slab_texel[3]),
+        front_slab_relief,
+        "Front slab-side relief must match the analytic depth"
+    );
+    assert_eq!(
+        front_knob_texel,
+        [0, 0, 0, 0],
+        "Front knob-side texel must be empty (past the midplane)"
+    );
+
+    let back_slab_texel = back.rgba()[row * width + back_slab_col];
+    let back_knob_texel = back.rgba()[row * width + back_knob_col];
+    assert_eq!(
+        back_slab_texel,
+        [0, 0, 0, 0],
+        "Back slab-side texel must be empty (past the midplane)"
+    );
+    assert_eq!(
+        i64::from(255 - back_knob_texel[3]),
+        back_knob_relief,
+        "Back knob-side relief must match the analytic depth, not a clamped value"
+    );
+}
+
+#[test]
+fn exact_midplane_hit_keeps_relief_at_h_max() {
+    // A quad at z = 0.5 spans the full x/y extent; a sliver at x = 0 spans
+    // z = 0..1, giving the box its full depth. Extents: x [0,1], y [0,1],
+    // z [0,1] -> longest = 1, scale = 8, depth = ceil(1*8) = 8,
+    // offset_z = (8 - 8) / 2 = 0 (no centering slack: the sliver's extent
+    // already matches the dim exactly). The quad's box-space depth from
+    // Front is 0.5 * 8 + 0 = 4.0px, quantizing to relief round(8 * 4.0) =
+    // 32, which equals h_max = 4 * 8 = 32 exactly: the exact-midplane hit
+    // must be kept, not dropped.
+    let scene = TriangleScene {
+        triangles: vec![
+            tri([0.0, 0.0, 0.5], [1.0, 0.0, 0.5], [1.0, 1.0, 0.5]),
+            tri([0.0, 0.0, 0.5], [1.0, 1.0, 0.5], [0.0, 1.0, 0.5]),
+            tri([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0001, 0.5]),
+        ],
+        materials: vec![plain_material()],
+    };
+    let mut config = settings(8);
+    let mut modes = config.side_modes;
+    for side in [
+        CanonicalView::Back,
+        CanonicalView::Left,
+        CanonicalView::Right,
+        CanonicalView::Top,
+        CanonicalView::Bottom,
+    ] {
+        modes.set(side, SideMode::Off).expect("legal mode");
+    }
+    config.side_modes = modes;
+    let model = convert(&scene, &config).expect("converts");
+    let bounds = model.bounds();
+    assert_eq!(
+        (bounds.width(), bounds.height(), bounds.depth()),
+        (8, 8, 8),
+        "derived bounds"
+    );
+    let h_max = i64::from(CanonicalView::Front.maximum_inward_depth(bounds));
+    assert_eq!(h_max, 32, "h_max derivation");
+    let chart = model.chart(CanonicalView::Front).expect("front chart");
+    let center = chart.rgba()[4 * 8 + 4];
+    assert_ne!(center[3], 0, "the exact-midplane hit must not be dropped");
+    assert_eq!(
+        i64::from(255 - center[3]),
+        h_max,
+        "the exact-midplane hit keeps relief == h_max"
+    );
 }
 
 #[test]

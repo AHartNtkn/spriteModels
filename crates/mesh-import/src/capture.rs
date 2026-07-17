@@ -317,9 +317,23 @@ pub fn convert_box_space(
                     [0, 0, 0, 0]
                 } else {
                     // depth is in model pixels from the face plane; float
-                    // error can dip epsilon-negative, clamp handles it.
-                    let relief = ((f64::from(depth) * 8.0).round() as i64).clamp(0, h_max);
-                    [color[0], color[1], color[2], (255 - relief) as u8]
+                    // error can dip epsilon-negative, the max(0) floor
+                    // handles it.
+                    let relief = (f64::from(depth) * 8.0).round() as i64;
+                    let relief = relief.max(0);
+                    // A post-quantization relief beyond h_max lies past the
+                    // midplane, which is exactly the region the opposing
+                    // side reaches (d_front > D/2 <=> d_back < D/2);
+                    // range-checking after quantization keeps the
+                    // exact-midplane hit (relief == h_max) on both sides,
+                    // preserving the format's opposing-charts-meet-at-the-
+                    // midplane guarantee. Dropping instead of clamping
+                    // avoids fabricating geometry at a false depth.
+                    if relief > h_max {
+                        [0, 0, 0, 0]
+                    } else {
+                        [color[0], color[1], color[2], (255 - relief) as u8]
+                    }
                 }
             })
             .collect();
