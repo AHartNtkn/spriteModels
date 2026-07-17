@@ -23,6 +23,10 @@ const MODEL_DRAG_DEGREES_PER_POINT: f32 = 0.25; // same feel as camera orbit
 // below, fit comfortably inside the 1280x800 minimum window (see
 // `layout::minimum_window_size`); 4px/model-px keeps a 63px model legible.
 const VIEWPORT_SIZE: f32 = 360.0;
+/// Horizontal inner margin `Frame::central_panel`'s default frame applies on
+/// each side (`inner_margin(8)`), used by `show()` to size the guard that
+/// keeps the charts panel from starving the central region's viewports.
+const CENTRAL_PANEL_MARGIN_PX: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OrientationPreset {
@@ -298,22 +302,38 @@ impl ImportDialogState {
     pub fn show(&mut self, ui: &mut egui::Ui) -> ImportDialogOutcome {
         self.ensure_converted();
         let mut outcome = ImportDialogOutcome::KeepOpen;
-        // Fixed width for exactly `CHART_GRID_COLUMNS` tile columns: each
-        // column is at most `CHART_TILE_TARGET_PX` wide (`paint_chart_tile`
-        // floors its upscale so a tile's longer side never exceeds that
-        // target), `egui::Grid` inserts `ui.spacing().item_spacing.x`
-        // between columns by default, and the panel's own default frame
-        // (`Frame::side_top_panel`) adds `CHART_PANEL_SIDE_MARGIN_PX` of
-        // inner margin on each horizontal side. Panel::default_size's
-        // built-in guess (200px) has no relation to the tile grid, so it
-        // is overridden here instead of left to chance.
         let column_gap = ui.spacing().item_spacing.x;
-        let charts_panel_width = CHART_GRID_COLUMNS as f32 * CHART_TILE_TARGET_PX
+        // Never let the charts panel shrink so far that a tile's column
+        // drops below the old fixed per-tile target: this is the floor for
+        // the half-width split below, reusing `CHART_TILE_TARGET_PX` (now a
+        // minimum, not the scale target itself — see `paint_chart_tile`)
+        // with the same column-count/gap/margin arithmetic the fixed-width
+        // panel used before this change.
+        let min_charts_panel_width = CHART_GRID_COLUMNS as f32 * CHART_TILE_TARGET_PX
             + (CHART_GRID_COLUMNS - 1) as f32 * column_gap
             + 2.0 * CHART_PANEL_SIDE_MARGIN_PX;
+        // The central region (added below) holds the mesh and converted
+        // viewports side by side at a fixed `VIEWPORT_SIZE` each, separated
+        // by one `ui.spacing().item_spacing.x` gap (the `ui.horizontal`
+        // call around them), inside `Frame::central_panel`'s default 8px
+        // inner margin on both the left and right edge of the central
+        // region. The charts panel must never eat into that footprint.
+        let min_central = 2.0 * VIEWPORT_SIZE + column_gap + 2.0 * CENTRAL_PANEL_MARGIN_PX;
+        let available = ui.available_width();
+        // The generated-charts grid gets half the window (user requirement)
+        // so its tiles can scale up to fill the panel instead of rendering
+        // at a fixed, tiny size, but it must not starve the central
+        // region's two fixed-size viewports below `min_central`, nor drop
+        // below `min_charts_panel_width`. On a typical window (>= ~1500px
+        // wide) this yields exactly half; on the 1280px minimum window the
+        // `min_central` guard gives the charts panel slightly less than
+        // half so the viewports still fit — an intended tradeoff.
+        let charts_panel_width = (available * 0.5)
+            .min(available - min_central)
+            .max(min_charts_panel_width);
         // Added before the `CentralPanel` (egui panel order rule: side
         // panels first, `CentralPanel` last) so the central region gets
-        // whatever width remains after this fixed-width panel.
+        // whatever width remains after this panel's computed width.
         egui::Panel::right("import-generated-charts")
             .resizable(false)
             .exact_size(charts_panel_width)
@@ -694,6 +714,13 @@ impl ImportDialogState {
             self.chart_status_notes.clear();
             self.chart_panel_error = None;
         }
+        // `ui.available_width()` here is the scroll area's inner width
+        // (the panel width `show()` computed, minus its frame margins),
+        // so each of `CHART_GRID_COLUMNS` columns gets an equal share of
+        // it after subtracting the `egui::Grid` gaps between them.
+        let column_gap = ui.spacing().item_spacing.x;
+        let column_target = (ui.available_width() - (CHART_GRID_COLUMNS - 1) as f32 * column_gap)
+            / CHART_GRID_COLUMNS as f32;
         egui::Grid::new("import-charts-grid")
             .num_columns(CHART_GRID_COLUMNS)
             .show(ui, |ui| {
@@ -707,7 +734,7 @@ impl ImportDialogState {
                     }
                     #[cfg(not(test))]
                     let _ = view;
-                    render_chart_cell(ui, cell);
+                    render_chart_cell(ui, cell, column_target);
                     if (index + 1) % CHART_GRID_COLUMNS == 0 {
                         ui.end_row();
                     }
@@ -828,12 +855,13 @@ impl ImportDialogState {
     }
 }
 
-/// ~96px: with the import slider's max (`longest_axis_pixels` clamps to 63,
-/// see `show_settings`), a tile at this target is a legible multi-inch
-/// on-screen size without one side's pair of tiles dominating the scroll
-/// panel. The floor in `paint_chart_tile` keeps the upscale an integer
-/// multiple of the source pixels so NEAREST sampling stays crisp instead of
-/// blurring at a fractional scale.
+/// ~96px: the minimum per-column width the charts panel guarantees (see
+/// `min_charts_panel_width` in `show()`), matching the on-screen size tiles
+/// rendered at before tiles scaled to the panel's available width. Tiles
+/// themselves now scale to `column_target` (`show_generated_charts_panel`),
+/// not to this constant directly — `paint_chart_tile`'s integer floor still
+/// keeps the upscale a whole multiple of the source pixels so NEAREST
+/// sampling stays crisp instead of blurring at a fractional scale.
 const CHART_TILE_TARGET_PX: f32 = 96.0;
 /// Vertical gap between one side's header+tiles and the next in the scroll
 /// list, matching the `ui.separator()` spacing used elsewhere in this
@@ -865,7 +893,7 @@ struct ChartCell {
     content: ChartCellContent,
 }
 
-fn render_chart_cell(ui: &mut egui::Ui, cell: &ChartCell) {
+fn render_chart_cell(ui: &mut egui::Ui, cell: &ChartCell, column_target: f32) {
     // `egui::Grid` treats each top-level call inside its closure as one
     // column of the current row, so the whole card (label + tiles) is
     // wrapped in a single `vertical` group to make it one grid cell.
@@ -879,10 +907,11 @@ fn render_chart_cell(ui: &mut egui::Ui, cell: &ChartCell) {
             } => {
                 // Color tile above relief tile: the same stacking
                 // `source_grid`'s authored-source cards use (color canvas
-                // above depth canvas).
+                // above depth canvas). Both tiles share `dims`, so they get
+                // the same scale from `paint_chart_tile` and stay aligned.
                 ui.vertical(|ui| {
-                    paint_chart_tile(ui, color, *dims);
-                    paint_chart_tile(ui, relief, *dims);
+                    paint_chart_tile(ui, color, *dims, column_target);
+                    paint_chart_tile(ui, relief, *dims, column_target);
                 });
             }
             ChartCellContent::Note(note) => {
@@ -893,9 +922,19 @@ fn render_chart_cell(ui: &mut egui::Ui, cell: &ChartCell) {
     });
 }
 
-fn paint_chart_tile(ui: &mut egui::Ui, texture: &egui::TextureHandle, dims: (u32, u32)) {
+fn paint_chart_tile(
+    ui: &mut egui::Ui,
+    texture: &egui::TextureHandle,
+    dims: (u32, u32),
+    column_target: f32,
+) {
     let longer = dims.0.max(dims.1).max(1) as f32;
-    let scale = (CHART_TILE_TARGET_PX / longer).floor().max(1.0);
+    // Integer floor, not a fractional scale: these are pixel-art relief/
+    // color charts, so every source pixel must stay a uniform block of
+    // screen pixels or the relief would render as unevenly sized pixels.
+    // Flooring `column_target / longer` gives the largest whole-pixel
+    // upscale that still fits the column egui just allocated for this tile.
+    let scale = (column_target / longer).floor().max(1.0);
     let size = egui::vec2(dims.0 as f32 * scale, dims.1 as f32 * scale);
     let (rect, _response) = ui.allocate_exact_size(size, egui::Sense::hover());
     ui.painter().image(
