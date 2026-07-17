@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::ImportError;
 
@@ -20,7 +21,9 @@ pub struct Triangle {
 #[derive(Clone, Debug)]
 pub struct Material {
     pub base_color_factor: [f32; 4],
-    pub base_color_texture: Option<Texture>,
+    /// `Arc`-wrapped so cloning a `TriangleScene` (as `box_space_scene` does
+    /// every settings change) never copies texel buffers.
+    pub base_color_texture: Option<Arc<Texture>>,
     /// `Some(cutoff)` for glTF `alphaMode: MASK`; `None` renders opaque
     /// (OPAQUE and BLEND — the depthsprite format has no translucency).
     pub alpha_cutoff: Option<f32>,
@@ -81,7 +84,7 @@ fn convert_material(material: &gltf::Material<'_>, images: &[gltf::image::Data])
     let pbr = material.pbr_metallic_roughness();
     let base_color_texture = pbr.base_color_texture().map(|info| {
         let image = &images[info.texture().source().index()];
-        decode_image(image)
+        Arc::new(decode_image(image))
     });
     let alpha_cutoff = match material.alpha_mode() {
         gltf::material::AlphaMode::Mask => Some(material.alpha_cutoff().unwrap_or(0.5)),
@@ -264,7 +267,7 @@ fn faces(mode: gltf::mesh::Mode, indices: &[u32]) -> Vec<[usize; 3]> {
             (0..count.saturating_sub(2))
                 .map(|i| {
                     let i = i as u32;
-                    if i % 2 == 0 {
+                    if i.is_multiple_of(2) {
                         [at(i), at(i + 1), at(i + 2)]
                     } else {
                         [at(i + 1), at(i), at(i + 2)]

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use mesh_import::{
     Lighting, Material, Texture, Triangle, TriangleScene, View, light_direction, rasterize,
 };
@@ -163,7 +165,7 @@ fn mask_cutoff_discards_transparent_texels() {
     };
     let material = Material {
         base_color_factor: [1.0, 1.0, 1.0, 1.0],
-        base_color_texture: Some(texture),
+        base_color_texture: Some(Arc::new(texture)),
         alpha_cutoff: Some(0.5),
     };
     let scene = TriangleScene {

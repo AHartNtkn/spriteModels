@@ -4,7 +4,8 @@ mod raster;
 mod scene;
 
 pub use capture::{
-    ALL_VIEWS, ImportSettings, SideMode, SideModes, box_space_scene, convert, derived_bounds,
+    ALL_VIEWS, ImportSettings, SideMode, SideModes, box_space_scene, convert, convert_box_space,
+    derived_bounds,
 };
 pub use error::ImportError;
 pub use raster::{Lighting, Raster, View, light_direction, rasterize};

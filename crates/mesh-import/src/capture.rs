@@ -265,6 +265,20 @@ pub fn convert(
     settings.side_modes.validate()?;
     let (box_scene, bounds) =
         box_space_scene(scene, settings.rotation, settings.longest_axis_pixels)?;
+    convert_box_space(&box_scene, bounds, settings)
+}
+
+/// The capture half of `convert`, taking an already-fitted box-space scene
+/// and its bounds directly. Shared with the import dialog, which computes
+/// `box_space_scene` once for its mesh preview and feeds the same result
+/// here instead of paying for the mesh -> box-space transform twice per
+/// settings change.
+pub fn convert_box_space(
+    box_scene: &TriangleScene,
+    bounds: Bounds,
+    settings: &ImportSettings,
+) -> Result<AuthoredModel, ImportError> {
+    settings.side_modes.validate()?;
     let lighting = Lighting {
         direction: light_direction(
             settings.light_azimuth_degrees,
@@ -281,7 +295,7 @@ pub fn convert(
         let frame = view.frame(bounds);
         let (width, height) = view.dimensions(bounds);
         let raster = rasterize(
-            &box_scene,
+            box_scene,
             &View {
                 origin: frame.origin.map(|c| c as f32),
                 right: frame.source_u.map(|c| c as f32),
