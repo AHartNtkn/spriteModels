@@ -66,7 +66,7 @@ pub fn load_scene(path: impl AsRef<Path>) -> Result<TriangleScene, ImportError> 
             &buffers,
             default_material,
             &mut triangles,
-        );
+        )?;
     }
     if triangles.is_empty() {
         return Err(ImportError::NoTriangles);
@@ -170,7 +170,7 @@ fn collect_node(
     buffers: &[gltf::buffer::Data],
     default_material: usize,
     triangles: &mut Vec<Triangle>,
-) {
+) -> Result<(), ImportError> {
     let local = node.transform().matrix();
     let world = matrix_multiply(parent, local);
     if let Some(mesh) = node.mesh() {
@@ -178,12 +178,13 @@ fn collect_node(
             if primitive.mode() != gltf::mesh::Mode::Triangles {
                 continue;
             }
-            collect_primitive(&primitive, world, buffers, default_material, triangles);
+            collect_primitive(&primitive, world, buffers, default_material, triangles)?;
         }
     }
     for child in node.children() {
-        collect_node(&child, world, buffers, default_material, triangles);
+        collect_node(&child, world, buffers, default_material, triangles)?;
     }
+    Ok(())
 }
 
 fn collect_primitive(
@@ -192,11 +193,11 @@ fn collect_primitive(
     buffers: &[gltf::buffer::Data],
     default_material: usize,
     triangles: &mut Vec<Triangle>,
-) {
+) -> Result<(), ImportError> {
     let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()].0[..]));
     let positions: Vec<[f32; 3]> = match reader.read_positions() {
         Some(positions) => positions.collect(),
-        None => return,
+        None => return Err(ImportError::MissingPositions),
     };
     let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(Iterator::collect);
     let uvs: Option<Vec<[f32; 2]>> = reader
@@ -231,6 +232,7 @@ fn collect_primitive(
             material,
         });
     }
+    Ok(())
 }
 
 fn matrix_multiply(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
@@ -263,7 +265,14 @@ fn normal_matrix(m: [[f32; 4]; 4]) -> Option<[[f32; 3]; 3]> {
     let det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
         - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
         + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
-    if det.abs() < f32::EPSILON {
+    // The determinant scales with the cube of the transform's scale, so an
+    // absolute-magnitude threshold misclassifies small-but-valid uniform
+    // scales as singular. Any nonzero finite determinant yields a usable
+    // inverse-transpose, and the transformed normal is renormalized
+    // afterward, so no magnitude threshold is needed — only exact
+    // singularity (det == 0) or a non-finite determinant (overflow/NaN from
+    // the transform itself) disqualify the matrix.
+    if det == 0.0 || !det.is_finite() {
         return None;
     }
     let inv_det = 1.0 / det;

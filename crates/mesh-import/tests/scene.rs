@@ -142,3 +142,164 @@ fn malformed_file_is_rejected_with_gltf_error() {
     let error = load_scene(file.path()).expect_err("garbage must be rejected");
     assert!(matches!(error, ImportError::Gltf(_)));
 }
+
+fn assert_close(actual: [f32; 3], expected: [f32; 3], epsilon: f32) {
+    for i in 0..3 {
+        assert!(
+            (actual[i] - expected[i]).abs() <= epsilon,
+            "component {i}: actual {} expected {} (epsilon {epsilon})",
+            actual[i],
+            expected[i]
+        );
+    }
+}
+
+/// A determinant near zero from a small *uniform* scale (0.001^3 = 1e-9) is
+/// not singular: the inverse-transpose exists and, for a uniform scale,
+/// leaves normal direction unchanged after renormalization. An absolute
+/// determinant threshold misclassifies this as singular and substitutes the
+/// face normal instead of the correctly transformed source normal.
+#[test]
+fn small_uniform_scale_preserves_source_normal_direction() {
+    let mut bin = Vec::new();
+    // Face normal of this triangle is (0,0,1) - deliberately different from
+    // the source normal, so a wrong fallback to the face normal is caught.
+    let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    let normals: [[f32; 3]; 3] = [[0.6, 0.8, 0.0]; 3];
+    for p in positions {
+        for c in p {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    for n in normals {
+        for c in n {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    let json = serde_json::json!({
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0, "scale": [0.001, 0.001, 0.001]}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}}]}],
+        "buffers": [{"byteLength": bin.len()}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+            {"buffer": 0, "byteOffset": 36, "byteLength": 36}
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+             "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]},
+            {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"}
+        ]
+    });
+    let file = write_temp_glb(&glb::write_glb(&json.to_string(), &bin));
+    let scene = load_scene(file.path()).expect("scene loads");
+    assert_eq!(scene.triangles.len(), 1);
+    for vertex in 0..3 {
+        assert_close(scene.triangles[0].normals[vertex], [0.6, 0.8, 0.0], 1e-5);
+    }
+}
+
+/// Non-uniform scale is the case the inverse-transpose exists specifically
+/// to handle correctly (a plain normal-matrix multiply would skew the
+/// normal off the surface). scale (2,1,1) applied to source normal
+/// (1/sqrt(2), 1/sqrt(2), 0) via the inverse-transpose diag(0.5,1,1) gives
+/// (0.35355335, 0.7071068, 0), which renormalizes to
+/// (0.4472136, 0.8944272, 0).
+#[test]
+fn non_uniform_scale_transforms_normal_by_inverse_transpose() {
+    let mut bin = Vec::new();
+    let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    let frac_1_sqrt_2 = std::f32::consts::FRAC_1_SQRT_2;
+    let normals: [[f32; 3]; 3] = [[frac_1_sqrt_2, frac_1_sqrt_2, 0.0]; 3];
+    for p in positions {
+        for c in p {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    for n in normals {
+        for c in n {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    let json = serde_json::json!({
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0, "scale": [2.0, 1.0, 1.0]}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}}]}],
+        "buffers": [{"byteLength": bin.len()}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+            {"buffer": 0, "byteOffset": 36, "byteLength": 36}
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+             "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]},
+            {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"}
+        ]
+    });
+    let file = write_temp_glb(&glb::write_glb(&json.to_string(), &bin));
+    let scene = load_scene(file.path()).expect("scene loads");
+    assert_eq!(scene.triangles.len(), 1);
+    for vertex in 0..3 {
+        assert_close(
+            scene.triangles[0].normals[vertex],
+            [0.4472136, 0.8944272, 0.0],
+            1e-4,
+        );
+    }
+}
+
+/// A mesh primitive whose POSITION accessor cannot actually be read must be
+/// a loud error, not silently dropped geometry (the project bans silent
+/// failures).
+///
+/// A primitive that textually omits the POSITION key is rejected by
+/// `gltf::import` itself before this crate's code ever runs (gltf-json's
+/// schema validation requires every primitive to declare POSITION,
+/// confirmed empirically: such a document fails with
+/// `Gltf(Validation([.. "POSITION" .. Missing]))`). The reachable silent-drop
+/// case is a POSITION *accessor* whose backing bufferView is smaller than
+/// the accessor declares (schema-valid — gltf-json never cross-checks
+/// accessor size against bufferView length) — the `gltf` crate's own
+/// `read_positions()` returns `None` at read time in that case, which is
+/// exactly the `None => return` silent-skip this test targets.
+#[test]
+fn primitive_with_unreadable_position_accessor_is_a_loud_error() {
+    let mut bin = Vec::new();
+    let positions: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    for p in positions {
+        for c in p {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    let json = serde_json::json!({
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [
+            {"attributes": {"POSITION": 0}},
+            {"attributes": {"POSITION": 1}}
+        ]}],
+        "buffers": [{"byteLength": bin.len()}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+            // Declares only 12 bytes backing an accessor that needs 36
+            // (3 x VEC3 f32) — schema-valid, but too small to read.
+            {"buffer": 0, "byteOffset": 0, "byteLength": 12}
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+             "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]},
+            {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3",
+             "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]}
+        ]
+    });
+    let file = write_temp_glb(&glb::write_glb(&json.to_string(), &bin));
+    let error = load_scene(file.path())
+        .expect_err("primitive with an unreadable POSITION accessor must be rejected");
+    assert!(matches!(error, ImportError::MissingPositions));
+}

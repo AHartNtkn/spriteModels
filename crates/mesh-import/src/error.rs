@@ -7,6 +7,8 @@ pub enum ImportError {
     Gltf(#[from] gltf::Error),
     #[error("the scene contains no triangle geometry")]
     NoTriangles,
+    #[error("a mesh primitive has no POSITION attribute")]
+    MissingPositions,
     #[error("no side is set to Capture")]
     NoCaptureSides,
     #[error("{side:?} is supplied by its opposite, but {opposite:?} is not captured")]
