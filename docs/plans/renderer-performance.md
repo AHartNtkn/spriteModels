@@ -338,3 +338,20 @@ acceptance/orbit, editor preview/workflow, e2e CLI) to fixture-gen model
 inputs (file-I/O tests save the generated model to a tempdir first). Verified
 divergence between patched asset and generator is exactly 30 Front-chart
 relief texels no converted assertion touches. Workspace fully green.
+
+### Task 6 (forward splatting) — commit 7704057
+
+Achieved granularity: pixel-by-chart culling via per-foreground-cell swept-box
+zonotope screen bboxes unioned into per-chart pixel masks; the whole-ray solve
+runs only on masked pixels; the per-pixel all-charts outer loop is deleted.
+Fully-per-patch traversal was proven NON-exact under current semantics: the
+whole-ray epsilon-dedup's kept-anchor chains couple boundaries across distant
+patches, so per-patch segment reconstruction cannot be byte-identical (full
+analysis in the task report; reviewer independently confirmed). Implementer
+bench (same-session attribution): globe oblique -18%, gyroscope oblique -20%,
+default orbits -9 to -12%, orbit_sweep 397->344 ms; gains are moderate because
+native frames already fit models tightly. New output-identity oracle test
+compares full framebuffers against an independent copy of the old traversal
+across 4 cameras x 2 sizes. Workspace green, goldens bit-identical, review
+approved. Minor (for final review): margin doc comment's spare-factor prose is
+optimistic (bound itself sound).
