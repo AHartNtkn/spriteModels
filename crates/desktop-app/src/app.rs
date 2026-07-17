@@ -5,7 +5,7 @@ use eframe::egui;
 use relief_core::{Bounds, CanonicalView};
 
 use crate::{
-    import_dialog::ImportDialogState,
+    import_dialog::{ImportDialogOutcome, ImportDialogState},
     layout::{self, Rect, Size},
     menu::{MenuAction, PendingDestructiveAction, UnsavedChoice, show_menu_bar},
     model_view::ModelView,
@@ -288,18 +288,14 @@ impl DepthSpriteApp {
         let Some(state) = self.import_dialog.as_mut() else {
             return;
         };
-        state.ensure_converted();
-        let triangle_count = state.scene.triangles.len();
-        let mut cancel = false;
-        egui::Modal::new("import-model-modal".into()).show(context, |ui| {
-            ui.heading("Import 3D Model");
-            ui.label(format!("Triangles: {triangle_count}"));
-            if ui.button("Cancel").clicked() {
-                cancel = true;
+        match state.show(context) {
+            ImportDialogOutcome::KeepOpen => {}
+            ImportDialogOutcome::Cancel => self.import_dialog = None,
+            ImportDialogOutcome::Import(model) => {
+                self.import_dialog = None;
+                self.shell
+                    .request_destructive(PendingDestructiveAction::Import(model));
             }
-        });
-        if cancel {
-            self.import_dialog = None;
         }
     }
 
@@ -384,7 +380,8 @@ impl eframe::App for DepthSpriteApp {
 
         if self.shell.file_error().is_some() {
             self.show_file_error_modal(&context);
-        } else if self.import_dialog.is_some() {
+        } else if self.shell.pending_destructive_action().is_none() && self.import_dialog.is_some()
+        {
             self.show_import_modal(&context);
         } else {
             self.show_unsaved_modal(&context);
@@ -583,5 +580,82 @@ mod tests {
         app.handle_menu_action(MenuAction::ResetView, &context);
 
         assert_eq!(app.model_view.camera(), editor_core::OrbitCamera::default());
+    }
+
+    // Driving rfd file pickers headlessly is not possible, so this injects
+    // the scene directly instead of going through `MenuAction::ImportModel`.
+    fn test_quad_scene() -> mesh_import::TriangleScene {
+        let tri = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| mesh_import::Triangle {
+            positions: [a, b, c],
+            normals: [[0.0, 0.0, -1.0]; 3],
+            uvs: [[0.0, 0.0]; 3],
+            colors: [[1.0, 1.0, 1.0, 1.0]; 3],
+            material: 0,
+        };
+        mesh_import::TriangleScene {
+            triangles: vec![
+                tri([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.5]),
+                tri([0.0, 0.0, 0.0], [1.0, 1.0, 0.5], [0.0, 1.0, 0.5]),
+            ],
+            materials: vec![mesh_import::Material {
+                base_color_factor: [1.0, 1.0, 1.0, 1.0],
+                base_color_texture: None,
+                alpha_cutoff: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn open_import_dialog_renders_and_cancel_closes_it_without_touching_the_document() {
+        let context = egui::Context::default();
+        let mut app = DepthSpriteApp::from_startup_path(None);
+        let revision_before = app.shell.document().revision();
+
+        app.import_dialog = Some(ImportDialogState::new(test_quad_scene(), "quad.glb".into()));
+        run_frame(&context, &mut app, Vec::new());
+        assert!(
+            app.import_dialog.is_some(),
+            "one frame renders the modal without consuming the dialog state"
+        );
+
+        app.import_dialog = None;
+        run_frame(&context, &mut app, Vec::new());
+        assert!(app.import_dialog.is_none());
+        assert_eq!(
+            app.shell.document().revision(),
+            revision_before,
+            "opening and cancelling the import dialog must not touch the current document"
+        );
+    }
+
+    #[test]
+    fn import_dialog_is_suppressed_while_an_unsaved_prompt_is_pending() {
+        let context = egui::Context::default();
+        let mut app = DepthSpriteApp::from_startup_path(None);
+        app.shell
+            .document
+            .set_source_opposite(CanonicalView::Front, false)
+            .unwrap();
+        app.shell.document.add_source(CanonicalView::Back).unwrap();
+        app.handle_menu_action(MenuAction::New, &context);
+        assert!(
+            app.shell.pending_destructive_action().is_some(),
+            "a dirty document must block New behind the unsaved-changes prompt"
+        );
+
+        app.import_dialog = Some(ImportDialogState::new(test_quad_scene(), "quad.glb".into()));
+        run_frame(&context, &mut app, Vec::new());
+
+        assert!(
+            app.import_dialog.is_some(),
+            "an unrelated pending action must not clear the import dialog state"
+        );
+        let dialog = app.import_dialog.as_ref().unwrap();
+        assert_eq!(
+            dialog.mesh_viewport_rect,
+            egui::Rect::NOTHING,
+            "the import dialog must not render (and so never call show()) while an \
+             unsaved-changes prompt is pending"
+        );
     }
 }

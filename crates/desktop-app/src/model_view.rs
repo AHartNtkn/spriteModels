@@ -132,25 +132,34 @@ impl ModelView {
     }
 
     fn zoom(&mut self, wheel_delta: f32) {
-        if !wheel_delta.is_finite() {
-            return;
-        }
-        let zoom =
-            f64::from(self.zoom_milli) * (f64::from(wheel_delta) * ZOOM_EXPONENT_PER_POINT).exp();
-        self.zoom_milli =
-            zoom.round()
-                .clamp(f64::from(MIN_ZOOM_MILLI), f64::from(MAX_ZOOM_MILLI)) as u32;
+        self.zoom_milli = zoom_step(self.zoom_milli, wheel_delta);
     }
 }
 
-fn presentation_scale(native: egui::Vec2, available: egui::Vec2, zoom_milli: u32) -> u32 {
+/// One wheel-scroll step of zoom, shared by the main model view and the
+/// import dialog's camera-synced viewports so both apply an identical
+/// exponential zoom curve.
+pub(crate) fn zoom_step(zoom_milli: u32, wheel_delta: f32) -> u32 {
+    if !wheel_delta.is_finite() {
+        return zoom_milli;
+    }
+    let zoom = f64::from(zoom_milli) * (f64::from(wheel_delta) * ZOOM_EXPONENT_PER_POINT).exp();
+    zoom.round()
+        .clamp(f64::from(MIN_ZOOM_MILLI), f64::from(MAX_ZOOM_MILLI)) as u32
+}
+
+pub(crate) fn presentation_scale(
+    native: egui::Vec2,
+    available: egui::Vec2,
+    zoom_milli: u32,
+) -> u32 {
     let fit_width = (available.x * FIT_FRACTION / native.x).floor();
     let fit_height = (available.y * FIT_FRACTION / native.y).floor();
     let fit = fit_width.min(fit_height).max(1.0) as u32;
     ((u64::from(fit) * u64::from(zoom_milli) + 500) / 1_000).max(1) as u32
 }
 
-fn color_image(framebuffer: &FrameBuffer) -> egui::ColorImage {
+pub(crate) fn color_image(framebuffer: &FrameBuffer) -> egui::ColorImage {
     egui::ColorImage::new(
         [framebuffer.width() as usize, framebuffer.height() as usize],
         framebuffer
@@ -245,5 +254,16 @@ mod tests {
 
         assert!(model_view.zoom_milli < DEFAULT_ZOOM_MILLI);
         assert!(model_view.zoom_milli > MIN_ZOOM_MILLI);
+    }
+
+    #[test]
+    fn zoom_step_holds_at_extremes_and_ignores_non_finite_deltas() {
+        assert_eq!(
+            zoom_step(DEFAULT_ZOOM_MILLI, f32::NAN),
+            DEFAULT_ZOOM_MILLI,
+            "a non-finite wheel delta must leave the zoom unchanged"
+        );
+        assert_eq!(zoom_step(MIN_ZOOM_MILLI, -1_000.0), MIN_ZOOM_MILLI);
+        assert_eq!(zoom_step(MAX_ZOOM_MILLI, 1_000.0), MAX_ZOOM_MILLI);
     }
 }
