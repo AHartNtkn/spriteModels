@@ -195,4 +195,20 @@ preparation closure (ReliefField + ComponentMap + PreparedRelief) accounts for
 
 ## Per-Task Results
 
-(appended after each task: criterion deltas + test status)
+### Task 1 (prepare/render split) — commits 2f4eafb, bcd0d89
+
+Controller-verified medians (vs baseline; render/* baselines included the
+preparation that is now hoisted, orbit_sweep is apples-to-apples end-to-end):
+
+| benchmark                      | baseline  | after     |
+|--------------------------------|-----------|-----------|
+| render/globe/front             | 79.1 ms   | 8.8 ms    |
+| render/globe/default_orbit     | 138.1 ms  | 63.5 ms   |
+| render/globe/oblique           | 133.4 ms  | 67.3 ms   |
+| render/gyroscope/front         | 202.7 ms  | 83.6 ms   |
+| render/gyroscope/default_orbit | 277.9 ms  | 160.5 ms  |
+| render/gyroscope/oblique       | 282.4 ms  | 181.9 ms  |
+| prepare/globe (once per edit)  | —         | 56.8 ms   |
+| orbit_sweep/globe (8 frames)   | 1.134 s   | 0.594 s   |
+
+Workspace tests green, goldens bit-identical, review approved.
