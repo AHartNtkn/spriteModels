@@ -230,6 +230,28 @@ fn clockwise_wound_triangles_are_rasterized_not_culled() {
 }
 
 #[test]
+fn face_normal_matches_the_triangles_winding() {
+    // The quad's two CCW-wound triangles both carry an explicit vertex
+    // normal of (0, 0, -1); the geometric face normal computed from their
+    // positions alone must agree with it exactly for every covered texel.
+    let scene = TriangleScene {
+        triangles: quad(1.5, 0).to_vec(),
+        materials: vec![plain_material()],
+    };
+    let raster = rasterize(&scene, &front_view(), &unlit());
+    for y in 0..4 {
+        for x in 0..4 {
+            let i = (y * 4 + x) as usize;
+            assert_eq!(
+                raster.face_normal[i],
+                [0.0, 0.0, -1.0],
+                "texel ({x},{y}) face normal"
+            );
+        }
+    }
+}
+
+#[test]
 fn light_direction_places_the_light_by_azimuth_and_elevation() {
     let front = light_direction(0.0, 0.0);
     assert!((front[0]).abs() < 1e-6 && (front[1]).abs() < 1e-6 && (front[2] + 1.0).abs() < 1e-6);

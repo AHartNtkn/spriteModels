@@ -23,6 +23,13 @@ pub struct Raster {
     pub depth: Vec<f32>,
     /// Covered texels have alpha 255; uncovered texels are [0, 0, 0, 0].
     pub color: Vec<[u8; 4]>,
+    /// Geometric face normal of the winning triangle (normalized cross
+    /// product of its edges, in the scene's own coordinate space — not
+    /// rotated into screen space). `[0.0; 3]` where uncovered. Surface
+    /// ownership (capture.rs) uses this to score how head-on each capture
+    /// side observes a hit; it is independent of the interpolated,
+    /// two-sided-flipped vertex normal used for shading below.
+    pub face_normal: Vec<[f32; 3]>,
 }
 
 pub fn light_direction(azimuth_degrees: f32, elevation_degrees: f32) -> [f32; 3] {
@@ -39,11 +46,44 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// Geometric face normal of a triangle from its vertex positions alone,
+/// independent of any view. Cross order is `(p2 - p0) x (p1 - p0)` — the
+/// mirror of the standard `(p1-p0) x (p2-p0)` used by the glTF-space face
+/// normal fallback in scene.rs. The two crates' winding conventions differ
+/// because this rasterizer's screen basis uses `down` (not `up`) as its
+/// second axis; this order is pinned by the axis-aligned CCW quad test
+/// (`face_normal_matches_the_triangles_winding`), which fixes the sign for
+/// this crate's own triangles rather than re-deriving it abstractly.
+fn triangle_face_normal(positions: [[f32; 3]; 3]) -> [f32; 3] {
+    let e1 = sub(positions[1], positions[0]);
+    let e2 = sub(positions[2], positions[0]);
+    let n = cross(e2, e1);
+    let len = dot(n, n).sqrt();
+    if len > 0.0 {
+        [n[0] / len, n[1] / len, n[2] / len]
+    } else {
+        [0.0, 0.0, 0.0]
+    }
+}
+
 pub fn rasterize(scene: &TriangleScene, view: &View, lighting: &Lighting) -> Raster {
     let width = view.width as usize;
     let height = view.height as usize;
     let mut depth = vec![f32::INFINITY; width * height];
     let mut color = vec![[0u8; 4]; width * height];
+    let mut face_normal = vec![[0.0f32; 3]; width * height];
 
     for tri in &scene.triangles {
         // Project vertices to screen space.
@@ -74,6 +114,8 @@ pub fn rasterize(scene: &TriangleScene, view: &View, lighting: &Lighting) -> Ras
         if !inv_area.is_finite() {
             continue;
         }
+        // Computed once per triangle, not per pixel.
+        let tri_normal = triangle_face_normal(tri.positions);
 
         let min_x = s0[0].min(s1[0]).min(s2[0]).floor().max(0.0) as usize;
         let max_x = (s0[0].max(s1[0]).max(s2[0]).ceil().max(0.0) as usize).min(width);
@@ -124,6 +166,7 @@ pub fn rasterize(scene: &TriangleScene, view: &View, lighting: &Lighting) -> Ras
                     continue;
                 }
                 depth[index] = z;
+                face_normal[index] = tri_normal;
 
                 let mut normal = interpolate3(tri.normals);
                 let len = dot(normal, normal).sqrt();
@@ -156,6 +199,7 @@ pub fn rasterize(scene: &TriangleScene, view: &View, lighting: &Lighting) -> Ras
         height: view.height,
         depth,
         color,
+        face_normal,
     }
 }
 
