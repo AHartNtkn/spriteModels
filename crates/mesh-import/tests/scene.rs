@@ -136,6 +136,106 @@ fn scene_without_triangles_is_rejected() {
     assert!(matches!(error, ImportError::NoTriangles));
 }
 
+/// TRIANGLE_STRIP (mode 5): 4 positions forming a quad via strip winding —
+/// (p0,p1,p2) then (p2,p1,p3) per the glTF strip convention, where odd
+/// triangles swap their first two vertices to keep facing consistent.
+/// Must expand to exactly 2 triangles, not be silently dropped.
+#[test]
+fn triangle_strip_mode_expands_to_two_triangles_with_consistent_winding() {
+    let mut bin = Vec::new();
+    let positions: [[f32; 3]; 4] = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+    ];
+    for p in positions {
+        for c in p {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    let json = serde_json::json!({
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "mode": 5}]}],
+        "buffers": [{"byteLength": bin.len()}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 48}],
+        "accessors": [{"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3",
+                       "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]}]
+    });
+    let file = write_temp_glb(&glb::write_glb(&json.to_string(), &bin));
+    let scene = load_scene(file.path()).expect("triangle-strip scene must load");
+    assert_eq!(
+        scene.triangles.len(),
+        2,
+        "strip of 4 vertices must expand to 2 triangles"
+    );
+    assert_eq!(
+        scene.triangles[0].positions,
+        [positions[0], positions[1], positions[2]]
+    );
+    assert_eq!(
+        scene.triangles[1].positions,
+        [positions[2], positions[1], positions[3]]
+    );
+
+    // No NORMAL attribute: normals fall back to each triangle's own face
+    // normal. Consistent facing (both +z) proves the odd-triangle winding
+    // swap ran — a naive consecutive-triple expansion would flip triangle 1
+    // to face -z.
+    for tri in &scene.triangles {
+        for normal in tri.normals {
+            assert_close(normal, [0.0, 0.0, 1.0], 1e-6);
+        }
+    }
+}
+
+/// TRIANGLE_FAN (mode 6): 4 positions (center + 3 rim points) must expand to
+/// 2 triangles (0,1,2) and (0,2,3), not be silently dropped.
+#[test]
+fn triangle_fan_mode_expands_to_two_triangles() {
+    let mut bin = Vec::new();
+    let positions: [[f32; 3]; 4] = [
+        [0.5, 0.5, 0.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+    ];
+    for p in positions {
+        for c in p {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    let json = serde_json::json!({
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "mode": 6}]}],
+        "buffers": [{"byteLength": bin.len()}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 48}],
+        "accessors": [{"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3",
+                       "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]}]
+    });
+    let file = write_temp_glb(&glb::write_glb(&json.to_string(), &bin));
+    let scene = load_scene(file.path()).expect("triangle-fan scene must load");
+    assert_eq!(
+        scene.triangles.len(),
+        2,
+        "fan of 4 vertices must expand to 2 triangles"
+    );
+    assert_eq!(
+        scene.triangles[0].positions,
+        [positions[0], positions[1], positions[2]]
+    );
+    assert_eq!(
+        scene.triangles[1].positions,
+        [positions[0], positions[2], positions[3]]
+    );
+}
+
 #[test]
 fn malformed_file_is_rejected_with_gltf_error() {
     let file = write_temp_glb(b"not a gltf file");

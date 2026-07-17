@@ -175,7 +175,14 @@ fn collect_node(
     let world = matrix_multiply(parent, local);
     if let Some(mesh) = node.mesh() {
         for primitive in mesh.primitives() {
-            if primitive.mode() != gltf::mesh::Mode::Triangles {
+            if !matches!(
+                primitive.mode(),
+                gltf::mesh::Mode::Triangles
+                    | gltf::mesh::Mode::TriangleStrip
+                    | gltf::mesh::Mode::TriangleFan
+            ) {
+                // Points, lines, line loops, and line strips are not
+                // surfaces; they contribute no triangle geometry.
                 continue;
             }
             collect_primitive(&primitive, world, buffers, default_material, triangles)?;
@@ -213,8 +220,7 @@ fn collect_primitive(
     let material = primitive.material().index().unwrap_or(default_material);
     let normal_matrix = normal_matrix(world);
 
-    for face in indices.chunks_exact(3) {
-        let idx = [face[0] as usize, face[1] as usize, face[2] as usize];
+    for idx in faces(primitive.mode(), &indices) {
         let world_positions = idx.map(|i| transform_point(world, positions[i]));
         let world_normals = match (&normals, normal_matrix) {
             (Some(normals), Some(matrix)) => {
@@ -233,6 +239,51 @@ fn collect_primitive(
         });
     }
     Ok(())
+}
+
+/// Expands a primitive's index buffer into a list of triangle-index
+/// triples, per glTF's primitive-mode conventions.
+///
+/// `Triangles`: plain chunks of 3. `TriangleStrip`: triangle `i` uses
+/// vertices `(i, i+1, i+2)`, with the first two swapped on odd `i` — the
+/// glTF strip convention that keeps every triangle's winding facing the
+/// same way (consecutive strip triangles share an edge, so taking raw
+/// consecutive triples would alternate winding). `TriangleFan`: triangle
+/// `i` (1-indexed) uses `(0, i, i+1)`, which is already winding-consistent
+/// since every triangle shares the fixed vertex 0 in the same position.
+fn faces(mode: gltf::mesh::Mode, indices: &[u32]) -> Vec<[usize; 3]> {
+    use gltf::mesh::Mode;
+    let at = |i: u32| indices[i as usize] as usize;
+    match mode {
+        Mode::Triangles => indices
+            .chunks_exact(3)
+            .map(|face| [face[0] as usize, face[1] as usize, face[2] as usize])
+            .collect(),
+        Mode::TriangleStrip => {
+            let count = indices.len();
+            (0..count.saturating_sub(2))
+                .map(|i| {
+                    let i = i as u32;
+                    if i % 2 == 0 {
+                        [at(i), at(i + 1), at(i + 2)]
+                    } else {
+                        [at(i + 1), at(i), at(i + 2)]
+                    }
+                })
+                .collect()
+        }
+        Mode::TriangleFan => {
+            let count = indices.len();
+            (1..count.saturating_sub(1))
+                .map(|i| {
+                    let i = i as u32;
+                    [at(0), at(i), at(i + 1)]
+                })
+                .collect()
+        }
+        // Only triangle-family modes reach `collect_primitive`.
+        _ => Vec::new(),
+    }
 }
 
 fn matrix_multiply(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
