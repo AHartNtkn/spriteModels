@@ -51,7 +51,11 @@ embedded textures.
 bounding box. Scale uniformly so the longest box axis equals the longest-axis
 setting `N` (1..=63). The other two bounds are the scaled extents rounded up
 (`ceil`, floor of 1), so the mesh always fits inside the model box and fitting
-itself never causes clamping. The mesh is centered in the box.
+itself never causes clamping. The mesh is centered in the box. The default
+import rotation is a half-turn about X (`diag(1, −1, −1)`): glTF's convention
+is +Y up and +Z toward the viewer, while the box frame's y points down and its
+front face looks along +z, so the identity mapping would import every model
+upside down and back-to-front.
 
 **Depth → relief.** For each captured side, rasterize along that side's inward
 axis. Each covered texel keeps its nearest hit; depth `d` (pixels from the box
@@ -98,6 +102,29 @@ side — the one that represents it best — plus a one-texel seam closure:
   open sub-texel gaps where differently-owned regions abut; the closure ring
   is the support the interpolation needs to meet the neighboring chart, and
   it carries true geometry, so the overlap is consistent rather than doubled.
+
+## Fabricated-wall cuts
+
+Within a chart, four-connected foreground texels interpolate as one
+continuous surface, so adjacency across an occlusion boundary fabricates a
+wall the model does not have (an ear silhouetted over the back renders as a
+cliff joining them). After ownership and closure, each chart is scanned for
+4-adjacent covered pairs whose relief differs by more than one continuous
+best-faced sheet can produce: 8 units (the 45° ownership slope bound over one
+texel) plus 2 for the two roundings. Each candidate pair is tested against
+the model itself — the segment between the two reconstructed sample points is
+sampled at one-texel spacing, and the pair stays connected only if every
+interior sample lies within one texel of the mesh, the discretization's own
+resolution. A real steep wall (a cavity side that only its grazing fallback
+owner can see, like the bowl's) passes this test; an occlusion cut, whose
+would-be wall crosses free space, does not. At a fabricated cut the far
+(deeper) texel of the pair is emptied: the near sheet ends at its true
+silhouette and keeps that outline intact, while the far sheet loses only the
+fragmentary margin that better-facing sides cover. Where no other side sees
+the dropped strip, a one-texel gap remains — preferred to fabricated
+geometry. Cuts run after closure so dilation cannot re-bridge them.
+Point-to-mesh distance queries use a uniform triangle grid built once per
+conversion.
 
 **Color.** At the winning hit, interpolate UV and vertex color and compute base
 color per the glTF definition: `baseColorFactor × baseColorTexture(uv) ×
