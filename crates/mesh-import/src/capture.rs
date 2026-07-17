@@ -1,5 +1,6 @@
 use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart, RELIEF_UNITS_PER_PIXEL};
 
+use crate::cuts::TriangleGrid;
 use crate::{ImportError, Lighting, Triangle, TriangleScene, View, light_direction, rasterize};
 
 pub const ALL_VIEWS: [CanonicalView; 6] = [
@@ -278,20 +279,27 @@ pub fn convert(
 /// `box_space_scene` once for its mesh preview and feeds the same result
 /// here instead of paying for the mesh -> box-space transform twice per
 /// settings change.
-fn add3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub(crate) fn add3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+pub(crate) fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn scale3(a: [f64; 3], s: f64) -> [f64; 3] {
+pub(crate) fn scale3(a: [f64; 3], s: f64) -> [f64; 3] {
     [a[0] * s, a[1] * s, a[2] * s]
 }
 
-fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+pub(crate) fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Euclidean distance between two box-space points, in texels (box-space
+/// units are texels by construction: `fit`'s `dim()` maps the scaled mesh
+/// extent directly onto the bounds' integer texel counts).
+pub(crate) fn distance3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    dot3(sub3(a, b), sub3(a, b)).sqrt()
 }
 
 /// One enabled Capture side's rasterization after the reachability filter
@@ -577,6 +585,97 @@ pub(crate) fn dilate_keep_mask(
     out
 }
 
+/// Largest relief difference a single continuous best-faced sheet can
+/// produce between 4-adjacent texels: ownership guarantees an owned
+/// sample's surface slope is <= 45 degrees (the ownership rule's own
+/// candidacy bound), so one continuous sheet's relief can change by at most
+/// one pixel (8 relief units, `RELIEF_UNITS_PER_PIXEL`) across one texel of
+/// lateral travel, plus 2 units absorbing the pair's two independent
+/// depth-quantization roundings. A larger gap is either a real steep wall
+/// (a fallback-owned cavity side) or an occlusion cut — the wall-reality
+/// test, not this threshold, tells them apart (spec: "Fabricated-wall
+/// cuts").
+const CUT_CANDIDATE_UNITS: i64 = 10;
+
+/// Fabricated-wall cuts (spec: "Fabricated-wall cuts"), run after ownership
+/// and closure and before chart encoding: every 4-adjacent pair of kept
+/// texels whose relief differs by more than `CUT_CANDIDATE_UNITS` is a
+/// candidate discontinuity, tested by sampling the open segment between the
+/// pair's two reconstructed 3D points against the mesh (`grid`). Fabricated
+/// pairs (some interior sample farther than one texel from any triangle)
+/// have their far (deeper) texel collected into `drop`, which is applied to
+/// `kept` only after the full scan — so a texel dropped by one pair cannot
+/// change the candidacy or verdict of another pair scanned later, making
+/// the result independent of scan order (spec: "two-phase"). Cuts never run
+/// twice and closure never re-runs afterward, so a cut cannot be re-bridged.
+fn apply_fabricated_wall_cuts(side: &CaptureSide, kept: &mut [bool], grid: &TriangleGrid) {
+    let relief_at = |idx: usize| i64::from(255 - side.rgba[idx][3]);
+    let mut drop = vec![false; kept.len()];
+
+    let mut test_pair = |x0: u32, y0: u32, x1: u32, y1: u32| {
+        let i0 = side.index(x0, y0);
+        let i1 = side.index(x1, y1);
+        if !kept[i0] || !kept[i1] {
+            return;
+        }
+        let relief0 = relief_at(i0);
+        let relief1 = relief_at(i1);
+        if (relief0 - relief1).abs() <= CUT_CANDIDATE_UNITS {
+            return;
+        }
+        let (near, far) = if relief0 <= relief1 {
+            ((x0, y0, i0), (x1, y1, i1))
+        } else {
+            ((x1, y1, i1), (x0, y0, i0))
+        };
+        let p_near = side.point_at(near.0, near.1, side.depth[near.2]);
+        let p_far = side.point_at(far.0, far.1, side.depth[far.2]);
+        let len = distance3(p_far, p_near);
+        // The pair's own endpoints lie on surface by construction and are
+        // excluded; at least one interior probe is always taken, even for
+        // immediately adjacent texels, so a real wall spanning exactly one
+        // texel of lateral travel still gets tested once.
+        let samples = (len.ceil() as i64 - 1).max(1);
+        let mut real = true;
+        for k in 1..=samples {
+            let t = k as f64 / (samples + 1) as f64;
+            // `q` is a convex combination of `p_near` and `p_far`, both
+            // reconstructed from an in-bounds texel and a depth that
+            // cleared the reachability filter (relief <= h_max, i.e.
+            // within the model box on the forward axis, per
+            // `capture_side`'s own filter); since the model box is convex,
+            // every interior sample stays inside it too, so
+            // `within_one_texel`'s out-of-box clamp is a defensive
+            // fallback here, never live on this call path.
+            let q = add3(p_near, scale3(sub3(p_far, p_near), t));
+            if !grid.within_one_texel(q) {
+                real = false;
+                break;
+            }
+        }
+        if !real {
+            drop[far.2] = true;
+        }
+    };
+
+    for y in 0..side.height {
+        for x in 0..side.width {
+            if x + 1 < side.width {
+                test_pair(x, y, x + 1, y);
+            }
+            if y + 1 < side.height {
+                test_pair(x, y, x, y + 1);
+            }
+        }
+    }
+
+    for (idx, &dropped) in drop.iter().enumerate() {
+        if dropped {
+            kept[idx] = false;
+        }
+    }
+}
+
 pub fn convert_box_space(
     box_scene: &TriangleScene,
     bounds: Bounds,
@@ -600,16 +699,29 @@ pub fn convert_box_space(
         .map(|view| capture_side(box_scene, view, bounds, &lighting))
         .collect();
 
-    // Pass 2: ownership + one-texel closure ring, then encode each chart.
-    let mut charts = Vec::new();
+    // Pass 2: ownership + one-texel closure ring, per side.
+    let mut masks: Vec<Vec<bool>> = Vec::with_capacity(sides.len());
     for (s_idx, side) in sides.iter().enumerate() {
         let kept = owning_mask(&sides, s_idx);
         let covered: Vec<bool> = side.depth.iter().map(|d| d.is_finite()).collect();
-        let dilated = dilate_keep_mask(&kept, &covered, side.width, side.height);
+        masks.push(dilate_keep_mask(&kept, &covered, side.width, side.height));
+    }
+
+    // Pass 3: fabricated-wall cuts, run after closure (so dilation cannot
+    // re-bridge a cut) and before chart encoding. The triangle grid is
+    // built once from every box-space triangle, independent of which sides
+    // are enabled for capture.
+    let grid = TriangleGrid::build(&box_scene.triangles, bounds);
+    for (side, mask) in sides.iter().zip(masks.iter_mut()) {
+        apply_fabricated_wall_cuts(side, mask, &grid);
+    }
+
+    let mut charts = Vec::new();
+    for (side, mask) in sides.iter().zip(masks.iter()) {
         let rgba: Vec<[u8; 4]> = side
             .rgba
             .iter()
-            .zip(dilated.iter())
+            .zip(mask.iter())
             .map(|(&texel, &keep)| if keep { texel } else { [0, 0, 0, 0] })
             .collect();
         let mut chart = Chart::from_rgba(side.view, side.width, side.height, rgba)?;

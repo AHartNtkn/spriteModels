@@ -913,3 +913,206 @@ fn fallback_owner_used_when_the_best_side_is_occluded() {
     }
     assert!(slant_rows_checked > 0, "test setup: no slant rows probed");
 }
+
+/// "Floor" quad at z = 0.45 spans the full x/y footprint; "plate" quad at
+/// z = 0.1 covers the central region x,y in [0.25,0.75]. Both face Front
+/// (geometric normal (0,0,-1) — the `cube()` z=0 face's winding pattern,
+/// confirmed Front-facing by `flat_quad_gives_depth_one_covered_relief_...`
+/// above), so Front owns both with no competing candidate. A sliver at
+/// x = 0 spans z = 0..1 purely to widen the scene's bounding box so both
+/// surfaces land inside Front's reachable front half (h_max); it is
+/// edge-on to Front (near-zero y extent) and contributes no rasterized
+/// coverage (same technique as `geometry_past_the_midplane_is_dropped`).
+///
+/// Plate and floor are 4-adjacent across the plate's silhouette boundary,
+/// with a relief gap far exceeding the cut candidate threshold and real
+/// empty space between them (the plate has no thickness connecting it to
+/// the floor) — the fabricated-cliff case the cut pass exists to catch.
+#[test]
+fn occlusion_cut_drops_the_far_strip() {
+    let scene = TriangleScene {
+        triangles: vec![
+            // Floor: x,y in [0,1], z = 0.45.
+            tri([0.0, 0.0, 0.45], [1.0, 0.0, 0.45], [1.0, 1.0, 0.45]),
+            tri([0.0, 0.0, 0.45], [1.0, 1.0, 0.45], [0.0, 1.0, 0.45]),
+            // Plate: x,y in [0.25,0.75], z = 0.1.
+            tri([0.25, 0.25, 0.1], [0.75, 0.25, 0.1], [0.75, 0.75, 0.1]),
+            tri([0.25, 0.25, 0.1], [0.75, 0.75, 0.1], [0.25, 0.75, 0.1]),
+            // Edge-on sliver widening the z extent to [0,1].
+            tri([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0001, 0.5]),
+        ],
+        materials: vec![plain_material()],
+    };
+    let mut config = ImportSettings {
+        rotation: IDENTITY,
+        ..settings(16)
+    };
+    let mut modes = config.side_modes;
+    for side in [
+        CanonicalView::Back,
+        CanonicalView::Left,
+        CanonicalView::Right,
+        CanonicalView::Top,
+        CanonicalView::Bottom,
+    ] {
+        modes.set(side, SideMode::Off).expect("legal mode");
+    }
+    config.side_modes = modes;
+
+    let model = convert(&scene, &config).expect("converts");
+    let bounds = model.bounds();
+    // Every extent (x and y from floor, z from the sliver) is exactly 1.0,
+    // so scale is exactly longest_axis_pixels with no centering offset.
+    assert_eq!(
+        (bounds.width(), bounds.height(), bounds.depth()),
+        (16, 16, 16),
+        "derived bounds"
+    );
+    let scale = f64::from(bounds.width());
+
+    let h_max = i64::from(CanonicalView::Front.maximum_inward_depth(bounds));
+    let plate_relief = ((0.1_f64 * scale) * 8.0).round() as i64;
+    let floor_relief = ((0.45_f64 * scale) * 8.0).round() as i64;
+    assert!(
+        plate_relief <= h_max && floor_relief <= h_max,
+        "both surfaces must be reachable from Front (plate {plate_relief}, floor \
+         {floor_relief}, h_max {h_max})"
+    );
+    assert!(
+        floor_relief - plate_relief > 10,
+        "the plate/floor relief gap must exceed the cut candidate threshold \
+         (plate {plate_relief}, floor {floor_relief})"
+    );
+
+    // Plate occupies texel columns/rows whose center (idx + 0.5) falls
+    // inside [0.25*scale, 0.75*scale) = [4, 12).
+    let plate_lo = (0.25 * scale) as u32;
+    let plate_hi = (0.75 * scale) as u32 - 1;
+
+    let front = model.chart(CanonicalView::Front).expect("front chart");
+    let (width, height) = front.dimensions();
+    assert_eq!((width, height), (16, 16));
+
+    for y in 0..height {
+        for x in 0..width {
+            let texel = front.rgba()[(y * width + x) as usize];
+            let in_plate_x = (plate_lo..=plate_hi).contains(&x);
+            let in_plate_y = (plate_lo..=plate_hi).contains(&y);
+            let in_plate = in_plate_x && in_plate_y;
+            let adjacent_left = x + 1 == plate_lo;
+            let adjacent_right = x == plate_hi + 1;
+            let adjacent_top = y + 1 == plate_lo;
+            let adjacent_bottom = y == plate_hi + 1;
+            let ring = !in_plate
+                && ((in_plate_x && (adjacent_top || adjacent_bottom))
+                    || (in_plate_y && (adjacent_left || adjacent_right)));
+            if in_plate {
+                assert_eq!(
+                    i64::from(255 - texel[3]),
+                    plate_relief,
+                    "({x},{y}) is inside the plate's silhouette and must keep it intact"
+                );
+            } else if ring {
+                assert_eq!(
+                    texel,
+                    [0, 0, 0, 0],
+                    "({x},{y}) is 4-adjacent to the plate across the fabricated cliff and \
+                     must be cut"
+                );
+            } else {
+                assert_eq!(
+                    i64::from(255 - texel[3]),
+                    floor_relief,
+                    "({x},{y}) is floor, two or more texels from the plate, and must stay \
+                     covered"
+                );
+            }
+        }
+    }
+}
+
+/// Same framing as `occlusion_cut_drops_the_far_strip`, but the two relief
+/// levels are physically connected: an upper shelf at z = 0.1 for x in
+/// [0,0.5], a lower shelf at z = 0.45 for x in [0.5,1.0], and a vertical
+/// quad joining them at x = 0.5 spanning z in [0.1,0.45]. The shelf-to-shelf
+/// pair straddling x = 0.5 exceeds the candidate threshold exactly as in
+/// the fabricated-cliff test (same plate/floor relief values), but this
+/// time a real wall occupies the space between the two reconstructed
+/// sample points, so the wall-reality test must keep the step intact. This
+/// pins that cuts do not overreach: it passes both before and after this
+/// change (no RED expected — see task report).
+#[test]
+fn real_step_wall_is_kept() {
+    let scene = TriangleScene {
+        triangles: vec![
+            // Upper shelf: x in [0,0.5], z = 0.1.
+            tri([0.0, 0.0, 0.1], [0.5, 0.0, 0.1], [0.5, 1.0, 0.1]),
+            tri([0.0, 0.0, 0.1], [0.5, 1.0, 0.1], [0.0, 1.0, 0.1]),
+            // Lower shelf: x in [0.5,1.0], z = 0.45.
+            tri([0.5, 0.0, 0.45], [1.0, 0.0, 0.45], [1.0, 1.0, 0.45]),
+            tri([0.5, 0.0, 0.45], [1.0, 1.0, 0.45], [0.5, 1.0, 0.45]),
+            // Connecting wall at x = 0.5, spanning z in [0.1,0.45]: edge-on
+            // (zero area) to Front, so it contributes no coverage there,
+            // only mesh for the wall-reality distance query to find.
+            tri([0.5, 0.0, 0.1], [0.5, 1.0, 0.1], [0.5, 1.0, 0.45]),
+            tri([0.5, 0.0, 0.1], [0.5, 1.0, 0.45], [0.5, 0.0, 0.45]),
+            // Edge-on sliver widening the z extent to [0,1].
+            tri([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0001, 0.5]),
+        ],
+        materials: vec![plain_material()],
+    };
+    let mut config = ImportSettings {
+        rotation: IDENTITY,
+        ..settings(16)
+    };
+    let mut modes = config.side_modes;
+    for side in [
+        CanonicalView::Back,
+        CanonicalView::Left,
+        CanonicalView::Right,
+        CanonicalView::Top,
+        CanonicalView::Bottom,
+    ] {
+        modes.set(side, SideMode::Off).expect("legal mode");
+    }
+    config.side_modes = modes;
+
+    let model = convert(&scene, &config).expect("converts");
+    let bounds = model.bounds();
+    assert_eq!(
+        (bounds.width(), bounds.height(), bounds.depth()),
+        (16, 16, 16),
+        "derived bounds"
+    );
+    let scale = f64::from(bounds.width());
+    let upper_relief = ((0.1_f64 * scale) * 8.0).round() as i64;
+    let lower_relief = ((0.45_f64 * scale) * 8.0).round() as i64;
+    assert!(
+        lower_relief - upper_relief > 10,
+        "the shelf-to-shelf relief gap must exceed the cut candidate threshold, matching \
+         the fabricated-cliff test's setup (upper {upper_relief}, lower {lower_relief})"
+    );
+
+    let boundary = (0.5 * scale) as u32; // upper covers [0,boundary), lower [boundary,16)
+
+    let front = model.chart(CanonicalView::Front).expect("front chart");
+    let (width, height) = front.dimensions();
+    assert_eq!((width, height), (16, 16));
+
+    for y in 0..height {
+        for x in 0..width {
+            let texel = front.rgba()[(y * width + x) as usize];
+            let expected = if x < boundary {
+                upper_relief
+            } else {
+                lower_relief
+            };
+            assert_eq!(
+                i64::from(255 - texel[3]),
+                expected,
+                "({x},{y}) must stay covered at its shelf's own relief; the real wall at \
+                 x = {boundary} must not be cut, unlike the fabricated-cliff test"
+            );
+        }
+    }
+}
