@@ -293,6 +293,21 @@ impl WarpCoefficients {
         }
     }
 
+    /// The forward screen-projection rows: `screen[axis]` dotted with
+    /// `(source_x, source_y, 1)` is screen axis `axis` before the relief
+    /// parallax term. Exposed so the renderer can bound the exact screen
+    /// image of a source-space box (the warp of a box is a zonotope whose
+    /// axis-aligned bbox is the sum of per-column contributions).
+    pub fn screen(&self) -> [[Ratio<i64>; 3]; 2] {
+        self.screen
+    }
+
+    /// The relief parallax columns: screen axis `axis` gains
+    /// `relief * parallax[axis]`. See [`WarpCoefficients::screen`].
+    pub fn parallax(&self) -> [Ratio<i64>; 2] {
+        self.parallax
+    }
+
     pub fn apply(&self, point: SourcePoint, relief: Ratio<i64>) -> WarpedSample {
         let source = [point.x, point.y, Ratio::from_integer(1)];
         let dot = |row: &[Ratio<i64>; 3]| {

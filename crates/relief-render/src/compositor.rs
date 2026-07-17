@@ -1,5 +1,7 @@
 use num_rational::Ratio;
-use relief_core::{Bounds, DecodedTexel, ReliefField, ResolvedCharts, SourcePoint};
+use relief_core::{
+    Bounds, Chart, DecodedTexel, FrameInverse, ReliefField, ResolvedCharts, SourcePoint,
+};
 use std::cmp::Ordering;
 use thiserror::Error;
 
@@ -46,6 +48,20 @@ const MAX_PARAMETER_SPAN: f64 = 252.0;
 /// not suffice (`252 / 2^32 > 2^-25`), so 33 is derived, not chosen:
 /// `MAX_PARAMETER_SPAN / 2^33 <= HALF_QUANTUM < MAX_PARAMETER_SPAN / 2^32`.
 const MAX_SAFEGUARDED_STEPS: u32 = 33;
+
+/// Upper bound on `|t|` for every ray parameter at which `solve_preimages`
+/// evaluates the root-acceptance box checks. The clipped parameter range is a
+/// sub-interval of `[0, MAX_PARAMETER_SPAN]` (the range is clipped against the
+/// free variable's own box `[0, extent]` with `extent <= 252`, exactly — the
+/// free variable has offset `0.0` and slope `1.0`, so `clip_affine_range`
+/// computes the box bounds themselves). Segment endpoints are boundaries
+/// inside that range; direct partition hits reconstruct `t` inside
+/// `[start, end]`, and bisected roots reconstruct the unit preimage of a
+/// parameter quantum within half a quantum (`2^-25`) of a bracket point inside
+/// `[start, end]`, perturbed by a few ulps of f64 reconstruction noise. The
+/// slack of `1` therefore dominates every excursion outside the clipped range
+/// by more than seven orders of magnitude.
+const MAX_ACCEPTED_PARAMETER: f64 = MAX_PARAMETER_SPAN + 1.0;
 
 /// A fixed-capacity, stack-allocated ordered collection for values whose
 /// cardinality is bounded by a small mathematical fact established at each
@@ -370,6 +386,219 @@ struct RenderScratch {
     preimages: Vec<Preimage>,
 }
 
+/// Per-source-variable upper bound on the absolute error between the f64 line
+/// evaluation `offset + slope * t` performed by `solve_preimages` and the
+/// exact rational line value at the same `t`, over every pixel of the frame
+/// and every parameter the solver can test (`|t| <= MAX_ACCEPTED_PARAMETER`).
+///
+/// Derivation: with `e = 2^-53` (half of `f64::EPSILON`), exact offset `O`,
+/// and exact slope `S`, the solver computes `fl(fl(O) + fl(fl(S) * t))`
+/// (`fl` denotes one correctly rounded operation or conversion), so
+/// `|computed - (O + S*t)| <= |O|*((1+e)^2 - 1) + |S*t|*((1+e)^3 - 1)
+///                         <= e*(2.001*|O| + 3.001*|S*t|)
+///                         <= 2 * f64::EPSILON * (|O| + |S| * MAX_ACCEPTED_PARAMETER)`.
+/// The factor below is `8` instead of `2`: the spare factor `4` dominates
+/// (a) the underestimate of `|O|` and `|S|` by their computed f64 images
+/// (each within one rounding of exact, factor `<= 1 + 2e`) and (b) the three
+/// roundings in evaluating the bound expression itself (factor `<= (1+e)^3`),
+/// so the *computed* value is a true upper bound on the exact error. Offsets
+/// are affine in the pixel coordinates, so the frame-wide maximum of
+/// `|offset|` is attained at a corner of the pixel rectangle; evaluating the
+/// four corners covers every pixel.
+fn source_evaluation_error_bounds(inverse: &FrameInverse, width: u32, height: u32) -> [f64; 3] {
+    let corners = [
+        (0, 0),
+        (width - 1, 0),
+        (0, height - 1),
+        (width - 1, height - 1),
+    ];
+    let mut offset_bound = [0.0_f64; 3];
+    let mut slope = [0.0_f64; 3];
+    for (x, y) in corners {
+        let coefficients = inverse.variable_f64(x, y);
+        for variable in 0..3 {
+            offset_bound[variable] = offset_bound[variable].max(coefficients[variable][0].abs());
+            slope[variable] = coefficients[variable][1].abs();
+        }
+    }
+    std::array::from_fn(|variable| {
+        8.0 * f64::EPSILON * (offset_bound[variable] + slope[variable] * MAX_ACCEPTED_PARAMETER)
+    })
+}
+
+/// One screen axis of the forward splat: converts a foreground cell's swept
+/// source box into a conservative range of pixel indices on this axis.
+///
+/// The exact screen coordinate of a swept source point `(x, y, relief)` is
+/// the affine map `coefficients[0]*x + coefficients[1]*y +
+/// coefficients[2]*relief + constant`, so the image of an axis-aligned box is
+/// the interval centered on the image of the box center with radius the sum
+/// of `|coefficient| * half_extent` — the exact axis-aligned bound of the
+/// zonotope image. A pixel `p` can receive a committed fragment from a cell
+/// only when its exact screen coordinate `p + origin` lies inside the image
+/// of the cell's *inflated* swept box (see `render_model` for the inflation
+/// argument), so the integer range `[ceil(low), floor(high)]`, widened by the
+/// derived f64-noise `margin`, covers every committing pixel.
+#[derive(Clone, Copy, Debug)]
+struct SplatAxis {
+    coefficients: [f64; 3],
+    constant: f64,
+    radius: f64,
+    origin: f64,
+    margin: i64,
+}
+
+impl SplatAxis {
+    /// `screen_row` and `parallax` are this axis's forward warp coefficients,
+    /// `origin` is the frame constant added to the integer pixel index
+    /// (`sx0`/`sy0`), `deltas` are the [`source_evaluation_error_bounds`],
+    /// and `field` supplies the source extents.
+    ///
+    /// The swept box of cell `(cx, cy)` is inflated by
+    /// `COORDINATE_EPSILON + delta` per source variable: an accepted root's
+    /// f64 coordinates pass the box check with `COORDINATE_EPSILON` slack,
+    /// and the exact line point at the same parameter is within `delta` of
+    /// those f64 coordinates, so the exact point lies in the inflated box.
+    ///
+    /// `margin` bounds the f64 rounding noise of the whole
+    /// [`SplatAxis::pixel_range`] chain, in pixels. Every intermediate value
+    /// in that chain (center terms, radius terms, and their sums with the
+    /// origin) has exact magnitude at most `magnitude` below, and the chain
+    /// performs at most 26 correctly rounded operations/conversions (5
+    /// rational-to-f64 conversions, 7 half-extent operations, 5 radius
+    /// operations, and 9 center/interval operations per endpoint), each
+    /// contributing at most `(f64::EPSILON / 2) * magnitude * (1 + tiny)` of
+    /// absolute error — at most `13 * f64::EPSILON * magnitude` in total. The
+    /// factor `32` leaves a spare factor of ~2.4, which dominates the
+    /// underestimate of
+    /// `magnitude` by its own f64 evaluation and the roundings of the margin
+    /// expression itself; the trailing `+ 1` covers the integer
+    /// `ceil`/`floor` boundary semantics (a computed endpoint within the
+    /// noise bound of an exact integer boundary can shift the rounded index
+    /// by one). Widening only ever *adds* certainly-safe candidate pixels
+    /// (each still runs the full unchanged solve), so every step of this
+    /// bound errs in the conservative direction.
+    fn new(
+        screen_row: [Ratio<i64>; 3],
+        parallax: Ratio<i64>,
+        origin: Ratio<i64>,
+        deltas: [f64; 3],
+        maximum_relief: f64,
+        field: &PreparedRelief,
+    ) -> Self {
+        let coefficients = [
+            ratio_to_f64(screen_row[0]),
+            ratio_to_f64(screen_row[1]),
+            ratio_to_f64(parallax),
+        ];
+        let constant = ratio_to_f64(screen_row[2]);
+        let origin = ratio_to_f64(origin);
+        let half_extents = [
+            0.5 + COORDINATE_EPSILON + deltas[0],
+            0.5 + COORDINATE_EPSILON + deltas[1],
+            0.5 * maximum_relief + COORDINATE_EPSILON + deltas[2],
+        ];
+        let radius = coefficients[0].abs() * half_extents[0]
+            + coefficients[1].abs() * half_extents[1]
+            + coefficients[2].abs() * half_extents[2];
+        let magnitude = coefficients[0].abs() * (f64::from(field.width) + 1.0 + deltas[0])
+            + coefficients[1].abs() * (f64::from(field.height) + 1.0 + deltas[1])
+            + coefficients[2].abs() * (maximum_relief + 1.0 + deltas[2])
+            + constant.abs()
+            + origin.abs()
+            + 1.0;
+        let margin = (32.0 * f64::EPSILON * magnitude).ceil() as i64 + 1;
+        Self {
+            coefficients,
+            constant,
+            radius,
+            origin,
+            margin,
+        }
+    }
+
+    /// The conservative pixel-index range cell `(cell_x, cell_y)`'s inflated
+    /// swept box can touch on this axis, clamped to `[0, extent)`; `None`
+    /// when the clamped range is empty.
+    fn pixel_range(
+        &self,
+        cell_x: f64,
+        cell_y: f64,
+        middle_relief: f64,
+        extent: u32,
+    ) -> Option<(u32, u32)> {
+        let center = self.coefficients[0] * (cell_x + 0.5)
+            + self.coefficients[1] * (cell_y + 0.5)
+            + self.coefficients[2] * middle_relief
+            + self.constant;
+        let first = ((center - self.radius - self.origin).ceil() as i64 - self.margin).max(0);
+        let last = ((center + self.radius - self.origin).floor() as i64 + self.margin)
+            .min(i64::from(extent) - 1);
+        (first <= last).then_some((first as u32, last as u32))
+    }
+}
+
+/// A per-chart bitmask over the frame's pixels: the union of the conservative
+/// pixel rectangles of the chart's foreground cells. Guarantees each
+/// (pixel, chart) pair is solved at most once even though neighboring cells'
+/// rectangles overlap heavily. Reused across charts via [`PixelMask::reset`].
+struct PixelMask {
+    words_per_row: usize,
+    words: Vec<u64>,
+}
+
+impl PixelMask {
+    fn new() -> Self {
+        Self {
+            words_per_row: 0,
+            words: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self, width: u32, height: u32) {
+        self.words_per_row = (width as usize).div_ceil(64);
+        self.words.clear();
+        self.words.resize(self.words_per_row * height as usize, 0);
+    }
+
+    /// Marks pixels `first_x..=last_x` of row `y`. Callers guarantee
+    /// `first_x <= last_x < width` and `y < height` (the [`SplatAxis`] ranges
+    /// are clamped to the frame).
+    fn mark_row(&mut self, y: u32, first_x: u32, last_x: u32) {
+        let row = y as usize * self.words_per_row;
+        let first_word = first_x as usize / 64;
+        let last_word = last_x as usize / 64;
+        let first_mask = !0_u64 << (first_x as usize % 64);
+        let last_mask = !0_u64 >> (63 - last_x as usize % 64);
+        if first_word == last_word {
+            self.words[row + first_word] |= first_mask & last_mask;
+        } else {
+            self.words[row + first_word] |= first_mask;
+            for word in &mut self.words[row + first_word + 1..row + last_word] {
+                *word = !0;
+            }
+            self.words[row + last_word] |= last_mask;
+        }
+    }
+
+    fn row(&self, y: u32) -> &[u64] {
+        let start = y as usize * self.words_per_row;
+        &self.words[start..start + self.words_per_row]
+    }
+}
+
+/// Everything `render_model` needs to composite one chart into the frame:
+/// the chart, its prepared relief, the fixed-point inverse line factoring,
+/// and the forward-splat screen bounds of its foreground cells.
+struct FrameChart<'a> {
+    chart: &'a Chart,
+    relief: &'a PreparedRelief,
+    inverse: FrameInverse,
+    facing: FacingCoefficients,
+    maximum_relief: f64,
+    splat: [SplatAxis; 2],
+}
+
 pub fn render_model(
     prepared: &PreparedModel,
     request: &RenderRequest,
@@ -403,7 +632,7 @@ pub fn render_model(
     // would have for every pixel (the singular condition depends only on the
     // matrix, not the screen coordinates), so a chart that fails it contributes
     // nothing to any pixel and is dropped from the frame entirely.
-    let frame_charts: Vec<_> = prepared
+    let frame_charts: Vec<FrameChart> = prepared
         .charts
         .charts()
         .iter()
@@ -414,46 +643,126 @@ pub fn render_model(
                 warp.prepare_inverse()?
                     .inverse_frame(sx0, sy0, request.width, request.height);
             let facing = request.target.facing_coefficients(chart.view(), bounds);
-            Some((chart, &entry.relief, inverse, facing, entry.maximum_relief))
+            let deltas = source_evaluation_error_bounds(&inverse, request.width, request.height);
+            let screen = warp.screen();
+            let parallax = warp.parallax();
+            let splat = [
+                SplatAxis::new(
+                    screen[0],
+                    parallax[0],
+                    sx0,
+                    deltas,
+                    entry.maximum_relief,
+                    &entry.relief,
+                ),
+                SplatAxis::new(
+                    screen[1],
+                    parallax[1],
+                    sy0,
+                    deltas,
+                    entry.maximum_relief,
+                    &entry.relief,
+                ),
+            ];
+            Some(FrameChart {
+                chart,
+                relief: &entry.relief,
+                inverse,
+                facing,
+                maximum_relief: entry.maximum_relief,
+                splat,
+            })
         })
         .collect();
 
     let mut scratch = RenderScratch::default();
+    let mut mask = PixelMask::new();
 
-    for y in 0..request.height {
-        for x in 0..request.width {
-            for (chart, relief, inverse, facing, maximum_relief) in &frame_charts {
-                let coefficients = inverse.variable_f64(x, y);
+    // Forward splat: for each chart, mark the conservative screen footprint
+    // of every foreground cell's swept box, then run the unchanged per-pixel
+    // inverse solve only on the marked pixels.
+    //
+    // Exactness: a fragment is committed for (pixel, chart) only when a root
+    // passes `solve_preimages`' acceptance box check, which pins the root's
+    // f64 source coordinates inside a foreground cell's box inflated by
+    // `COORDINATE_EPSILON` and its f64 relief inside `[0, maximum_relief]`
+    // inflated likewise. The exact line point at that parameter is within the
+    // `source_evaluation_error_bounds` of those f64 values, and the exact
+    // line point maps forward to exactly the pixel's screen coordinate (the
+    // inverse line is the exact solution set of the warp equations). The
+    // pixel's screen coordinate therefore lies inside the zonotope bbox of
+    // the inflated swept box, which the `SplatAxis` ranges cover
+    // conservatively — so every pixel outside the mask provably commits
+    // nothing, and every pixel inside runs the identical whole-ray solve the
+    // exhaustive scan ran, producing identical fragments. Chart-major commit
+    // order cannot change the frame: `commit_fragment` keeps the strictly
+    // smallest `FragmentKey` and equal keys imply the same chart (ranks are
+    // unique per resolved chart) and the same source texel, hence the same
+    // color.
+    for pass in &frame_charts {
+        mask.reset(request.width, request.height);
+        let middle_relief = 0.5 * pass.maximum_relief;
+        for source_y in 0..pass.relief.height {
+            for source_x in 0..pass.relief.width {
+                if !pass.relief.is_foreground(source_x, source_y) {
+                    continue;
+                }
+                let cell_x = f64::from(source_x);
+                let cell_y = f64::from(source_y);
+                let Some((first_x, last_x)) =
+                    pass.splat[0].pixel_range(cell_x, cell_y, middle_relief, request.width)
+                else {
+                    continue;
+                };
+                let Some((first_y, last_y)) =
+                    pass.splat[1].pixel_range(cell_x, cell_y, middle_relief, request.height)
+                else {
+                    continue;
+                };
+                for y in first_y..=last_y {
+                    mask.mark_row(y, first_x, last_x);
+                }
+            }
+        }
 
-                solve_preimages(
-                    &mut scratch,
-                    relief,
-                    &coefficients,
-                    *facing,
-                    *maximum_relief,
-                );
-                for preimage in &scratch.preimages {
-                    let Some(DecodedTexel::Relief { rgb, .. }) =
-                        chart.texel_at(preimage.source_x, preimage.source_y)
-                    else {
-                        continue;
-                    };
-                    commit_fragment(
-                        &mut frame,
-                        x,
-                        y,
-                        FragmentKey {
-                            depth: inverse.depth_at(
-                                x,
-                                y,
-                                Ratio::new(preimage.parameter, ROOT_SCALE),
-                            ),
-                            chart_rank: chart.view().rank(),
-                            source_y: preimage.source_y,
-                            source_x: preimage.source_x,
-                        },
-                        rgb,
+        for y in 0..request.height {
+            for (word_index, &word) in mask.row(y).iter().enumerate() {
+                let mut bits = word;
+                while bits != 0 {
+                    let x = word_index as u32 * 64 + bits.trailing_zeros();
+                    bits &= bits - 1;
+                    let coefficients = pass.inverse.variable_f64(x, y);
+
+                    solve_preimages(
+                        &mut scratch,
+                        pass.relief,
+                        &coefficients,
+                        pass.facing,
+                        pass.maximum_relief,
                     );
+                    for preimage in &scratch.preimages {
+                        let Some(DecodedTexel::Relief { rgb, .. }) =
+                            pass.chart.texel_at(preimage.source_x, preimage.source_y)
+                        else {
+                            continue;
+                        };
+                        commit_fragment(
+                            &mut frame,
+                            x,
+                            y,
+                            FragmentKey {
+                                depth: pass.inverse.depth_at(
+                                    x,
+                                    y,
+                                    Ratio::new(preimage.parameter, ROOT_SCALE),
+                                ),
+                                chart_rank: pass.chart.view().rank(),
+                                source_y: preimage.source_y,
+                                source_x: preimage.source_x,
+                            },
+                            rgb,
+                        );
+                    }
                 }
             }
         }
@@ -1175,14 +1484,21 @@ fn parameter_f64(parameter: i64) -> f64 {
 #[cfg(test)]
 mod tests {
     use num_rational::Ratio;
-    use relief_core::{Bounds, CanonicalView, Chart, ReliefField, WarpCoefficients};
+    use relief_core::{
+        AuthoredModel, Bounds, CanonicalView, Chart, DecodedTexel, ReliefField, ResolvedCharts,
+        SourcePoint, WarpCoefficients,
+    };
 
-    use crate::{CameraBasis, TargetView};
+    use crate::{
+        CameraBasis, FragmentKey, FrameBuffer, PreparedModel, RenderRequest, TargetView,
+        framebuffer::commit_fragment, presets::TargetExtents,
+    };
 
     use super::{
-        Bounded, HALF_QUANTUM, MAX_PARAMETER_SPAN, MAX_SAFEGUARDED_STEPS, PreparedRelief,
-        ROOT_SCALE, RenderScratch, correctly_rounded_root, interpolate_unit_cubic,
-        quantized_parameter, ratio_to_f64, roots_in_unit_interval, solve_preimages,
+        Bounded, HALF_QUANTUM, MAX_PARAMETER_SPAN, MAX_SAFEGUARDED_STEPS, PixelMask,
+        PreparedRelief, ROOT_SCALE, RenderScratch, SplatAxis, correctly_rounded_root,
+        interpolate_unit_cubic, projected_extents, quantized_parameter, ratio_to_f64, render_model,
+        roots_in_unit_interval, solve_preimages, source_evaluation_error_bounds,
     };
 
     /// Exact relief along the inverse line at the quantized ray parameter,
@@ -1499,5 +1815,350 @@ mod tests {
             .collect();
 
         assert_eq!(locations, vec![(1, 4.0), (2, 16.0)]);
+    }
+
+    #[test]
+    fn pixel_mask_marks_ranges_within_a_single_word() {
+        let mut mask = PixelMask::new();
+        mask.reset(10, 2);
+        mask.mark_row(1, 3, 5);
+
+        assert_eq!(mask.row(0), [0]);
+        assert_eq!(mask.row(1), [0b111000]);
+    }
+
+    #[test]
+    fn pixel_mask_marks_ranges_spanning_multiple_words() {
+        let mut mask = PixelMask::new();
+        mask.reset(200, 1);
+        mask.mark_row(0, 60, 130);
+
+        assert_eq!(
+            mask.row(0),
+            [!0_u64 << 60, !0, !0 >> (63 - 130 % 64), 0],
+            "bits 60..=130 must be set across words 0..=2"
+        );
+    }
+
+    #[test]
+    fn pixel_mask_marking_is_idempotent_and_reset_clears() {
+        let mut mask = PixelMask::new();
+        mask.reset(70, 1);
+        mask.mark_row(0, 0, 69);
+        let marked: Vec<u64> = mask.row(0).to_vec();
+        mask.mark_row(0, 10, 63);
+
+        assert_eq!(mask.row(0), marked, "overlapping marks must be idempotent");
+
+        mask.reset(70, 1);
+        assert_eq!(mask.row(0), [0, 0], "reset must clear every word");
+    }
+
+    /// A model with background holes and two charts: enough structure that
+    /// forward splatting must cull (holes, off-footprint pixels) and must
+    /// composite across charts, while staying small enough for the
+    /// exhaustive-scan oracle below.
+    fn perforated_two_chart_model() -> ResolvedCharts {
+        let bounds = Bounds::new(3, 2, 4).unwrap();
+        let hole = [0, 0, 0, 0];
+        let front = Chart::from_rgba(
+            CanonicalView::Front,
+            3,
+            2,
+            vec![
+                [10, 0, 0, 239],
+                [20, 0, 0, 255],
+                [30, 0, 0, 239],
+                [40, 0, 0, 255],
+                hole,
+                [50, 0, 0, 247],
+            ],
+        )
+        .unwrap();
+        let top = Chart::from_rgba(
+            CanonicalView::Top,
+            3,
+            4,
+            vec![
+                [60, 0, 0, 251],
+                hole,
+                [70, 0, 0, 247],
+                [80, 0, 0, 255],
+                [90, 0, 0, 249],
+                hole,
+                hole,
+                [100, 0, 0, 253],
+                [110, 0, 0, 255],
+                [120, 0, 0, 247],
+                [130, 0, 0, 251],
+                [140, 0, 0, 255],
+            ],
+        )
+        .unwrap();
+        AuthoredModel::new(bounds, vec![front, top])
+            .expect("test model must validate")
+            .resolve()
+    }
+
+    /// The pre-splat renderer — every pixel x every chart, no culling — used
+    /// as the oracle that forward splatting is output-identical, fragment
+    /// keys (exact rational depths) included.
+    fn render_reference(prepared: &PreparedModel, request: &RenderRequest) -> FrameBuffer {
+        let bounds = prepared.charts.bounds();
+        let mut frame = FrameBuffer::transparent(request.width, request.height);
+        let Some(TargetExtents {
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+        }) = projected_extents(bounds, &prepared.charts, &request.target)
+        else {
+            return frame;
+        };
+        let offset_x = Ratio::new(i64::from(request.width), 2) - (min_x + max_x) / 2;
+        let offset_y = Ratio::new(i64::from(request.height), 2) - (min_y + max_y) / 2;
+        let sx0 = Ratio::new(1, 2) - offset_x;
+        let sy0 = Ratio::new(1, 2) - offset_y;
+        let frame_charts: Vec<_> = prepared
+            .charts
+            .charts()
+            .iter()
+            .zip(prepared.reliefs.iter())
+            .filter_map(|(chart, entry)| {
+                let warp = request.target.warp_coefficients(chart.view(), bounds);
+                let inverse =
+                    warp.prepare_inverse()?
+                        .inverse_frame(sx0, sy0, request.width, request.height);
+                let facing = request.target.facing_coefficients(chart.view(), bounds);
+                Some((chart, &entry.relief, inverse, facing, entry.maximum_relief))
+            })
+            .collect();
+
+        let mut scratch = RenderScratch::default();
+        for y in 0..request.height {
+            for x in 0..request.width {
+                for (chart, relief, inverse, facing, maximum_relief) in &frame_charts {
+                    let coefficients = inverse.variable_f64(x, y);
+                    solve_preimages(
+                        &mut scratch,
+                        relief,
+                        &coefficients,
+                        *facing,
+                        *maximum_relief,
+                    );
+                    for preimage in &scratch.preimages {
+                        let Some(DecodedTexel::Relief { rgb, .. }) =
+                            chart.texel_at(preimage.source_x, preimage.source_y)
+                        else {
+                            continue;
+                        };
+                        commit_fragment(
+                            &mut frame,
+                            x,
+                            y,
+                            FragmentKey {
+                                depth: inverse.depth_at(
+                                    x,
+                                    y,
+                                    Ratio::new(preimage.parameter, ROOT_SCALE),
+                                ),
+                                chart_rank: chart.view().rank(),
+                                source_y: preimage.source_y,
+                                source_x: preimage.source_x,
+                            },
+                            rgb,
+                        );
+                    }
+                }
+            }
+        }
+        frame
+    }
+
+    fn assert_frames_identical(rendered: &FrameBuffer, reference: &FrameBuffer, context: &str) {
+        assert_eq!(rendered.width(), reference.width(), "{context}: width");
+        assert_eq!(rendered.height(), reference.height(), "{context}: height");
+        for y in 0..reference.height() {
+            for x in 0..reference.width() {
+                assert_eq!(
+                    rendered.rgba_at(x, y),
+                    reference.rgba_at(x, y),
+                    "{context}: rgba at ({x}, {y})"
+                );
+                assert_eq!(
+                    rendered.owner_at(x, y),
+                    reference.owner_at(x, y),
+                    "{context}: fragment owner at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn forward_splat_matches_the_exhaustive_pixel_scan() {
+        let charts = perforated_two_chart_model();
+        let prepared = PreparedModel::new(&charts);
+        let zero = Ratio::from_integer(0);
+        let targets = [
+            ("front", TargetView::front()),
+            ("isometric", TargetView::isometric()),
+            ("bowl_acceptance", TargetView::bowl_acceptance()),
+            (
+                "reversed_fold",
+                TargetView::from_camera(CameraBasis::new(
+                    [Ratio::from_integer(1), zero, Ratio::from_integer(-1)],
+                    [zero, Ratio::from_integer(1), zero],
+                    [Ratio::from_integer(1), zero, Ratio::from_integer(1)],
+                )),
+            ),
+        ];
+        for (name, target) in targets {
+            for (width, height) in [(40, 32), (9, 7)] {
+                let request = RenderRequest::new(width, height, target.clone());
+                let rendered = render_model(&prepared, &request).expect("render must succeed");
+                let reference = render_reference(&prepared, &request);
+                assert_frames_identical(
+                    &rendered,
+                    &reference,
+                    &format!("target {name}, frame {width}x{height}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn forward_splat_leaves_an_all_background_model_transparent() {
+        let bounds = Bounds::new(3, 2, 4).unwrap();
+        let charts = AuthoredModel::with_empty_chart(bounds, CanonicalView::Front)
+            .expect("empty model must validate")
+            .resolve();
+        let prepared = PreparedModel::new(&charts);
+        let request = RenderRequest::new(16, 16, TargetView::isometric());
+        let rendered = render_model(&prepared, &request).expect("render must succeed");
+
+        for y in 0..rendered.height() {
+            for x in 0..rendered.width() {
+                assert_eq!(rendered.rgba_at(x, y), [0, 0, 0, 0], "pixel ({x}, {y})");
+                assert!(rendered.owner_at(x, y).is_none(), "owner at ({x}, {y})");
+            }
+        }
+    }
+
+    /// The conservative pixel ranges must cover the exact rational forward
+    /// image of every foreground cell's swept box: for each cell and screen
+    /// axis, every integer pixel index whose exact screen coordinate lies
+    /// inside the exact zonotope bbox (computed from the eight exact corner
+    /// images via `WarpCoefficients::apply`) must be inside the range.
+    #[test]
+    fn splat_axis_ranges_cover_the_exact_swept_box_image() {
+        let charts = perforated_two_chart_model();
+        let prepared = PreparedModel::new(&charts);
+        let bounds = charts.bounds();
+        let target = TargetView::isometric();
+        let (width, height) = (64_u32, 64_u32);
+        let request = RenderRequest::new(width, height, target.clone());
+        let TargetExtents {
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+        } = projected_extents(bounds, &charts, &request.target).expect("model has charts");
+        let offset_x = Ratio::new(i64::from(width), 2) - (min_x + max_x) / 2;
+        let offset_y = Ratio::new(i64::from(height), 2) - (min_y + max_y) / 2;
+        let sx0 = Ratio::new(1, 2) - offset_x;
+        let sy0 = Ratio::new(1, 2) - offset_y;
+
+        for (chart, entry) in prepared.charts.charts().iter().zip(prepared.reliefs.iter()) {
+            let warp = target.warp_coefficients(chart.view(), bounds);
+            let inverse = warp
+                .prepare_inverse()
+                .expect("isometric warp is invertible")
+                .inverse_frame(sx0, sy0, width, height);
+            let deltas = source_evaluation_error_bounds(&inverse, width, height);
+            let screen = warp.screen();
+            let parallax = warp.parallax();
+            let axes = [
+                SplatAxis::new(
+                    screen[0],
+                    parallax[0],
+                    sx0,
+                    deltas,
+                    entry.maximum_relief,
+                    &entry.relief,
+                ),
+                SplatAxis::new(
+                    screen[1],
+                    parallax[1],
+                    sy0,
+                    deltas,
+                    entry.maximum_relief,
+                    &entry.relief,
+                ),
+            ];
+            let origins = [sx0, sy0];
+            let extents = [width, height];
+            let maximum_relief =
+                Ratio::from_integer(i64::from(chart.view().maximum_inward_depth(bounds)));
+            let middle_relief = 0.5 * entry.maximum_relief;
+
+            for source_y in 0..entry.relief.height {
+                for source_x in 0..entry.relief.width {
+                    if !entry.relief.is_foreground(source_x, source_y) {
+                        continue;
+                    }
+                    let mut corners = Vec::new();
+                    for corner_x in [i64::from(source_x), i64::from(source_x) + 1] {
+                        for corner_y in [i64::from(source_y), i64::from(source_y) + 1] {
+                            for relief in [Ratio::from_integer(0), maximum_relief] {
+                                corners.push(warp.apply(
+                                    SourcePoint::new(
+                                        Ratio::from_integer(corner_x),
+                                        Ratio::from_integer(corner_y),
+                                    ),
+                                    relief,
+                                ));
+                            }
+                        }
+                    }
+                    for (index, axis) in axes.iter().enumerate() {
+                        let origin = origins[index];
+                        let extent = &extents[index];
+                        let screen_values: Vec<Ratio<i64>> = corners
+                            .iter()
+                            .map(|sample| {
+                                if index == 0 {
+                                    sample.screen_x
+                                } else {
+                                    sample.screen_y
+                                }
+                            })
+                            .collect();
+                        let minimum = *screen_values.iter().min().unwrap() - origin;
+                        let maximum = *screen_values.iter().max().unwrap() - origin;
+                        let exact_first = minimum.ceil().to_integer();
+                        let exact_last = maximum.floor().to_integer();
+                        if exact_last < 0 || exact_first >= i64::from(*extent) {
+                            continue;
+                        }
+                        let (first, last) = axis
+                            .pixel_range(
+                                f64::from(source_x),
+                                f64::from(source_y),
+                                middle_relief,
+                                *extent,
+                            )
+                            .expect("in-frame swept box must yield a pixel range");
+                        assert!(
+                            i64::from(first) <= exact_first.max(0),
+                            "cell ({source_x}, {source_y}): range start {first} misses exact {exact_first}"
+                        );
+                        assert!(
+                            i64::from(last) >= exact_last.min(i64::from(*extent) - 1),
+                            "cell ({source_x}, {source_y}): range end {last} misses exact {exact_last}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
