@@ -367,3 +367,26 @@ on the closed form's conditioning). Cubic machinery deleted. Bench medians:
 globe front 1.51 ms, default_orbit 19.1 ms, oblique 19.7 ms; gyroscope front
 27.8 ms, default_orbit 41.9 ms, oblique 48.7 ms; orbit_sweep 242 ms. Review
 approved, no findings.
+
+## Final Results (branch tip bec835a, controller-measured)
+
+| benchmark                      | baseline  | final     | speedup |
+|--------------------------------|-----------|-----------|---------|
+| render/globe/front             | 79.1 ms   | 1.6 ms    | 49x     |
+| render/globe/default_orbit     | 138.1 ms  | 23.8 ms   | 5.8x    |
+| render/globe/oblique           | 133.4 ms  | 24.0 ms   | 5.6x    |
+| render/gyroscope/front         | 202.7 ms  | 28.9 ms   | 7.0x    |
+| render/gyroscope/default_orbit | 277.9 ms  | 50.9 ms   | 5.5x    |
+| render/gyroscope/oblique       | 282.4 ms  | 50.3 ms   | 5.6x    |
+| orbit_sweep/globe (8 frames)   | 1.134 s   | 0.239 s   | 4.7x    |
+
+(Baseline render/* included per-frame preparation, now paid once per edit
+(prepare/globe ~62 ms) instead of every frame; orbit_sweep is end-to-end.
+Machine noise ~+/-10%; Task 7's bench ran on a quieter machine, so its 19 ms
+globe figure and this table's 24 ms bracket the same code.)
+
+The per-pixel path is now: integer affine evaluation, closed-form quadratic
+with sign-verified quantization, integer depth compare — no gcd, no
+iteration, no allocation, no trig, no per-pixel divides beyond the f64
+conversions. Final whole-branch review: Ready (after doc fixes, applied in
+bec835a). Full gate green at tip.
