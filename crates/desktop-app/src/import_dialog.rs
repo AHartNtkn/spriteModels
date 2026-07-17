@@ -1110,6 +1110,8 @@ mod tests {
     use super::*;
     use mesh_import::{Material, Triangle, TriangleScene, derived_bounds};
 
+    const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
     fn quad_scene() -> TriangleScene {
         let tri = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| Triangle {
             positions: [a, b, c],
@@ -1174,6 +1176,10 @@ mod tests {
     #[test]
     fn snap_lands_on_a_signed_permutation_with_determinant_one() {
         let mut state = ImportDialogState::new(quad_scene(), "quad.glb".into());
+        // This test pins the drag's starting orientation to identity, not
+        // the default import rotation (the half-turn about X): the "near
+        // identity snaps to identity" assertion below requires it.
+        state.settings.rotation = IDENTITY;
         state.model_drag(40.0, 25.0); // ~10 and ~6 degrees: near identity
         state.snap_rotation();
         let r = state.settings.rotation;
@@ -1195,7 +1201,7 @@ mod tests {
             + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
         assert_eq!(det, 1.0);
         // Near identity snaps TO identity.
-        assert_eq!(r, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+        assert_eq!(r, IDENTITY);
     }
 
     /// All 48 signed permutation matrices (6 permutations x 8 sign patterns),
@@ -1330,6 +1336,11 @@ mod tests {
                 assert!((after - before).abs() < 1e-6);
             }
         }
+        // The "+z maps to -y" check below reads the preset's own matrix off
+        // the composed rotation's third column, which only equals the
+        // preset's own third column when it composes onto identity — not
+        // the default import rotation (the half-turn about X).
+        state.settings.rotation = IDENTITY;
         state.apply_preset(OrientationPreset::ZUpToYUp);
         // +90 about X (this module's Rodrigues convention) maps +z to -y (box up).
         let r = state.settings.rotation;
@@ -1634,16 +1645,17 @@ mod tests {
     fn snap_button_click_lands_on_the_nearest_axis_aligned_orientation() {
         let context = egui::Context::default();
         let mut state = ImportDialogState::new(quad_scene(), "quad.glb".into());
+        // This test pins the drag's starting orientation to identity, not
+        // the default import rotation (the half-turn about X): the snap
+        // target below requires it.
+        state.settings.rotation = IDENTITY;
         state.model_drag(40.0, 25.0); // ~10 and ~6 degrees: near identity
         settle(&context, &mut state);
 
         let center = state.snap_button_rect.center();
         click(&context, &mut state, center);
 
-        assert_eq!(
-            state.settings.rotation,
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-        );
+        assert_eq!(state.settings.rotation, IDENTITY);
     }
 
     #[test]

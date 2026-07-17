@@ -126,7 +126,12 @@ pub struct ImportSettings {
 impl Default for ImportSettings {
     fn default() -> Self {
         Self {
-            rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            // glTF is +Y-up, +Z-toward-viewer; the box frame's y points down
+            // and its front face looks along +z. Identity would import
+            // models upside down and back-to-front, so the default is the
+            // half-turn about X that maps the two conventions onto each
+            // other (spec: "Fitting").
+            rotation: [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
             side_modes: SideModes::default(),
             longest_axis_pixels: 63,
             // Spec defaults: light from upper-front-left, ambient 0.25.

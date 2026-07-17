@@ -63,9 +63,50 @@ fn settings(longest: u32) -> ImportSettings {
     }
 }
 
+/// Spec ("Fitting"): the default import rotation is the half-turn about X
+/// that maps glTF's +Y-up/+Z-toward-viewer convention onto the box frame's
+/// y-down/+z-front convention, so identity (which would import every model
+/// upside down and back-to-front) must not be the default.
+#[test]
+fn default_rotation_maps_gltf_up_to_box_up() {
+    let rotation = ImportSettings::default().rotation;
+    let gltf_up = [0.0, 1.0, 0.0];
+    let gltf_front = [0.0, 0.0, 1.0];
+    let rotate = |v: [f32; 3]| {
+        [
+            rotation[0][0] * v[0] + rotation[0][1] * v[1] + rotation[0][2] * v[2],
+            rotation[1][0] * v[0] + rotation[1][1] * v[1] + rotation[1][2] * v[2],
+            rotation[2][0] * v[0] + rotation[2][1] * v[1] + rotation[2][2] * v[2],
+        ]
+    };
+    assert_eq!(
+        rotate(gltf_up),
+        [0.0, -1.0, 0.0],
+        "glTF's +Y-up must map to the box frame's -y (down-positive box y)"
+    );
+    assert_eq!(
+        rotate(gltf_front),
+        [0.0, 0.0, -1.0],
+        "glTF's +Z-toward-viewer must map to the box frame's -z (front)"
+    );
+    let det = rotation[0][0] * (rotation[1][1] * rotation[2][2] - rotation[1][2] * rotation[2][1])
+        - rotation[0][1] * (rotation[1][0] * rotation[2][2] - rotation[1][2] * rotation[2][0])
+        + rotation[0][2] * (rotation[1][0] * rotation[2][1] - rotation[1][1] * rotation[2][0]);
+    assert_eq!(
+        det, 1.0,
+        "the default rotation must be a rotation, not a mirror"
+    );
+}
+
 #[test]
 fn cube_spanning_the_box_captures_relief_zero_on_all_six_faces() {
-    let model = convert(&cube(), &settings(8)).expect("cube converts");
+    // This test pins the cube's raw scene coordinates to the box frame, not
+    // the default import rotation: identity is set explicitly.
+    let config = ImportSettings {
+        rotation: IDENTITY,
+        ..settings(8)
+    };
+    let model = convert(&cube(), &config).expect("cube converts");
     assert_eq!(model.charts().len(), 6);
     for chart in model.charts() {
         let (width, height) = chart.dimensions();
@@ -97,7 +138,12 @@ fn geometry_past_the_midplane_is_dropped() {
         ],
         materials: vec![plain_material()],
     };
-    let mut config = settings(8);
+    // This test pins the quad's raw scene z to an analytic box-space depth,
+    // not the default import rotation: identity is set explicitly.
+    let mut config = ImportSettings {
+        rotation: IDENTITY,
+        ..settings(8)
+    };
     let mut modes = config.side_modes;
     for side in [
         CanonicalView::Back,
@@ -147,7 +193,12 @@ fn deep_feature_belongs_to_the_side_that_reaches_it() {
         ],
         materials: vec![plain_material()],
     };
-    let mut config = settings(8);
+    // This test pins the slab/knob's raw scene z to analytic box-space
+    // depths, not the default import rotation: identity is set explicitly.
+    let mut config = ImportSettings {
+        rotation: IDENTITY,
+        ..settings(8)
+    };
     let mut modes = config.side_modes;
     for side in [
         CanonicalView::Left,
@@ -268,7 +319,12 @@ fn exact_midplane_hit_keeps_relief_at_h_max() {
         ],
         materials: vec![plain_material()],
     };
-    let mut config = settings(8);
+    // This test pins the quad's raw scene z to an analytic box-space depth,
+    // not the default import rotation: identity is set explicitly.
+    let mut config = ImportSettings {
+        rotation: IDENTITY,
+        ..settings(8)
+    };
     let mut modes = config.side_modes;
     for side in [
         CanonicalView::Back,
@@ -309,7 +365,14 @@ fn flat_quad_gives_depth_one_covered_relief_and_empty_edge_on_sides() {
         ],
         materials: vec![plain_material()],
     };
-    let model = convert(&scene, &settings(8)).expect("quad converts");
+    // This test pins the quad's face-normal orientation (Front vs Back) to
+    // the raw scene axes, not the default import rotation: identity is set
+    // explicitly.
+    let config = ImportSettings {
+        rotation: IDENTITY,
+        ..settings(8)
+    };
+    let model = convert(&scene, &config).expect("quad converts");
     // The flat z axis floors at depth 1.
     assert_eq!(model.bounds().depth(), 1);
 
@@ -751,7 +814,13 @@ fn fallback_owner_used_when_the_best_side_is_occluded() {
     let (sin30, cos30) = (30.0_f64).to_radians().sin_cos();
     let (scene, y0, y_top, z0, z_min, y_occ) = slant_and_occluder_scene();
 
-    let mut config = settings(16);
+    // The slant/occluder scene (see its doc comment) is built assuming
+    // identity rotation; set it explicitly rather than relying on the
+    // default import rotation.
+    let mut config = ImportSettings {
+        rotation: IDENTITY,
+        ..settings(16)
+    };
     let mut modes = config.side_modes;
     for side in [
         CanonicalView::Back,
