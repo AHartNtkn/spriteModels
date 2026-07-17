@@ -178,6 +178,49 @@ patches, handle that case identically — analyze before coding).
 
 **Exactness argument required.** Golden hashes must match.
 
+## Task 7: Corner-resolved bilinear relief (cubic -> quadratic)
+
+USER-APPROVED SURFACE CHANGE (2026-07-16): unlike Tasks 1-6 this task changes
+rendered output. The user accepts surface changes "within reason" and gets an
+image-approval gate before goldens are regenerated.
+
+Today the relief surface over each quarter-cell patch is the QUOTIENT of two
+bilinear interpolants: relief(u,v) = weighted(u,v)/total(u,v), with
+(weighted, total) hat-kernel corner pairs stored in `PreparedRelief`. The
+ray-surface equation is multiplied through by total, making it cubic in the
+ray parameter and forcing iterative root finding.
+
+Change the surface definition: resolve relief to a single value per patch
+corner at prepare time (value = weighted/total at that corner), and make the
+patch surface the plain bilinear interpolant of those corner values. Then
+with u,v affine in the ray parameter t, the intersection equation
+relief_line(t) = value(u(t), v(t)) is QUADRATIC in t: closed-form roots, no
+Lagrange fit, no iteration — the most old-hardware-friendly form. The facing
+check uses the bilinear surface's gradient (quotient rule gone).
+
+Analysis required before coding (state in the report):
+- Corner-sample totals: prove or verify that total > 0 at every corner of
+  every foreground cell's quadrants (the hat kernel includes the cell's own
+  texel), so the corner division is always defined. If a zero-total corner is
+  possible, define and justify the principled handling; no silent fallbacks.
+- Which downstream semantics change (root count per segment, direct-hit and
+  tangency cases, dedup) and which are preserved.
+- The root solver: closed-form quadratic with the numerically stable
+  formulation (avoid cancellation: q = -(b + sign(b) sqrt(disc))/2 form),
+  reusing the existing quantization-to-2^-24 and acceptance semantics.
+
+Approval gate (replaces the bit-exact golden constraint for this task only):
+1. Implement; `cargo test --workspace` must pass except golden_render.
+2. Render all 24 golden scenarios before/after (the golden test writes actual
+   PNGs on mismatch; generate the "before" set from the parent commit).
+3. STOP and report the image pairs to the controller. The controller shows
+   the user. Only after explicit user approval: regenerate
+   `tests/golden/render_hashes.txt` with GOLDEN_REGEN=1, inspect, commit.
+4. If the user rejects, the task is abandoned and the branch reset to its
+   parent commit.
+
+Benchmarks after approval as usual.
+
 ## Baseline Results
 
 Measured 2026-07-16 on the development machine (release profile, criterion
