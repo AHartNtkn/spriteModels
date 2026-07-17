@@ -10,9 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use editor_core::{EditorDocument, OrbitCamera, PreviewCache};
-use fixture_gen::{
-    block_model, bowl_model, dome_model, globe_model, gyroscope_model, tent_model,
-};
+use fixture_gen::{block_model, bowl_model, dome_model, globe_model, gyroscope_model, tent_model};
 use relief_core::AuthoredModel;
 use relief_render::{FrameBuffer, PreparedModel, RenderRequest, TargetView, render_model};
 

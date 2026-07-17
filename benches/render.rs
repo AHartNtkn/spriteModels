@@ -65,10 +65,8 @@ fn bench_prepare(criterion: &mut Criterion) {
 /// eight distinct orientations per iteration, fresh cache so every frame is a
 /// real render (the cache only memoizes the most recent orientation anyway).
 fn bench_orbit_sweep(criterion: &mut Criterion) {
-    let document = EditorDocument::from_model(
-        globe_model().expect("globe fixture must build"),
-        None,
-    );
+    let document =
+        EditorDocument::from_model(globe_model().expect("globe fixture must build"), None);
     criterion.bench_function("orbit_sweep/globe", |bencher| {
         bencher.iter(|| {
             let mut cache = PreviewCache::default();
