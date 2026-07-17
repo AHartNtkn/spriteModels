@@ -132,7 +132,7 @@ never changes the conversion; model rotation always does.
 re-capture is throttled to the frame rate; at the measured ~21 ms per full
 capture this stays interactive, so there is no background thread.
 
-**Accept/cancel.** Import builds `EditorDocument::from_model(model, None)` — an
+**Accept/cancel.** Import builds `EditorDocument::from_unsaved_model(model)` — an
 untitled, dirty document — after the same unsaved-changes prompt New/Open use.
 Cancel discards everything. The current document is untouched until Import is
 confirmed.
