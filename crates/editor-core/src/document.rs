@@ -92,6 +92,42 @@ impl EditorDocument {
         Self::from_clean_state(state, path)
     }
 
+    /// A document for a freshly imported model: untitled, and dirty because
+    /// no file holds this content yet. Its saved-state baseline is the empty
+    /// document so any nonempty import differs from "what is persisted".
+    pub fn from_unsaved_model(model: AuthoredModel) -> Self {
+        let bounds = model.bounds();
+        let selection = model.charts()[0].view();
+        // Create empty saved_model with a different view to ensure it's always different
+        // from any imported model (even if imported model is empty)
+        let saved_view = match selection {
+            CanonicalView::Front => CanonicalView::Top,
+            _ => CanonicalView::Front,
+        };
+        let saved_model = AuthoredModel::with_empty_chart(bounds, saved_view)
+            .expect("validated bounds always produce a valid empty chart");
+        let make_state = |model: AuthoredModel| DocumentState {
+            model,
+            selection,
+            active_layer: ActiveLayer::Color,
+            tool: Tool::Pencil,
+            current_rgb: [0, 0, 0],
+            current_depth: DepthValue::Relief(
+                ReliefValue::new(0).expect("zero relief is always valid"),
+            ),
+        };
+        Self {
+            saved_state: make_state(saved_model),
+            state: make_state(model),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            stroke_before: None,
+            path: None,
+            revision: 0,
+            render_identity: NEXT_RENDER_IDENTITY.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
     pub fn model(&self) -> &AuthoredModel {
         &self.state.model
     }

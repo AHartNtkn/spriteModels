@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use editor_core::{EditorDocument, EditorError};
+use editor_core::{EditorDocument, EditorError, OrbitCamera};
 use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart, EMPTY_RGBA, ModelError};
 
 fn bounds() -> Bounds {
@@ -124,4 +124,28 @@ fn model_conversion_preserves_authored_rgba_order_and_clean_baseline() {
     assert_eq!(round_trip.charts()[0].rgba(), front_pixels);
     assert_eq!(round_trip.charts()[1].view(), CanonicalView::Top);
     assert_eq!(round_trip.charts()[1].rgba(), top_pixels);
+}
+
+#[test]
+fn imported_model_document_is_untitled_and_dirty() {
+    let bounds = Bounds::new(4, 4, 4).unwrap();
+    let model = AuthoredModel::with_empty_chart(bounds, CanonicalView::Front).unwrap();
+    let document = EditorDocument::from_unsaved_model(model);
+    assert!(document.path().is_none());
+    assert!(
+        document.is_dirty(),
+        "an imported model has no saved counterpart and must prompt before discard"
+    );
+}
+
+#[test]
+fn default_orbit_basis_is_orthonormal_and_matches_default_angles() {
+    let basis = OrbitCamera::default().basis_f32();
+    for row in basis {
+        let len = (row[0] * row[0] + row[1] * row[1] + row[2] * row[2]).sqrt();
+        assert!((len - 1.0).abs() < 1e-5);
+    }
+    // Default yaw 45deg: right = [cos45, 0, sin45].
+    assert!((basis[0][0] - 45f32.to_radians().cos()).abs() < 1e-5);
+    assert!((basis[0][2] - 45f32.to_radians().sin()).abs() < 1e-5);
 }

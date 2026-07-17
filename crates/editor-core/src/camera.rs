@@ -59,6 +59,30 @@ impl OrbitCamera {
 
         TargetView::from_camera(CameraBasis::new(screen_right, screen_down, depth))
     }
+
+    /// The camera basis as plain floats: rows are screen-right, screen-down,
+    /// and view-forward in world coordinates. Same trigonometry as
+    /// `target_view` without ratio quantization; used by the import dialog's
+    /// mesh rasterizer.
+    pub fn basis_f32(self) -> [[f32; 3]; 3] {
+        let yaw = millidegrees_to_radians(self.yaw_millidegrees);
+        let pitch = millidegrees_to_radians(self.pitch_millidegrees);
+        let (sin_yaw, cos_yaw) = yaw.sin_cos();
+        let (sin_pitch, cos_pitch) = pitch.sin_cos();
+        [
+            [cos_yaw as f32, 0.0, sin_yaw as f32],
+            [
+                (sin_yaw * sin_pitch) as f32,
+                cos_pitch as f32,
+                (-cos_yaw * sin_pitch) as f32,
+            ],
+            [
+                (-sin_yaw * cos_pitch) as f32,
+                sin_pitch as f32,
+                (cos_yaw * cos_pitch) as f32,
+            ],
+        ]
+    }
 }
 
 impl Default for OrbitCamera {
