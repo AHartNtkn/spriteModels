@@ -159,9 +159,10 @@ pub enum RenderError {
 /// parameter quantized to denominator `ROOT_SCALE = 2^24`, stored as the integer
 /// numerator `round(t * 2^24)`; the implicit denominator is shared by every
 /// preimage, so integer comparison of `parameter` is exact rational comparison
-/// and `parameter as f64 / ROOT_SCALE as f64` is the bit-identical `f64` the
-/// reduced-`Ratio` predecessor produced (both `|parameter| <= 2^53` and
-/// `2^24 <= 2^53`, so both are correctly rounded conversions of the same value).
+/// and `parameter as f64 / ROOT_SCALE as f64` is bit-identical to converting
+/// the reduced `Ratio::new(parameter, ROOT_SCALE)` to `f64` (both
+/// `|parameter| <= 2^53` and `2^24 <= 2^53`, so both are correctly rounded
+/// conversions of the same value).
 #[derive(Clone, Copy, Debug)]
 struct Preimage {
     parameter: i64,
@@ -309,9 +310,10 @@ impl PreparedRelief {
 
 /// Camera-independent preparation for a resolved model: per-chart relief
 /// fields and derived constants that do not depend on `RenderRequest`.
-/// Building this is ~40% of a render call, so callers that re-render the
-/// same model under different orientations should build it once and pass it
-/// to every `render_model` call.
+/// Preparation costs on the order of a full frame render or more, so callers
+/// that re-render the same model under different orientations should build
+/// this once per model revision and reuse it across every `render_model`
+/// call rather than rebuilding it per frame.
 #[derive(Clone, Debug)]
 pub struct PreparedModel {
     charts: ResolvedCharts,
@@ -961,9 +963,9 @@ fn clip_affine_range(
 /// ray parameters, in ascending `f64::total_cmp` order, without allocating.
 ///
 /// Each crossing is `(coordinate - offset) / slope` with
-/// `coordinate = f64::from(half_step) * 0.5` for `half_step in 0..=extent*2` —
-/// the identical `f64` expression the collect-and-sort predecessor used, on the
-/// identical operand values, so every emitted crossing is bit-identical.
+/// `coordinate = f64::from(half_step) * 0.5` for `half_step in 0..=extent*2`,
+/// computed directly from the half-step index with no intermediate rounding,
+/// so the emitted value for a given index is deterministic.
 ///
 /// The parameter is a monotone (rounding-preserving) function of `coordinate`:
 /// increasing when `slope > 0`, decreasing when `slope < 0`. Iterating the
@@ -971,8 +973,8 @@ fn clip_affine_range(
 /// descending for negative) therefore yields crossings already in
 /// `total_cmp` order — including the `-0.0`/`+0.0` boundary, where the negative
 /// side (smaller `total_cmp`) is always reached first. Only crossings strictly
-/// inside `(range_start, range_end)` are emitted, matching the predecessor's
-/// strict interior filter; a negligible slope yields no crossings.
+/// inside `(range_start, range_end)` are emitted; a negligible slope yields no
+/// crossings.
 struct GridCrossings {
     offset: f64,
     slope: f64,
@@ -1034,11 +1036,11 @@ impl Iterator for GridCrossings {
 /// Merges the two per-axis crossing streams (each already in `total_cmp` order)
 /// with the two range endpoints into `boundaries`, in `total_cmp` order. The
 /// output multiset is exactly `{range_start, range_end}` plus every interior
-/// crossing — the same set the predecessor collected — and `total_cmp` order is
-/// the same order its `sort_by(f64::total_cmp)` produced, so the subsequent
-/// epsilon dedup makes bit-identical decisions. Streams supply identical values
-/// only when their `f64` bit patterns are identical, so the choice of source on
-/// a tie cannot change which bit pattern survives.
+/// crossing, in the same order a `sort_by(f64::total_cmp)` over that multiset
+/// would produce, so the subsequent epsilon dedup makes deterministic
+/// decisions. Streams supply identical values only when their `f64` bit
+/// patterns are identical, so the choice of source on a tie cannot change
+/// which bit pattern survives.
 fn merge_boundaries(
     boundaries: &mut Vec<f64>,
     range_start: f64,
@@ -1385,8 +1387,8 @@ fn quantized_parameter(value: f64) -> i64 {
 
 /// Converts a quantized parameter numerator back to `f64` as
 /// `numerator / ROOT_SCALE`. Both operands are `f64`-exact (see
-/// [`quantized_parameter`]), so this is the bit-identical `f64` of the reduced
-/// `Ratio::new(numerator, ROOT_SCALE)` the predecessor compared against.
+/// [`quantized_parameter`]), so this is bit-identical to converting the
+/// reduced `Ratio::new(numerator, ROOT_SCALE)` to `f64`.
 fn parameter_f64(parameter: i64) -> f64 {
     parameter as f64 / ROOT_SCALE as f64
 }

@@ -11,8 +11,7 @@ pub struct FragmentKey {
 }
 
 impl Ord for FragmentKey {
-    /// Orders by depth first, then the tie-break fields, identically to the
-    /// derived `Ratio<i64>` ordering the predecessor used. `depth` is always a
+    /// Orders by depth first, then the tie-break fields. `depth` is always a
     /// reduced canonical `Ratio<i64>` with positive denominator (produced by
     /// `num_rational` arithmetic), so comparing two depths by the sign of the
     /// cross-multiplication `n1*d2 - n2*d1` is exact and total: both products fit

@@ -221,10 +221,11 @@ impl AffineForm {
 ///
 /// # `f64` exactness
 ///
-/// The predecessor converted the *reduced* `Ratio<i64>` offset `n/d` to `f64`
-/// as `(n as f64) / (d as f64)`. This factoring instead holds the *unreduced*
-/// pair `N/D = (n * g)/(d * g)`. `f64` division is correctly rounded, so
-/// `(N as f64)/(D as f64) == (n as f64)/(d as f64)` whenever `N` and `D` are both
+/// This factoring holds the *unreduced* offset pair `N/D = (n * g)/(d * g)`,
+/// where `n/d` is the reduced canonical `Ratio<i64>` form (the same value
+/// [`FrameInverse::variable_coefficients_exact`] returns). `f64` division is
+/// correctly rounded, so `(N as f64)/(D as f64) == (n as f64)/(d as f64)`
+/// whenever `N` and `D` are both
 /// exactly representable in `f64`, i.e. `|N| <= 2^53` and `D <= 2^53`: both sides
 /// then equal the correctly rounded `f64` of the identical exact value, and the
 /// reduced magnitudes `|n| <= |N|`, `d <= D` are exact a fortiori. Setup asserts
@@ -486,11 +487,12 @@ impl FrameInverse {
         (form.numerator_at(i128::from(x), i128::from(y)), form.d)
     }
 
-    /// Per-pixel `[offset, slope]` for source x, source y, and relief as `f64`,
-    /// the exact bit pattern the reduced-`Ratio` predecessor produced (see the
-    /// type-level `f64`-exactness argument). The offsets are converted from the
-    /// unreduced integer affine numerators; the slopes are frame constants
-    /// converted once at setup.
+    /// Per-pixel `[offset, slope]` for source x, source y, and relief as `f64`:
+    /// the offset is bit-identical to converting the reduced canonical
+    /// `Ratio<i64>` returned by [`variable_coefficients_exact`] to `f64` (see
+    /// the type-level `f64`-exactness argument above). The offsets are
+    /// converted from the unreduced integer affine numerators; the slopes are
+    /// frame constants converted once at setup.
     pub fn variable_f64(&self, x: u32, y: u32) -> [[f64; 2]; 3] {
         std::array::from_fn(|variable| {
             let (numerator, denominator) = self.numerator_denominator(variable, x, y);
@@ -540,10 +542,9 @@ impl FrameInverse {
         [self.depth_offset(&offsets), self.depth_slope]
     }
 
-    /// Exact camera depth `constant + slope * parameter` at this pixel. The
-    /// result is the reduced canonical `Ratio<i64>` of the same rational the
-    /// predecessor's `depth_at` produced, so the golden fragment-owner depths are
-    /// bit-identical.
+    /// Exact camera depth `constant + slope * parameter` at this pixel, as the
+    /// reduced canonical `Ratio<i64>`; golden fragment-owner depths compare
+    /// against this value bit-for-bit.
     pub fn depth_at(&self, x: u32, y: u32, parameter: Ratio<i64>) -> Ratio<i64> {
         let offsets = self.variable_coefficients_exact(x, y);
         self.depth_offset(&offsets) + self.depth_slope * parameter

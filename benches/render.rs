@@ -64,6 +64,10 @@ fn bench_prepare(criterion: &mut Criterion) {
 /// End-to-end orbit interaction through the editor's public preview path:
 /// eight distinct orientations per iteration, fresh cache so every frame is a
 /// real render (the cache only memoizes the most recent orientation anyway).
+/// A fresh cache also means `PreparedModel` construction re-runs every
+/// iteration; that's deliberate, since this benchmark measures the full
+/// end-to-end orbit interaction rather than isolating render cost the way
+/// `bench_render` and `bench_prepare` do.
 fn bench_orbit_sweep(criterion: &mut Criterion) {
     let document =
         EditorDocument::from_model(globe_model().expect("globe fixture must build"), None);
