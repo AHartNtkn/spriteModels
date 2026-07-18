@@ -924,10 +924,10 @@ fn fallback_owner_used_when_the_best_side_is_occluded() {
 /// edge-on to Front (near-zero y extent) and contributes no rasterized
 /// coverage (same technique as `geometry_past_the_midplane_is_dropped`).
 ///
-/// Plate and floor are 4-adjacent across the plate's silhouette boundary,
-/// with a relief gap far exceeding the cut candidate threshold and real
-/// empty space between them (the plate has no thickness connecting it to
-/// the floor) — the fabricated-cliff case the cut pass exists to catch.
+/// Plate and floor are 4-adjacent across the plate's silhouette with real
+/// empty space between them, so the pair is cut by the continuity
+/// verdict; with only Front enabled no side can rescue the ring, which
+/// stays empty.
 #[test]
 fn occlusion_cut_drops_the_far_strip() {
     let scene = TriangleScene {
@@ -977,11 +977,6 @@ fn occlusion_cut_drops_the_far_strip() {
         plate_relief <= h_max && floor_relief <= h_max,
         "both surfaces must be reachable from Front (plate {plate_relief}, floor \
          {floor_relief}, h_max {h_max})"
-    );
-    assert!(
-        floor_relief - plate_relief > 10,
-        "the plate/floor relief gap must exceed the cut candidate threshold \
-         (plate {plate_relief}, floor {floor_relief})"
     );
 
     // Plate occupies texel columns/rows whose center (idx + 0.5) falls
@@ -1034,13 +1029,10 @@ fn occlusion_cut_drops_the_far_strip() {
 /// Same framing as `occlusion_cut_drops_the_far_strip`, but the two relief
 /// levels are physically connected: an upper shelf at z = 0.1 for x in
 /// [0,0.5], a lower shelf at z = 0.45 for x in [0.5,1.0], and a vertical
-/// quad joining them at x = 0.5 spanning z in [0.1,0.45]. The shelf-to-shelf
-/// pair straddling x = 0.5 exceeds the candidate threshold exactly as in
-/// the fabricated-cliff test (same plate/floor relief values), but this
-/// time a real wall occupies the space between the two reconstructed
-/// sample points, so the wall-reality test must keep the step intact. This
-/// pins that cuts do not overreach: it passes both before and after this
-/// change (no RED expected — see task report).
+/// quad joining them at x = 0.5 spanning z in [0.1,0.45]. The connecting
+/// wall's cross-section joins the two shelves, so the shelf-to-shelf pair
+/// straddling x = 0.5 is continuous by the continuity verdict, and both
+/// shelves stay covered.
 #[test]
 fn real_step_wall_is_kept() {
     let scene = TriangleScene {
@@ -1087,11 +1079,6 @@ fn real_step_wall_is_kept() {
     let scale = f64::from(bounds.width());
     let upper_relief = ((0.1_f64 * scale) * 8.0).round() as i64;
     let lower_relief = ((0.45_f64 * scale) * 8.0).round() as i64;
-    assert!(
-        lower_relief - upper_relief > 10,
-        "the shelf-to-shelf relief gap must exceed the cut candidate threshold, matching \
-         the fabricated-cliff test's setup (upper {upper_relief}, lower {lower_relief})"
-    );
 
     let boundary = (0.5 * scale) as u32; // upper covers [0,boundary), lower [boundary,16)
 
@@ -1113,6 +1100,109 @@ fn real_step_wall_is_kept() {
                 "({x},{y}) must stay covered at its shelf's own relief; the real wall at \
                  x = {boundary} must not be cut, unlike the fabricated-cliff test"
             );
+        }
+    }
+}
+
+/// Mesh-space tab-over-slanted-floor (the bunny's ear-over-back in
+/// miniature), captured from Top and Back only. The floor slants so its
+/// upward normal has a front-facing component: Back genuinely observes
+/// it. Top must keep the tab intact and relinquish the floor strip
+/// 4-adjacent to the tab's silhouette; the strip BEHIND the tab is within
+/// Back's reach, so Back's chart must render it — the seam bug is exactly
+/// this strip being dropped by everyone. The strip IN FRONT of the tab is
+/// beyond Back's reach and stays an honest hole.
+#[test]
+fn relinquished_silhouette_strip_is_rescued_by_back() {
+    let quad =
+        |p0: [f32; 3], p1: [f32; 3], p2: [f32; 3], p3: [f32; 3]| [tri(p0, p1, p2), tri(p0, p2, p3)];
+    let mut triangles = Vec::new();
+    // Floor: y = 0.125 + 0.25 z over x,z in [0,1] (box y = 1 + 0.25 Z).
+    triangles.extend(quad(
+        [0.0, 0.125, 0.0],
+        [1.0, 0.125, 0.0],
+        [1.0, 0.375, 1.0],
+        [0.0, 0.375, 1.0],
+    ));
+    // Tab: y = 0.0625 over x,z in [0.25, 0.75] (box y = 0.5, x,z in [2,6]).
+    triangles.extend(quad(
+        [0.25, 0.0625, 0.25],
+        [0.75, 0.0625, 0.25],
+        [0.75, 0.0625, 0.75],
+        [0.25, 0.0625, 0.75],
+    ));
+    // Edge-on slivers pinning the AABB to the unit cube (zero coverage).
+    triangles.push(tri([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0001, 0.5, 0.0]));
+    triangles.push(tri([1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.9999, 0.5, 1.0]));
+    let scene = TriangleScene {
+        triangles,
+        materials: vec![plain_material()],
+    };
+    let mut config = ImportSettings {
+        rotation: IDENTITY,
+        ..settings(8)
+    };
+    let mut modes = config.side_modes;
+    for side in [
+        CanonicalView::Front,
+        CanonicalView::Left,
+        CanonicalView::Right,
+        CanonicalView::Bottom,
+    ] {
+        modes.set(side, SideMode::Off).expect("legal mode");
+    }
+    config.side_modes = modes;
+    let model = convert(&scene, &config).expect("converts");
+    assert_eq!(
+        (
+            model.bounds().width(),
+            model.bounds().height(),
+            model.bounds().depth()
+        ),
+        (8, 8, 8)
+    );
+
+    let top = model.chart(CanonicalView::Top).expect("top chart");
+    let top_rgba = |x: u32, z: u32| top.rgba()[(z * 8 + x) as usize];
+    // Tab intact at relief 4 (y = 0.5 box units).
+    for z in 2..=5u32 {
+        for x in 2..=5u32 {
+            assert_eq!(
+                i64::from(255 - top_rgba(x, z)[3]),
+                4,
+                "tab texel ({x},{z}) keeps its silhouette and relief"
+            );
+        }
+    }
+    // Relinquished strips: empty in Top.
+    for x in 2..=5u32 {
+        assert_eq!(top_rgba(x, 6), [0, 0, 0, 0], "far strip ({x},6) yields");
+        assert_eq!(top_rgba(x, 1), [0, 0, 0, 0], "near strip ({x},1) yields");
+    }
+
+    // The rescue: Back's chart renders the far strip. Back texel (u, v)
+    // maps to box x = 8 - (u + 0.5); the strip columns x in 2..=5 land at
+    // u in 2..=5 reversed. Back's row v = 2 (y center 2.5) samples the
+    // floor at box z = 4 (y - 1) = 6, depth 8 - 6 = 2, relief 16. Kept
+    // texels u in {2..5}; closure support extends one texel to u in
+    // {1, 6}; u in {0, 7} stays empty (Top keeps those floor points).
+    let back = model.chart(CanonicalView::Back).expect("back chart");
+    let back_rgba = |u: u32, v: u32| back.rgba()[(v * 8 + u) as usize];
+    for u in 1..=6u32 {
+        assert_eq!(
+            i64::from(255 - back_rgba(u, 2)[3]),
+            16,
+            "Back ({u},2) must render the rescued strip"
+        );
+    }
+    for u in [0u32, 7] {
+        assert_eq!(back_rgba(u, 2), [0, 0, 0, 0], "Back ({u},2) defers to Top");
+    }
+    // Everything else in Back is unreachable or missed: rows other than
+    // v = 2 are empty.
+    for v in (0..8u32).filter(|&v| v != 2) {
+        for u in 0..8u32 {
+            assert_eq!(back_rgba(u, v), [0, 0, 0, 0], "Back ({u},{v}) empty");
         }
     }
 }

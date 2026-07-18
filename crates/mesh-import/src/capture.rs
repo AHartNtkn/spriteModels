@@ -1,7 +1,6 @@
 use relief_core::{AuthoredModel, Bounds, CanonicalView, Chart, RELIEF_UNITS_PER_PIXEL};
 
 use crate::continuity::{SideContinuity, SideView};
-use crate::cuts::TriangleGrid;
 use crate::{ImportError, Lighting, Triangle, TriangleScene, View, light_direction, rasterize};
 
 pub const ALL_VIEWS: [CanonicalView; 6] = [
@@ -294,13 +293,6 @@ pub(crate) fn scale3(a: [f64; 3], s: f64) -> [f64; 3] {
 
 pub(crate) fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-/// Euclidean distance between two box-space points, in texels (box-space
-/// units are texels by construction: `fit`'s `dim()` maps the scaled mesh
-/// extent directly onto the bounds' integer texel counts).
-pub(crate) fn distance3(a: [f64; 3], b: [f64; 3]) -> f64 {
-    dot3(sub3(a, b), sub3(a, b)).sqrt()
 }
 
 /// One enabled Capture side's rasterization after the reachability filter
@@ -803,103 +795,23 @@ pub(crate) fn enforce_closure_invariant(
     }
 }
 
-/// Largest relief difference a single continuous best-faced sheet can
-/// produce between 4-adjacent texels: ownership guarantees an owned
-/// sample's surface slope is <= 45 degrees (the ownership rule's own
-/// candidacy bound), so one continuous sheet's relief can change by at most
-/// one pixel (8 relief units, `RELIEF_UNITS_PER_PIXEL`) across one texel of
-/// lateral travel, plus 2 units absorbing the pair's two independent
-/// depth-quantization roundings. A larger gap is either a real steep wall
-/// (a fallback-owned cavity side) or an occlusion cut — the wall-reality
-/// test, not this threshold, tells them apart (spec: "Fabricated-wall
-/// cuts").
-const CUT_CANDIDATE_UNITS: i64 = 10;
-
-/// Fabricated-wall cuts (spec: "Fabricated-wall cuts"), run after ownership
-/// and closure and before chart encoding: every 4-adjacent pair of kept
-/// texels whose relief differs by more than `CUT_CANDIDATE_UNITS` is a
-/// candidate discontinuity, tested by sampling the open segment between the
-/// pair's two reconstructed 3D points against the mesh (`grid`). Fabricated
-/// pairs (some interior sample farther than one texel from any triangle)
-/// have their far (deeper) texel collected into `drop`, which is applied to
-/// `kept` only after the full scan — so a texel dropped by one pair cannot
-/// change the candidacy or verdict of another pair scanned later, making
-/// the result independent of scan order (spec: "two-phase"). Cuts never run
-/// twice and closure never re-runs afterward, so a cut cannot be re-bridged.
-fn apply_fabricated_wall_cuts(side: &CaptureSide, kept: &mut [bool], grid: &TriangleGrid) {
-    let relief_at = |idx: usize| i64::from(255 - side.rgba[idx][3]);
-    let mut drop = vec![false; kept.len()];
-
-    let mut test_pair = |x0: u32, y0: u32, x1: u32, y1: u32| {
-        let i0 = side.index(x0, y0);
-        let i1 = side.index(x1, y1);
-        if !kept[i0] || !kept[i1] {
-            return;
-        }
-        let relief0 = relief_at(i0);
-        let relief1 = relief_at(i1);
-        if (relief0 - relief1).abs() <= CUT_CANDIDATE_UNITS {
-            return;
-        }
-        let (near, far) = if relief0 <= relief1 {
-            ((x0, y0, i0), (x1, y1, i1))
-        } else {
-            ((x1, y1, i1), (x0, y0, i0))
-        };
-        let p_near = side.point_at(near.0, near.1, side.depth[near.2]);
-        let p_far = side.point_at(far.0, far.1, side.depth[far.2]);
-        let len = distance3(p_far, p_near);
-        // The pair's own endpoints lie on surface by construction and are
-        // excluded; at least one interior probe is always taken, even for
-        // immediately adjacent texels, so a real wall spanning exactly one
-        // texel of lateral travel still gets tested once.
-        let samples = (len.ceil() as i64 - 1).max(1);
-        let mut real = true;
-        for k in 1..=samples {
-            let t = k as f64 / (samples + 1) as f64;
-            // `q` is a convex combination of `p_near` and `p_far`, both
-            // reconstructed from an in-bounds texel and a depth that
-            // cleared the reachability filter (relief <= h_max, i.e.
-            // within the model box on the forward axis, per
-            // `capture_side`'s own filter); since the model box is convex,
-            // every interior sample stays inside it too, so
-            // `within_one_texel`'s out-of-box clamp is a defensive
-            // fallback here, never live on this call path.
-            let q = add3(p_near, scale3(sub3(p_far, p_near), t));
-            if !grid.within_one_texel(q) {
-                real = false;
-                break;
-            }
-        }
-        if !real {
-            drop[far.2] = true;
-        }
-    };
-
-    for y in 0..side.height {
-        for x in 0..side.width {
-            if x + 1 < side.width {
-                test_pair(x, y, x + 1, y);
-            }
-            if y + 1 < side.height {
-                test_pair(x, y, x, y + 1);
-            }
-        }
-    }
-
-    for (idx, &dropped) in drop.iter().enumerate() {
-        if dropped {
-            kept[idx] = false;
-        }
-    }
+pub(crate) struct CapturePipeline {
+    pub sides: Vec<CaptureSide>,
+    /// Only the property tests' coverage theorem reads ownership after
+    /// construction; `convert_box_space` needs only `sides` and `masks`,
+    /// and every other consumer (the fabricated-adjacency oracle) recomputes
+    /// continuity/ownership independently rather than trusting the
+    /// pipeline's own labels, which is the point of an outside oracle.
+    #[cfg(test)]
+    pub ownership: OwnershipState,
+    pub masks: Vec<ClosureMask>,
 }
 
-pub fn convert_box_space(
+pub(crate) fn run_capture(
     box_scene: &TriangleScene,
     bounds: Bounds,
     settings: &ImportSettings,
-) -> Result<AuthoredModel, ImportError> {
-    settings.side_modes.validate()?;
+) -> CapturePipeline {
     let lighting = Lighting {
         direction: light_direction(
             settings.light_azimuth_degrees,
@@ -907,17 +819,11 @@ pub fn convert_box_space(
         ),
         ambient: settings.ambient,
     };
-
-    // Pass 1: rasterize and reachability-filter every enabled Capture side.
-    // Ownership (pass 2) runs only across this set; `From opposite`/`Off`
-    // sides play no role.
     let sides: Vec<CaptureSide> = ALL_VIEWS
         .into_iter()
         .filter(|&view| settings.side_modes.get(view) == SideMode::Capture)
         .map(|view| capture_side(box_scene, view, bounds, &lighting))
         .collect();
-
-    // Pass 2: continuity labels + ownership fixpoint + closure ring.
     let continuity: Vec<SideContinuity> = sides
         .iter()
         .map(|side| {
@@ -925,42 +831,83 @@ pub fn convert_box_space(
         })
         .collect();
     let ownership = ownership_masks(&sides, &continuity);
-    let mut masks: Vec<Vec<bool>> = Vec::with_capacity(sides.len());
-    for (s_idx, side) in sides.iter().enumerate() {
-        let covered: Vec<bool> = side.depth.iter().map(|d| d.is_finite()).collect();
-        let mut closure = dilate_keep_mask(
-            &ownership.kept[s_idx],
-            &covered,
-            &ownership.banned[s_idx],
-            &continuity[s_idx],
-            side.width,
-            side.height,
-        );
-        enforce_closure_invariant(
-            &side.depth,
-            &continuity[s_idx],
-            &mut closure,
-            side.width,
-            side.height,
-        );
-        masks.push(closure.mask);
+    let masks: Vec<ClosureMask> = sides
+        .iter()
+        .enumerate()
+        .map(|(s_idx, side)| {
+            let covered: Vec<bool> = side.depth.iter().map(|d| d.is_finite()).collect();
+            let mut closure = dilate_keep_mask(
+                &ownership.kept[s_idx],
+                &covered,
+                &ownership.banned[s_idx],
+                &continuity[s_idx],
+                side.width,
+                side.height,
+            );
+            enforce_closure_invariant(
+                &side.depth,
+                &continuity[s_idx],
+                &mut closure,
+                side.width,
+                side.height,
+            );
+            debug_assert_chart_invariant(
+                &closure.mask,
+                &continuity[s_idx],
+                side.width,
+                side.height,
+            );
+            closure
+        })
+        .collect();
+    CapturePipeline {
+        sides,
+        #[cfg(test)]
+        ownership,
+        masks,
     }
+}
 
-    // Pass 3: fabricated-wall cuts, run after closure (so dilation cannot
-    // re-bridge a cut) and before chart encoding. The triangle grid is
-    // built once from every box-space triangle, independent of which sides
-    // are enabled for capture.
-    let grid = TriangleGrid::build(&box_scene.triangles, bounds);
-    for (side, mask) in sides.iter().zip(masks.iter_mut()) {
-        apply_fabricated_wall_cuts(side, mask, &grid);
+#[cfg(debug_assertions)]
+fn debug_assert_chart_invariant(
+    mask: &[bool],
+    continuity: &SideContinuity,
+    width: u32,
+    height: u32,
+) {
+    let index = |x: u32, y: u32| (y * width + x) as usize;
+    for y in 0..height {
+        for x in 0..width {
+            for (nx, ny) in [(x + 1, y), (x, y + 1)] {
+                if nx >= width || ny >= height {
+                    continue;
+                }
+                debug_assert!(
+                    !(mask[index(x, y)] && mask[index(nx, ny)])
+                        || continuity.connected(x, y, nx, ny),
+                    "emitted mask violates the chart invariant at ({x},{y})-({nx},{ny})"
+                );
+            }
+        }
     }
+}
 
+#[cfg(not(debug_assertions))]
+fn debug_assert_chart_invariant(_: &[bool], _: &SideContinuity, _: u32, _: u32) {}
+
+pub fn convert_box_space(
+    box_scene: &TriangleScene,
+    bounds: Bounds,
+    settings: &ImportSettings,
+) -> Result<AuthoredModel, ImportError> {
+    settings.side_modes.validate()?;
+    let pipeline = run_capture(box_scene, bounds, settings);
     let mut charts = Vec::new();
-    for (side, mask) in sides.iter().zip(masks.iter()) {
+    for (side, closure) in pipeline.sides.iter().zip(pipeline.masks.iter()) {
         let rgba: Vec<[u8; 4]> = side
             .rgba
             .iter()
-            .zip(mask.iter())
+            .zip(closure.mask.iter())
             .map(|(&texel, &keep)| if keep { texel } else { [0, 0, 0, 0] })
             .collect();
         let mut chart = Chart::from_rgba(side.view, side.width, side.height, rgba)?;

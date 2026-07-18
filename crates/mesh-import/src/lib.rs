@@ -1,7 +1,8 @@
 mod capture;
 mod continuity;
-mod cuts;
 mod error;
+#[cfg(test)]
+mod property_tests;
 mod raster;
 mod scene;
 
