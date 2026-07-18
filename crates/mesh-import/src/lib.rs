@@ -1,4 +1,5 @@
 mod capture;
+mod continuity;
 mod cuts;
 mod error;
 mod raster;
