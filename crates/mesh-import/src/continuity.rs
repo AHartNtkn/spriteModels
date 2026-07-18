@@ -375,6 +375,31 @@ fn merge_buckets(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
     out.extend_from_slice(&b[j..]);
 }
 
+/// Reusable buffers for `pair_connected`, so the per-pair loop performs no
+/// allocation once the vectors have grown to the working size.
+#[derive(Default)]
+struct PairScratch {
+    /// Per-segment bounding interval [t_lo, t_hi, d_lo, d_hi].
+    boxes: Vec<[f64; 4]>,
+    reachable: Vec<bool>,
+    queue: Vec<usize>,
+}
+
+/// Distance queries against `JOIN_GAP` are skipped when bounding intervals
+/// are separated by more than this padded gap. Separation in a single
+/// coordinate lower-bounds the true distance, and the computed distance
+/// (a correctly-rounded chain over coordinates < 2^7 texels) sits within
+/// 2^-45 texels of the true one, so a pad of 2^-20 texels — 2^25 times
+/// that bound — guarantees every skipped query would have compared above
+/// JOIN_GAP.
+const GAP_PAD: f64 = JOIN_GAP + PRUNE_MARGIN;
+
+/// Rounding slack for interval-based pruning, in texels: far above the
+/// < 2^-45 texel error of any computed coordinate or distance in this
+/// module (coordinates are < 2^7 texels in f64), far below any geometric
+/// feature the verdicts depend on (JOIN_GAP = 2^-4 texels).
+const PRUNE_MARGIN: f64 = 1.0 / (1 << 20) as f64;
+
 /// The pair verdict on assembled cross-section segments: connected iff the
 /// two samples lie on one component of the join graph (segments within
 /// JOIN_GAP touch — shared mesh edges coincide exactly; sub-quantum cracks
@@ -392,17 +417,39 @@ fn pair_connected(
     t1: f64,
     d1: f64,
     win1: u32,
+    scratch: &mut PairScratch,
 ) -> bool {
+    let boxes = &mut scratch.boxes;
+    boxes.clear();
+    boxes.extend(segments.iter().map(|s| {
+        [
+            s.a[0].min(s.b[0]),
+            s.a[0].max(s.b[0]),
+            s.a[1].min(s.b[1]),
+            s.a[1].max(s.b[1]),
+        ]
+    }));
+    // A point (or box) farther than GAP_PAD from a segment's bounding
+    // interval in either coordinate cannot pass the JOIN_GAP comparison;
+    // skipping it leaves every `position` result unchanged.
+    let point_near = |bx: &[f64; 4], t: f64, d: f64| {
+        t >= bx[0] - GAP_PAD && t <= bx[1] + GAP_PAD && d >= bx[2] - GAP_PAD && d <= bx[3] + GAP_PAD
+    };
     let find = |t: f64, d: f64, tri: u32| -> Option<usize> {
         segments
             .iter()
-            .position(|s| s.triangle == tri && point_segment_distance([t, d], s.a, s.b) <= JOIN_GAP)
+            .zip(boxes.iter())
+            .position(|(s, bx)| {
+                s.triangle == tri
+                    && point_near(bx, t, d)
+                    && point_segment_distance([t, d], s.a, s.b) <= JOIN_GAP
+            })
             .or_else(|| {
                 // Degenerate slices can drop a zero-length winning
                 // cross-section; any segment through the sample serves.
-                segments
-                    .iter()
-                    .position(|s| point_segment_distance([t, d], s.a, s.b) <= JOIN_GAP)
+                segments.iter().zip(boxes.iter()).position(|(s, bx)| {
+                    point_near(bx, t, d) && point_segment_distance([t, d], s.a, s.b) <= JOIN_GAP
+                })
             })
     };
     let (Some(start), Some(end)) = (find(0.0, d0, win0), find(t1, d1, win1)) else {
@@ -412,12 +459,30 @@ fn pair_connected(
     if start == end {
         return true;
     }
-    let mut reachable = vec![false; segments.len()];
-    let mut queue = vec![start];
+    let reachable = &mut scratch.reachable;
+    reachable.clear();
+    reachable.resize(segments.len(), false);
+    let queue = &mut scratch.queue;
+    queue.clear();
+    queue.push(start);
     reachable[start] = true;
     while let Some(i) = queue.pop() {
+        let bi = boxes[i];
         for j in 0..segments.len() {
-            if !reachable[j] && segment_segment_distance(&segments[i], &segments[j]) <= JOIN_GAP {
+            if reachable[j] {
+                continue;
+            }
+            let bj = &boxes[j];
+            // Interval separation beyond GAP_PAD in either coordinate
+            // guarantees the distance comparison below would fail.
+            if bi[0] > bj[1] + GAP_PAD
+                || bj[0] > bi[1] + GAP_PAD
+                || bi[2] > bj[3] + GAP_PAD
+                || bj[2] > bi[3] + GAP_PAD
+            {
+                continue;
+            }
+            if segment_segment_distance(&segments[i], &segments[j]) <= JOIN_GAP {
                 if j == end {
                     return true;
                 }
@@ -458,6 +523,7 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
         vec![false; ((width.saturating_sub(1)) * height.saturating_sub(1)) as usize];
     let mut segments: Vec<CrossSegment> = Vec::new();
     let mut gathered: Vec<u32> = Vec::new();
+    let mut scratch = PairScratch::default();
 
     // Labels one pair (x0,y0)-(x1,y1) whose center-to-center direction is
     // (dxf, dyf) with length `t_max`: (1,0)/1.0 and (0,1)/1.0 for the
@@ -514,7 +580,6 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
             // unscaled u+v / v-u coordinates, where the window [0, t_max]
             // maps to width 2 exactly and PRUNE_MARGIN still dwarfs
             // the bound.
-            const PRUNE_MARGIN: f64 = 1.0 / (1 << 20) as f64;
             for &tri_idx in &gathered {
                 let b = &tri_bounds[tri_idx as usize];
                 let skip = if y0 == y1 {
@@ -572,8 +637,15 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
                 }
                 segments.truncate(kept);
             }
-            out[out_idx] =
-                pair_connected(&segments, side.depth[i], win0, t_max, side.depth[j], win1);
+            out[out_idx] = pair_connected(
+                &segments,
+                side.depth[i],
+                win0,
+                t_max,
+                side.depth[j],
+                win1,
+                &mut scratch,
+            );
         };
 
     for y in 0..height {
