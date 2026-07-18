@@ -319,9 +319,13 @@ fn buckets(projected: &[[[f64; 3]; 3]], width: u32, height: u32) -> (Vec<Vec<u32
             let d = vertex[1] - vertex[0];
             vmu = [vmu[0].min(d), vmu[1].max(d)];
         }
-        let inside =
-            u[1] >= 0.0 && v[1] >= 0.0 && u[0] < f64::from(width) && v[0] < f64::from(height);
-        if inside {
+        // Negated-OR form, not the De Morgan'd conjunction: with NaN
+        // bounds (a malformed scene) every comparison is false, so the
+        // triangle is NOT skipped and buckets at cell (0,0) through the
+        // saturating casts in `clamp` — the pre-optimization behavior.
+        let skip =
+            u[1] < 0.0 || v[1] < 0.0 || u[0] >= f64::from(width) || v[0] >= f64::from(height);
+        if !skip {
             let (x0, x1) = (clamp(u[0], width), clamp(u[1], width));
             let (y0, y1) = (clamp(v[0], height), clamp(v[1], height));
             for y in y0..=y1 {
