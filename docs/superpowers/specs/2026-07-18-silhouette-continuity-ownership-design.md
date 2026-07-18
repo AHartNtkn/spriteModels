@@ -134,8 +134,9 @@ instead of discarding:
    resolved by a single sweep in descending score order, making the result
    deterministic and independent of side iteration order.
 5. **End state**: every observed surface point is kept by the best side that
-   can legally hold it. A point is kept nowhere only if no enabled side
-   observes it — the format's by-construction loss, which the import dialog
+   can legally hold it. A point is kept nowhere only if no enabled side can
+   legally hold it (every observer is silhouette-banned there or fails
+   candidacy) — the format's by-construction loss, which the import dialog
    exists to show.
 
 Constraint enforcement never fires on a continuous edge, so mid-surface
@@ -196,9 +197,9 @@ implementation where the current implementation is wrong.
 2. **Ownership and rescue** on a synthetic tab-over-plane scene: top chart
    keeps the tab with silhouette intact and stops one texel short on the far
    side; the relinquished ring is kept by the side chart; and the coverage
-   property — every pre-ownership covered sample observed by at least one
-   candidate side is represented in some emitted chart within the derived
-   tolerance. The coverage property is the seam bug's test and fails today.
+   property — every pre-ownership covered sample is represented in some
+   emitted chart, banned where it stands, or deferred to a kept better
+   candidate. The coverage property is the seam bug's test and fails today.
 3. **Invariant property test on real fixtures** (bunny, dragon, teapot,
    earth; several bounds and rotations): no emitted chart contains a
    4-adjacent covered pair labeled cut, plus the existing format

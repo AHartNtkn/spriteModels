@@ -608,9 +608,7 @@ mod tests {
     }
 
     /// A fold whose two slanted surfaces share a mesh edge is continuous
-    /// across the crease, even at 45 degrees (8 relief units per texel —
-    /// the case the old 10-unit threshold family could not distinguish
-    /// from an occlusion).
+    /// across the crease, even at 45 degrees (8 relief units per texel).
     #[test]
     fn fold_sharing_a_mesh_edge_is_connected() {
         let mut triangles = Vec::new();

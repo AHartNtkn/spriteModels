@@ -100,8 +100,9 @@ best side that can legally hold it:
   (a side keeps its covered, unbanned texel iff no strictly better
   candidate currently keeps the point); the far endpoint of every violated
   cut edge is banned for that side; banned surface is re-owned by the next
-  best observing side. A point is lost only when no enabled side observes
-  it. Bans only accumulate, so the fixpoint terminates.
+  best observing side. A point is lost only when no enabled side can
+  legally hold it (every observer is silhouette-banned there or fails
+  candidacy). Bans only accumulate, so the fixpoint terminates.
 - After ownership, each side dilates its kept texels by one texel into
   covered, unbanned neighbors across continuous edges only — the support
   tent interpolation needs to meet the neighboring chart. A final sweep

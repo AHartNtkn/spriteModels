@@ -606,6 +606,12 @@ pub(crate) fn ownership_masks(
     }
     // Descending own score; ties by canonical rank then texel index keep
     // the sweep total-ordered and deterministic.
+    //
+    // A candidate side's own score for a shared surface point can differ
+    // slightly from the observer's estimate of it (distinct triangles on
+    // non-manifold geometry), letting a sample resolve before its
+    // nominally better candidate; the consequence is only a duplicate
+    // keep of the same surface, which composites consistently.
     order.sort_by(|a, b| {
         b.0.total_cmp(&a.0)
             .then_with(|| {

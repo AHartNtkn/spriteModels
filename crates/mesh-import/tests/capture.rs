@@ -1045,7 +1045,8 @@ fn real_step_wall_is_kept() {
             tri([0.5, 0.0, 0.45], [1.0, 1.0, 0.45], [0.5, 1.0, 0.45]),
             // Connecting wall at x = 0.5, spanning z in [0.1,0.45]: edge-on
             // (zero area) to Front, so it contributes no coverage there,
-            // only mesh for the wall-reality distance query to find.
+            // only cross-section surface for the continuity verdict to
+            // join the two shelves through.
             tri([0.5, 0.0, 0.1], [0.5, 1.0, 0.1], [0.5, 1.0, 0.45]),
             tri([0.5, 0.0, 0.1], [0.5, 1.0, 0.45], [0.5, 0.0, 0.45]),
             // Edge-on sliver widening the z extent to [0,1].

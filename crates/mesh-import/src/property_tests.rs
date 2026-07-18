@@ -32,17 +32,13 @@ fn fixture(name: &str) -> TriangleScene {
 /// labels cut — that adjacency renders as a fabricated wall (the bunny
 /// ear spikes). The oracle recomputes capture-side state independently of
 /// the pipeline under test.
-fn assert_no_fabricated_adjacency(name: &str, longest: u32) {
+fn assert_no_fabricated_adjacency(name: &str, settings: &ImportSettings) {
     let scene = fixture(name);
-    let settings = ImportSettings {
-        longest_axis_pixels: longest,
-        ..Default::default()
-    };
     let (box_scene, bounds) =
         box_space_scene(&scene, settings.rotation, settings.longest_axis_pixels)
             .expect("box space");
-    let model = convert_box_space(&box_scene, bounds, &settings).expect("converts");
-    let pipeline = run_capture(&box_scene, bounds, &settings);
+    let model = convert_box_space(&box_scene, bounds, settings).expect("converts");
+    let pipeline = run_capture(&box_scene, bounds, settings);
     for side in &pipeline.sides {
         let labels = side_continuity(&box_scene.triangles, &side.continuity_view());
         let chart = model.chart(side.view).expect("chart present");
@@ -56,8 +52,9 @@ fn assert_no_fabricated_adjacency(name: &str, longest: u32) {
                     if covered(x, y) && covered(nx, ny) {
                         assert!(
                             labels.connected(x, y, nx, ny),
-                            "{name}@{longest}: fabricated adjacency in {:?} at \
+                            "{name}@{}: fabricated adjacency in {:?} at \
                              ({x},{y})-({nx},{ny})",
+                            settings.longest_axis_pixels,
                             side.view
                         );
                     }
@@ -69,23 +66,75 @@ fn assert_no_fabricated_adjacency(name: &str, longest: u32) {
 
 #[test]
 fn bunny_charts_contain_no_fabricated_adjacency() {
-    assert_no_fabricated_adjacency("stanford-bunny.glb", 63);
-    assert_no_fabricated_adjacency("stanford-bunny.glb", 32);
+    assert_no_fabricated_adjacency(
+        "stanford-bunny.glb",
+        &ImportSettings {
+            longest_axis_pixels: 63,
+            ..Default::default()
+        },
+    );
+    assert_no_fabricated_adjacency(
+        "stanford-bunny.glb",
+        &ImportSettings {
+            longest_axis_pixels: 32,
+            ..Default::default()
+        },
+    );
 }
 
 #[test]
 fn teapot_charts_contain_no_fabricated_adjacency() {
-    assert_no_fabricated_adjacency("teapot.glb", 63);
+    assert_no_fabricated_adjacency(
+        "teapot.glb",
+        &ImportSettings {
+            longest_axis_pixels: 63,
+            ..Default::default()
+        },
+    );
 }
 
 #[test]
 fn earth_charts_contain_no_fabricated_adjacency() {
-    assert_no_fabricated_adjacency("earth.glb", 63);
+    assert_no_fabricated_adjacency(
+        "earth.glb",
+        &ImportSettings {
+            longest_axis_pixels: 63,
+            ..Default::default()
+        },
+    );
 }
 
 #[test]
 fn dragon_charts_contain_no_fabricated_adjacency() {
-    assert_no_fabricated_adjacency("xyzrgb_dragon.glb", 63);
+    assert_no_fabricated_adjacency(
+        "xyzrgb_dragon.glb",
+        &ImportSettings {
+            longest_axis_pixels: 63,
+            ..Default::default()
+        },
+    );
+}
+
+/// The chart invariant must hold at non-default orientations too (spec:
+/// real-model runs at several bounds and rotations): quarter turn about
+/// y composed with the default glTF mapping.
+#[test]
+fn bunny_rotated_charts_contain_no_fabricated_adjacency() {
+    let default = ImportSettings::default();
+    let quarter = [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]];
+    let mut rotation = [[0.0f32; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            for (k, d_row) in default.rotation.iter().enumerate() {
+                rotation[i][j] += quarter[i][k] * d_row[j];
+            }
+        }
+    }
+    let settings = ImportSettings {
+        rotation,
+        ..Default::default()
+    };
+    assert_no_fabricated_adjacency("stanford-bunny.glb", &settings);
 }
 
 /// The fixpoint's end-state theorem: every covered sample is kept,
@@ -197,6 +246,10 @@ fn quarter_turn_rotation_maps_the_top_chart() {
     }
     let top_a = original.chart(CanonicalView::Top).expect("top");
     let top_b = rotated.chart(CanonicalView::Top).expect("top");
+    assert!(
+        top_a.rgba().iter().any(|texel| texel[3] != 0),
+        "scene must produce a nonempty Top chart"
+    );
     for v in 0..n {
         for u in 0..n {
             let b = top_b.rgba()[(v * n + u) as usize][3];
