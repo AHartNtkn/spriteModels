@@ -277,34 +277,102 @@ fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
+/// Projected AABB of one triangle in (u, v), plus extrema of u+v and v-u
+/// (the diagonal pairs' plane/strip coordinates). Extrema of the rotated
+/// coordinates are taken per vertex, so they bound the true diagonal
+/// extent, not the looser box corners.
+struct TriBounds {
+    min_u: f64,
+    max_u: f64,
+    min_v: f64,
+    max_v: f64,
+    min_upv: f64,
+    max_upv: f64,
+    min_vmu: f64,
+    max_vmu: f64,
+}
+
 /// Per-texel triangle buckets from projected AABBs, clamped to the grid. A
 /// zero-area projection (an edge-on wall) still lands in its column — such
 /// triangles contribute no raster coverage but do carry cross-section
-/// surface, exactly the case a real step wall depends on.
-fn buckets(projected: &[[[f64; 3]; 3]], width: u32, height: u32) -> Vec<Vec<u32>> {
+/// surface, exactly the case a real step wall depends on. Also returns the
+/// per-triangle bounds the pair loop uses to skip triangles that provably
+/// contribute no clipped cross-section segment.
+fn buckets(
+    projected: &[[[f64; 3]; 3]],
+    width: u32,
+    height: u32,
+) -> (Vec<Vec<u32>>, Vec<TriBounds>) {
     let mut cells = vec![Vec::new(); (width * height) as usize];
+    let mut bounds = Vec::with_capacity(projected.len());
     let clamp = |value: f64, dim: u32| (value.floor() as i64).clamp(0, i64::from(dim) - 1) as u32;
     for (tri_idx, tri) in projected.iter().enumerate() {
-        let (mut min_u, mut max_u) = (f64::INFINITY, f64::NEG_INFINITY);
-        let (mut min_v, mut max_v) = (f64::INFINITY, f64::NEG_INFINITY);
+        let mut b = TriBounds {
+            min_u: f64::INFINITY,
+            max_u: f64::NEG_INFINITY,
+            min_v: f64::INFINITY,
+            max_v: f64::NEG_INFINITY,
+            min_upv: f64::INFINITY,
+            max_upv: f64::NEG_INFINITY,
+            min_vmu: f64::INFINITY,
+            max_vmu: f64::NEG_INFINITY,
+        };
         for vertex in tri {
-            min_u = min_u.min(vertex[0]);
-            max_u = max_u.max(vertex[0]);
-            min_v = min_v.min(vertex[1]);
-            max_v = max_v.max(vertex[1]);
+            b.min_u = b.min_u.min(vertex[0]);
+            b.max_u = b.max_u.max(vertex[0]);
+            b.min_v = b.min_v.min(vertex[1]);
+            b.max_v = b.max_v.max(vertex[1]);
+            let upv = vertex[0] + vertex[1];
+            b.min_upv = b.min_upv.min(upv);
+            b.max_upv = b.max_upv.max(upv);
+            let vmu = vertex[1] - vertex[0];
+            b.min_vmu = b.min_vmu.min(vmu);
+            b.max_vmu = b.max_vmu.max(vmu);
         }
-        if max_u < 0.0 || max_v < 0.0 || min_u >= f64::from(width) || min_v >= f64::from(height) {
-            continue;
+        let inside = b.max_u >= 0.0
+            && b.max_v >= 0.0
+            && b.min_u < f64::from(width)
+            && b.min_v < f64::from(height);
+        if inside {
+            let (x0, x1) = (clamp(b.min_u, width), clamp(b.max_u, width));
+            let (y0, y1) = (clamp(b.min_v, height), clamp(b.max_v, height));
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    cells[(y * width + x) as usize].push(tri_idx as u32);
+                }
+            }
         }
-        let (x0, x1) = (clamp(min_u, width), clamp(max_u, width));
-        let (y0, y1) = (clamp(min_v, height), clamp(max_v, height));
-        for y in y0..=y1 {
-            for x in x0..=x1 {
-                cells[(y * width + x) as usize].push(tri_idx as u32);
+        bounds.push(b);
+    }
+    (cells, bounds)
+}
+
+/// Merges two sorted, duplicate-free bucket lists into `out` (sorted,
+/// deduplicated) — same result as concatenate + sort + dedup without the
+/// per-pair sort.
+fn merge_buckets(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
+    out.clear();
+    out.reserve(a.len() + b.len());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => {
+                out.push(a[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                out.push(b[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                out.push(a[i]);
+                i += 1;
+                j += 1;
             }
         }
     }
-    cells
+    out.extend_from_slice(&a[i..]);
+    out.extend_from_slice(&b[j..]);
 }
 
 /// The pair verdict on assembled cross-section segments: connected iff the
@@ -378,7 +446,7 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
             })
         })
         .collect();
-    let cells = buckets(&projected, width, height);
+    let (cells, tri_bounds) = buckets(&projected, width, height);
     let reach = (side.h_max as f64 + 0.5) / RELIEF_UNITS_PER_PIXEL as f64;
     let at = |x: u32, y: u32| (y * width + x) as usize;
 
@@ -411,17 +479,80 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
                 out[out_idx] = true;
                 return;
             }
-            gathered.clear();
-            gathered.extend_from_slice(&cells[i]);
-            gathered.extend_from_slice(&cells[j]);
-            gathered.sort_unstable();
-            gathered.dedup();
+            merge_buckets(&cells[i], &cells[j], &mut gathered);
             segments.clear();
             let c0u = f64::from(x0) + 0.5;
             let c0v = f64::from(y0) + 0.5;
             let dxf = (f64::from(x1) - f64::from(x0)) / t_max;
             let dyf = (f64::from(y1) - f64::from(y0)) / t_max;
+            // Bounds-based skip: a triangle is transformed and sliced only
+            // when it can contribute a segment that survives the clip. Two
+            // conditions, each conservative toward keeping:
+            //
+            // Plane: `slice_triangle` emits nothing when every vertex lies
+            // strictly on one side of the plane. For orthogonal pairs the
+            // computed plane coordinate `w` equals `v - c0v` (horizontal)
+            // or `-(u - c0u)` (vertical) exactly — `dxf`/`dyf` are exactly
+            // 1.0/0.0, the `du * ±0.0` term only perturbs the sign of a
+            // zero — and correctly-rounded subtraction preserves order and
+            // maps to zero only for exactly-equal operands, so comparing
+            // the vertex extrema against the center coordinate reproduces
+            // the sign tests exactly. For diagonal pairs `w` carries
+            // product/sum rounding of order 2^-53 times the coordinate
+            // magnitude (< 2^7 texels, so < 2^-45 texels); PRUNE_MARGIN
+            // below (2^-20 texels) exceeds that bound by a factor of 2^25
+            // while skipping every triangle farther than a millionth of a
+            // texel from the slicing line.
+            //
+            // Strip window: `clip_segment` returns None when both endpoint
+            // `t` values sit strictly outside [0, t_max] on the same side
+            // by more than rounding; endpoint `t` values are convex
+            // interpolations of vertex `t` values up to the same < 2^-45
+            // texel rounding (the clip solve's divide-and-remultiply stays
+            // within the same ulp scale), so extrema outside the window by
+            // PRUNE_MARGIN guarantee None. Diagonal windows are tested in the
+            // unscaled u+v / v-u coordinates, where the window [0, t_max]
+            // maps to width 2 exactly and PRUNE_MARGIN still dwarfs
+            // the bound.
+            const PRUNE_MARGIN: f64 = 1.0 / (1 << 20) as f64;
             for &tri_idx in &gathered {
+                let b = &tri_bounds[tri_idx as usize];
+                let skip = if y0 == y1 {
+                    // Horizontal: plane v = c0v, strip t = u - c0u.
+                    b.min_v > c0v
+                        || b.max_v < c0v
+                        || b.max_u < c0u - PRUNE_MARGIN
+                        || b.min_u > c0u + 1.0 + PRUNE_MARGIN
+                } else if x0 == x1 {
+                    // Vertical: plane u = c0u, strip t = v - c0v.
+                    b.min_u > c0u
+                        || b.max_u < c0u
+                        || b.max_v < c0v - PRUNE_MARGIN
+                        || b.min_v > c0v + 1.0 + PRUNE_MARGIN
+                } else if x1 > x0 {
+                    // Down-right diagonal: plane v - u = c0v - c0u, strip
+                    // t = ((u + v) - (c0u + c0v)) / sqrt(2), in-window
+                    // u + v range [c0u + c0v, c0u + c0v + 2].
+                    let diff = c0v - c0u;
+                    let sum = c0u + c0v;
+                    b.min_vmu > diff + PRUNE_MARGIN
+                        || b.max_vmu < diff - PRUNE_MARGIN
+                        || b.max_upv < sum - PRUNE_MARGIN
+                        || b.min_upv > sum + 2.0 + PRUNE_MARGIN
+                } else {
+                    // Down-left diagonal: plane u + v = c0u + c0v, strip
+                    // t = ((v - u) - (c0v - c0u)) / sqrt(2), in-window
+                    // v - u range [c0v - c0u, c0v - c0u + 2].
+                    let sum = c0u + c0v;
+                    let diff = c0v - c0u;
+                    b.min_upv > sum + PRUNE_MARGIN
+                        || b.max_upv < sum - PRUNE_MARGIN
+                        || b.max_vmu < diff - PRUNE_MARGIN
+                        || b.min_vmu > diff + 2.0 + PRUNE_MARGIN
+                };
+                if skip {
+                    continue;
+                }
                 let v = projected[tri_idx as usize].map(|p| {
                     let du = p[0] - c0u;
                     let dv = p[1] - c0v;
