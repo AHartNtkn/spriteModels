@@ -452,7 +452,7 @@ fn observation_score(sigma: f64, normal: [f64; 3], forward_t: [f64; 3]) -> f64 {
 /// Max absolute one-sided finite difference between `z` (the filtered depth
 /// at `(x, y)`) and its up-to-4 in-bounds finite 4-neighbors; `0.0` if none
 /// are finite. Bounds the depth buffer's local slope for the visibility
-/// tolerance in `owning_mask` below.
+/// tolerance in `sees_point` below.
 fn local_gradient(depth: &[f64], width: u32, height: u32, x: u32, y: u32, z: f64) -> f64 {
     let mut grad = 0.0f64;
     let offsets = [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)];
@@ -703,37 +703,104 @@ pub(crate) fn ownership_masks(
     state
 }
 
-/// Dilates `kept` by one texel (4-neighborhood), intersected with `covered`
-/// so dilation never adds a texel the side never actually reached. Tent
-/// interpolation's support extends one texel past the last kept center, so
-/// without this ring a strict ownership partition would open sub-texel gaps
-/// where differently-owned regions abut; because the ring is drawn only
-/// from `covered` texels it carries true (reachability-filtered) geometry,
-/// so the resulting overlap is consistent, not synthesized.
+pub(crate) struct ClosureMask {
+    pub mask: Vec<bool>,
+    pub support: Vec<bool>,
+}
+
+/// One-texel closure ring (spec: "Closure and the post-closure sweep"):
+/// tent interpolation ends at the alpha-zero boundary, so abutting regions
+/// of different charts need one texel of true-geometry support to meet
+/// without sub-texel gaps. Dilation crosses only continuous edges (a cut
+/// edge is a silhouette; bridging it is the bug this design removes) and
+/// never re-adds a banned texel (that would recreate the wall its ban
+/// removed, even via a continuous edge from another direction).
 pub(crate) fn dilate_keep_mask(
     kept: &[bool],
     covered: &[bool],
+    banned: &[bool],
+    continuity: &SideContinuity,
     width: u32,
     height: u32,
-) -> Vec<bool> {
+) -> ClosureMask {
     let index = |x: u32, y: u32| (y * width + x) as usize;
-    let mut out = kept.to_vec();
+    let mut mask = kept.to_vec();
+    let mut support = vec![false; kept.len()];
     for y in 0..height {
         for x in 0..width {
             let idx = index(x, y);
-            if kept[idx] || !covered[idx] {
+            if kept[idx] || !covered[idx] || banned[idx] {
                 continue;
             }
-            let has_kept_neighbor = (x > 0 && kept[index(x - 1, y)])
-                || (x + 1 < width && kept[index(x + 1, y)])
-                || (y > 0 && kept[index(x, y - 1)])
-                || (y + 1 < height && kept[index(x, y + 1)]);
-            if has_kept_neighbor {
-                out[idx] = true;
+            let joins = (x > 0 && kept[index(x - 1, y)] && continuity.connected(x - 1, y, x, y))
+                || (x + 1 < width && kept[index(x + 1, y)] && continuity.connected(x, y, x + 1, y))
+                || (y > 0 && kept[index(x, y - 1)] && continuity.connected(x, y - 1, x, y))
+                || (y + 1 < height
+                    && kept[index(x, y + 1)]
+                    && continuity.connected(x, y, x, y + 1));
+            if joins {
+                mask[idx] = true;
+                support[idx] = true;
             }
         }
     }
-    out
+    ClosureMask { mask, support }
+}
+
+/// Post-closure invariant sweep: dilation can still place support across a
+/// cut edge from another surface's texels (staircase silhouettes). Drops
+/// are collected first and applied after the scan, so verdicts are
+/// independent of scan order. Support always yields: a covered, unbanned,
+/// unkept texel exists only because a strictly better side keeps its point
+/// (the fixpoint condition), so support is redundant geometry and dropping
+/// it never loses surface. A kept-kept cut pair cannot occur here — the
+/// fixpoint terminated without violations and closure adds no kept texels
+/// — but release builds restore the invariant anyway rather than emit a
+/// fabricated wall.
+pub(crate) fn enforce_closure_invariant(
+    depth: &[f64],
+    continuity: &SideContinuity,
+    closure: &mut ClosureMask,
+    width: u32,
+    height: u32,
+) {
+    let index = |x: u32, y: u32| (y * width + x) as usize;
+    let mut drop = vec![false; closure.mask.len()];
+    for y in 0..height {
+        for x in 0..width {
+            for (nx, ny) in [(x + 1, y), (x, y + 1)] {
+                if nx >= width || ny >= height {
+                    continue;
+                }
+                let (i, j) = (index(x, y), index(nx, ny));
+                if !closure.mask[i] || !closure.mask[j] || continuity.connected(x, y, nx, ny) {
+                    continue;
+                }
+                let far = if depth[i] > depth[j] {
+                    i
+                } else if depth[j] > depth[i] {
+                    j
+                } else {
+                    i.max(j)
+                };
+                match (closure.support[i], closure.support[j]) {
+                    (true, false) => drop[i] = true,
+                    (false, true) => drop[j] = true,
+                    (true, true) => drop[far] = true,
+                    (false, false) => {
+                        debug_assert!(false, "kept-kept cut pair survived the ownership fixpoint");
+                        drop[far] = true;
+                    }
+                }
+            }
+        }
+    }
+    for (idx, &dropped) in drop.iter().enumerate() {
+        if dropped {
+            closure.mask[idx] = false;
+            closure.support[idx] = false;
+        }
+    }
 }
 
 /// Largest relief difference a single continuous best-faced sheet can
@@ -861,12 +928,22 @@ pub fn convert_box_space(
     let mut masks: Vec<Vec<bool>> = Vec::with_capacity(sides.len());
     for (s_idx, side) in sides.iter().enumerate() {
         let covered: Vec<bool> = side.depth.iter().map(|d| d.is_finite()).collect();
-        masks.push(dilate_keep_mask(
+        let mut closure = dilate_keep_mask(
             &ownership.kept[s_idx],
             &covered,
+            &ownership.banned[s_idx],
+            &continuity[s_idx],
             side.width,
             side.height,
-        ));
+        );
+        enforce_closure_invariant(
+            &side.depth,
+            &continuity[s_idx],
+            &mut closure,
+            side.width,
+            side.height,
+        );
+        masks.push(closure.mask);
     }
 
     // Pass 3: fabricated-wall cuts, run after closure (so dilation cannot
@@ -901,7 +978,8 @@ pub fn convert_box_space(
 
 #[cfg(test)]
 mod tests {
-    use super::dilate_keep_mask;
+    use super::{ClosureMask, dilate_keep_mask, enforce_closure_invariant};
+    use crate::continuity::SideContinuity;
 
     use super::{CaptureSide, OwnershipState, capture_side, ownership_masks, sees_point};
     use crate::continuity::side_continuity;
@@ -1101,7 +1179,10 @@ mod tests {
             kept[at(x, y)] = true;
         }
 
-        let dilated = dilate_keep_mask(&kept, &covered, width, height);
+        let banned = vec![false; (width * height) as usize];
+        let continuity = SideContinuity::uniform(width, height, true);
+        let closure = dilate_keep_mask(&kept, &covered, &banned, &continuity, width, height);
+        let dilated = &closure.mask;
 
         let ring_added = [(1u32, 1u32), (3, 1), (1, 3), (3, 3), (4, 2), (2, 0), (2, 4)];
         for &(x, y) in &ring_added {
@@ -1133,5 +1214,48 @@ mod tests {
                 "texel {idx} dilation mismatch"
             );
         }
+    }
+
+    /// Dilation must not cross a cut edge and must never re-add a banned
+    /// texel: 1x3 row [kept, banned-covered, covered], where the
+    /// (0)-(1) edge is continuous and (1)-(2) is cut. Neither neighbor
+    /// may be added: (1) is banned, (2) is only reachable across a cut.
+    #[test]
+    fn dilation_respects_cut_edges_and_bans() {
+        let kept = vec![true, false, false];
+        let covered = vec![true, true, true];
+        let banned = vec![false, true, false];
+        let continuity = SideContinuity::from_edges(3, 1, vec![true, false], vec![]);
+        let closure = dilate_keep_mask(&kept, &covered, &banned, &continuity, 3, 1);
+        assert_eq!(closure.mask, vec![true, false, false]);
+        assert_eq!(closure.support, vec![false, false, false]);
+    }
+
+    /// Post-closure sweep: a support texel across a cut edge from a kept
+    /// texel is dropped; a support-support cut pair drops its far
+    /// endpoint; continuous pairs are untouched.
+    #[test]
+    fn post_closure_sweep_drops_support_across_cut_edges() {
+        // Row of 4: [kept, support, support, kept]; edges: (0)-(1)
+        // continuous, (1)-(2) continuous, (2)-(3) cut.
+        let mut closure = ClosureMask {
+            mask: vec![true, true, true, true],
+            support: vec![false, true, true, false],
+        };
+        let continuity = SideContinuity::from_edges(4, 1, vec![true, true, false], vec![]);
+        let depth = vec![1.0, 1.0, 1.0, 5.0];
+        enforce_closure_invariant(&depth, &continuity, &mut closure, 4, 1);
+        // (2) is support across the cut from kept (3): dropped. (3) kept.
+        assert_eq!(closure.mask, vec![true, true, false, true]);
+
+        // Support-support across a cut: the far endpoint yields.
+        let mut closure = ClosureMask {
+            mask: vec![true, true, true, true],
+            support: vec![false, true, true, false],
+        };
+        let continuity = SideContinuity::from_edges(4, 1, vec![true, false, true], vec![]);
+        let depth = vec![1.0, 1.0, 5.0, 5.0];
+        enforce_closure_invariant(&depth, &continuity, &mut closure, 4, 1);
+        assert_eq!(closure.mask, vec![true, true, false, true]);
     }
 }

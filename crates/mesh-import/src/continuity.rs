@@ -196,6 +196,33 @@ impl SideContinuity {
             self.vertical[(y0 * self.width + x0) as usize]
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn uniform(width: u32, height: u32, value: bool) -> Self {
+        Self {
+            width,
+            height,
+            horizontal: vec![value; ((width - 1) * height) as usize],
+            vertical: vec![value; (width * (height - 1)) as usize],
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_edges(
+        width: u32,
+        height: u32,
+        horizontal: Vec<bool>,
+        vertical: Vec<bool>,
+    ) -> Self {
+        assert_eq!(horizontal.len(), ((width - 1) * height) as usize);
+        assert_eq!(vertical.len(), (width * (height - 1)) as usize);
+        Self {
+            width,
+            height,
+            horizontal,
+            vertical,
+        }
+    }
 }
 
 fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
