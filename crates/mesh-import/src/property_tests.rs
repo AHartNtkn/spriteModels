@@ -155,8 +155,10 @@ fn quarter_turn_rotation_maps_the_top_chart() {
         [tri3(p0, p1, p2), tri3(p0, p2, p3)]
     };
     let mut triangles = Vec::new();
-    // Mesh-space tab-over-slanted-floor inside the unit cube (identical
-    // geometry to the rescue regression in tests/capture.rs).
+    // Mesh-space tab-over-slanted-floor inside the unit cube, the same
+    // scene as the rescue regression in tests/capture.rs except the tab is
+    // deliberately off-center in x (see the reflection-discrimination
+    // rationale in this test's doc comment above).
     triangles.extend(quad4(
         [0.0, 0.125, 0.0],
         [1.0, 0.125, 0.0],

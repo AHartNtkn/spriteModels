@@ -76,55 +76,38 @@ permits.
 ## Surface ownership
 
 Full projections would store one surface region in up to six charts, so the
-same feature would be drawn several times and captured obliquely by sides that
-barely face it. Instead, each observed surface point is kept by exactly one
-side — the one that represents it best — plus a one-texel seam closure:
+same feature would be drawn several times and captured obliquely by sides
+that barely face it. Instead, each observed surface point is kept by the
+best side that can legally hold it:
 
 - Every hit records the face normal `n̂` of its triangle and the observation
-  orientation `σ = sign(−n̂ · axis_S)` (+1: the front face; −1: the reverse
-  face, as when open-mesh interiors are observed two-sided).
-- Candidate owners for a hit are the enabled Capture sides `T` that observe
-  the **same oriented face** (`σ · (−n̂ · axis_T) > 0`), reach the point
-  (`d_T ≤ h_max_T/8`), and see it: its depth lies within the first-hit
-  interval of `T`'s reachability-filtered depth buffer at the projected
-  texel. That interval spans the buffer's local depth gradient times half a
-  texel plus one relief quantum — a derived bound, conservative toward
-  overlap, because consistently-placed overlap composites harmlessly while a
-  hole shows the background. The capturing side is always a candidate for its
-  own hit, so no seen-and-reachable point is orphaned when its ideal side is
-  occluded or disabled.
-- The owner is the candidate maximizing `σ · (−n̂ · axis_T)` — the side
-  viewing the surface most head-on, which maximizes texel density on that
-  surface. Exact ties resolve by canonical side rank.
-- After ownership filtering, each side dilates its kept texels by one texel
-  (4-neighborhood) into its own reachability-filtered hits. Tent
-  interpolation ends at the alpha-zero boundary, so a strict partition would
-  open sub-texel gaps where differently-owned regions abut; the closure ring
-  is the support the interpolation needs to meet the neighboring chart, and
-  it carries true geometry, so the overlap is consistent rather than doubled.
-
-## Fabricated-wall cuts
-
-Within a chart, four-connected foreground texels interpolate as one
-continuous surface, so adjacency across an occlusion boundary fabricates a
-wall the model does not have (an ear silhouetted over the back renders as a
-cliff joining them). After ownership and closure, each chart is scanned for
-4-adjacent covered pairs whose relief differs by more than one continuous
-best-faced sheet can produce: 8 units (the 45° ownership slope bound over one
-texel) plus 2 for the two roundings. Each candidate pair is tested against
-the model itself — the segment between the two reconstructed sample points is
-sampled at one-texel spacing, and the pair stays connected only if every
-interior sample lies within one texel of the mesh, the discretization's own
-resolution. A real steep wall (a cavity side that only its grazing fallback
-owner can see, like the bowl's) passes this test; an occlusion cut, whose
-would-be wall crosses free space, does not. At a fabricated cut the far
-(deeper) texel of the pair is emptied: the near sheet ends at its true
-silhouette and keeps that outline intact, while the far sheet loses only the
-fragmentary margin that better-facing sides cover. Where no other side sees
-the dropped strip, a one-texel gap remains — preferred to fabricated
-geometry. Cuts run after closure so dilation cannot re-bridge them.
-Point-to-mesh distance queries use a uniform triangle grid built once per
-conversion.
+  orientation `σ = sign(−n̂ · axis_S)`. Candidate owners for a hit are the
+  enabled Capture sides observing the same oriented face, reaching the
+  point, and seeing it within a gradient-derived tolerance of their own
+  filtered depth buffer; the capturing side is always a candidate for its
+  own hit. Preference is by observation score `σ · (−n̂ · axis_T)` (most
+  head-on wins; exact ties resolve by canonical rank).
+- Every 4-adjacency between covered texels of a side carries an exact
+  continuity label, computed from the mesh cross-section in the vertical
+  plane through the two texel centers restricted to the strip between them:
+  the pair is connected iff both samples lie on one polyline component,
+  with sub-half-quantum gaps closed and every path point within the side's
+  reach. Occlusion of the in-between surface is irrelevant — a bridge
+  behind nearer geometry composites correctly via transient depth; a
+  bridge through empty space is a fabricated wall.
+- Ownership is a fixpoint honoring the chart invariant that no chart keeps
+  both endpoints of a cut edge: keeps resolve in descending score order
+  (a side keeps its covered, unbanned texel iff no strictly better
+  candidate currently keeps the point); the far endpoint of every violated
+  cut edge is banned for that side; banned surface is re-owned by the next
+  best observing side. A point is lost only when no enabled side observes
+  it. Bans only accumulate, so the fixpoint terminates.
+- After ownership, each side dilates its kept texels by one texel into
+  covered, unbanned neighbors across continuous edges only — the support
+  tent interpolation needs to meet the neighboring chart. A final sweep
+  drops any support texel that lands across a cut edge (support is
+  redundant by construction), so emitted charts satisfy the invariant:
+  no two 4-adjacent covered texels are joined by a cut edge.
 
 **Color.** At the winning hit, interpolate UV and vertex color and compute base
 color per the glTF definition: `baseColorFactor × baseColorTexture(uv) ×
@@ -231,9 +214,26 @@ reference images or byte comparisons.
   everywhere; a known normal under a known light yields the lambert formula's
   value.
 - *Capture:* a cube spanning the box gives relief 0 on all six faces; a quad
-  past the midplane clamps to `h_max`; alpha is `255 − h` where covered and 0
-  elsewhere; derived bounds obey the ceil rule and 1..=63; pair modes set
-  exactly the Also Opposite / Mirror bits and capture only the primary side.
+  past the midplane is dropped, not clamped, while the exact-midplane hit is
+  kept at relief `h_max`; alpha is `255 − h` where covered and 0 elsewhere;
+  derived bounds obey the ceil rule and 1..=63; pair modes set exactly the
+  Also Opposite / Mirror bits and capture only the primary side.
+- *Continuity and ownership:* on handcrafted cross-sections, the continuity
+  label cuts a silhouette jump and empty space between two towers, connects a
+  fold sharing a mesh edge and a same-surface pair split by a sub-resolution
+  occluding sliver, closes a sub-half-quantum crack while cutting a wider
+  one, and cuts a groove past a side's reach while connecting the same
+  groove within reach. On a tab-over-slanted-floor scene, the ownership
+  fixpoint bans the far endpoint of the tab's silhouette on the observing
+  side and a genuinely observing second side rescues the banned strip,
+  cascading a further ban when the rescued strip is itself cut against that
+  side's own kept surface; dilation adds only covered, continuous, unbanned
+  neighbors, and the post-closure sweep drops any support texel left
+  spanning a cut edge. An inscribed sphere's per-side ownership boundary and
+  a slant hidden from its best-facing side but rescued by a worse-facing one
+  match their analytic bounds; an occluding plate over a floor cuts the
+  surrounding ring, while two shelves joined by real connecting wall
+  geometry stay fully covered.
 
 **Real-model tests:** GLB fixtures committed under the `mesh-import` crate's
 test directory (never fetched at test time; a missing fixture fails loudly):
@@ -249,7 +249,14 @@ and any one-time conversion from OBJ/PLY. Assertions:
 - the Earth sphere's front-center texel has relief 0 and its silhouette is
   circular within a texel;
 - captured Earth color varies across the surface (texture sampling is live,
-  not constant).
+  not constant);
+- no emitted chart contains a 4-adjacent covered pair that an independently
+  recomputed continuity oracle labels cut — the fabricated-adjacency
+  property, checked on the bunny (two bounds settings), teapot, dragon, and
+  Earth fixtures;
+- every covered sample is kept, banned, or defers to a strictly-better
+  candidate that is itself kept — the ownership fixpoint's coverage/rescue
+  property, checked on the bunny and teapot fixtures.
 
 **Dialog logic** (following the existing `desktop-app` test style): pair-mode
 constraints, shared camera state feeding both viewports, recompute on every
