@@ -627,13 +627,27 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
                 if skip {
                     continue;
                 }
-                let v = projected[tri_idx as usize].map(|p| {
-                    let du = p[0] - c0u;
-                    let dv = p[1] - c0v;
-                    let t = du * dxf + dv * dyf;
-                    let w = du * -dyf + dv * dxf;
-                    [w, t, p[2]]
-                });
+                // Orthogonal pairs specialize the generic rotation
+                // `t = du * dxf + dv * dyf`, `w = du * -dyf + dv * dxf`:
+                // with (dxf, dyf) exactly (1.0, 0.0) or (0.0, 1.0), the
+                // dropped `±0.0` product terms and the exact negation
+                // (`x * -1.0 == -x` in IEEE 754) can only change the sign
+                // of a zero, which no downstream test observes — slicing
+                // compares `w` against 0.0 sign-insensitively, and `t`
+                // only ever feeds arithmetic and magnitude comparisons.
+                let v = if y0 == y1 {
+                    projected[tri_idx as usize].map(|p| [p[1] - c0v, p[0] - c0u, p[2]])
+                } else if x0 == x1 {
+                    projected[tri_idx as usize].map(|p| [-(p[0] - c0u), p[1] - c0v, p[2]])
+                } else {
+                    projected[tri_idx as usize].map(|p| {
+                        let du = p[0] - c0u;
+                        let dv = p[1] - c0v;
+                        let t = du * dxf + dv * dyf;
+                        let w = du * -dyf + dv * dxf;
+                        [w, t, p[2]]
+                    })
+                };
                 let before = segments.len();
                 slice_triangle(v, tri_idx, &mut segments);
                 // Clip in place; drop what the strip/reach excludes.
