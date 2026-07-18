@@ -111,11 +111,13 @@ best side that can legally hold it:
 - After ownership, each side dilates its kept texels by one texel into
   covered, unbanned neighbors across continuous orthogonal edges only — the
   support tent interpolation needs to meet the neighboring chart. A final
-  sweep, repeated until it collects no more drops, drops any support texel
-  that lands across a cut edge — orthogonal or diagonal — (support is
-  redundant by construction), so emitted charts satisfy the invariant: no
-  two texels that touch — orthogonally or diagonally — are joined by a cut
-  edge.
+  sweep drops any support texel that lands across a cut edge — orthogonal
+  or diagonal — (support is redundant by construction), so emitted charts
+  satisfy the invariant: no two texels that touch — orthogonally or
+  diagonally — are joined by a cut edge. One pass suffices: every violated
+  edge the sweep examines drops at least one of its two endpoints, decided
+  from the pre-sweep mask, so no edge can be left with both endpoints kept
+  once all drops are applied.
 
 **Color.** At the winning hit, interpolate UV and vertex color and compute base
 color per the glTF definition: `baseColorFactor × baseColorTexture(uv) ×

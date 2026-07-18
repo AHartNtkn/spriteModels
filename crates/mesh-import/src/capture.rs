@@ -761,24 +761,26 @@ pub(crate) fn dilate_keep_mask(
 /// Post-closure invariant sweep: dilation can still place support across a
 /// cut edge from another surface's texels (staircase silhouettes),
 /// including diagonal ones. Drops are collected first and applied after
-/// each pass, so a pass's verdicts are independent of scan order. Support
-/// always yields: a covered, unbanned, unkept texel exists only because a
+/// the scan, so verdicts are independent of scan order. Support always
+/// yields: a covered, unbanned, unkept texel exists only because a
 /// strictly better side keeps its point (the fixpoint condition), so
 /// support is redundant geometry and dropping it never loses surface. A
 /// kept-kept cut pair cannot occur here — the fixpoint terminated without
 /// violations and closure adds no kept texels — but release builds
 /// restore the invariant anyway rather than emit a fabricated wall.
 ///
-/// One pass suffices for a purely orthogonal 4-neighborhood (dropping a
-/// texel only shrinks the mask, so it cannot expose a violation the same
-/// pass didn't already see). With the 8-neighborhood's diagonal cliques
-/// (up to four mutually-adjacent texels in a 2x2 block), a single pass's
-/// drop choices are made against the pre-pass mask, so a small cycle of
-/// pairwise verdicts can leave two texels both dropped-against but not
-/// dropped, or leave a violation the next pass's fresh mask would catch.
-/// The scan therefore repeats until a pass collects zero drops; removals
-/// are monotone (the kept-texel count strictly decreases whenever a pass
-/// drops anything), so the loop terminates.
+/// A single pass suffices, including for the 8-neighborhood's diagonal
+/// cliques (up to four mutually-adjacent texels in a 2x2 block): every
+/// match arm below drops at least one endpoint of the edge it examines,
+/// decided from `closure.mask`/`closure.support` as they stood before the
+/// scan started (drops are applied only after the whole scan completes).
+/// So for every edge that is a violation in the pre-scan state, the scan
+/// marks at least one of its two endpoints for drop; applying all drops
+/// then leaves no edge with both endpoints still kept, for every edge in
+/// the grid, orthogonal or diagonal, independent of whether other edges
+/// happened to drop the same or the other endpoint. No second pass can
+/// find a new violation, because a drop only clears mask bits and a
+/// connected edge is never a violation regardless of mask changes.
 pub(crate) fn enforce_closure_invariant(
     depth: &[f64],
     continuity: &SideContinuity,
@@ -787,48 +789,40 @@ pub(crate) fn enforce_closure_invariant(
     height: u32,
 ) {
     let index = |x: u32, y: u32| (y * width + x) as usize;
-    loop {
-        let mut drop = vec![false; closure.mask.len()];
-        for y in 0..height {
-            for x in 0..width {
-                for (nx, ny) in forward_neighbor_pairs(x, y) {
-                    if nx >= width || ny >= height {
-                        continue;
-                    }
-                    let (i, j) = (index(x, y), index(nx, ny));
-                    if !closure.mask[i] || !closure.mask[j] || continuity.connected(x, y, nx, ny) {
-                        continue;
-                    }
-                    let far = if depth[i] > depth[j] {
-                        i
-                    } else if depth[j] > depth[i] {
-                        j
-                    } else {
-                        i.max(j)
-                    };
-                    match (closure.support[i], closure.support[j]) {
-                        (true, false) => drop[i] = true,
-                        (false, true) => drop[j] = true,
-                        (true, true) => drop[far] = true,
-                        (false, false) => {
-                            debug_assert!(
-                                false,
-                                "kept-kept cut pair survived the ownership fixpoint"
-                            );
-                            drop[far] = true;
-                        }
+    let mut drop = vec![false; closure.mask.len()];
+    for y in 0..height {
+        for x in 0..width {
+            for (nx, ny) in forward_neighbor_pairs(x, y) {
+                if nx >= width || ny >= height {
+                    continue;
+                }
+                let (i, j) = (index(x, y), index(nx, ny));
+                if !closure.mask[i] || !closure.mask[j] || continuity.connected(x, y, nx, ny) {
+                    continue;
+                }
+                let far = if depth[i] > depth[j] {
+                    i
+                } else if depth[j] > depth[i] {
+                    j
+                } else {
+                    i.max(j)
+                };
+                match (closure.support[i], closure.support[j]) {
+                    (true, false) => drop[i] = true,
+                    (false, true) => drop[j] = true,
+                    (true, true) => drop[far] = true,
+                    (false, false) => {
+                        debug_assert!(false, "kept-kept cut pair survived the ownership fixpoint");
+                        drop[far] = true;
                     }
                 }
             }
         }
-        if !drop.iter().any(|&dropped| dropped) {
-            break;
-        }
-        for (idx, &dropped) in drop.iter().enumerate() {
-            if dropped {
-                closure.mask[idx] = false;
-                closure.support[idx] = false;
-            }
+    }
+    for (idx, &dropped) in drop.iter().enumerate() {
+        if dropped {
+            closure.mask[idx] = false;
+            closure.support[idx] = false;
         }
     }
 }
