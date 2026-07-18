@@ -9,6 +9,7 @@
 //! irrelevant: a bridge behind nearer geometry composites correctly via
 //! transient depth; only a bridge through empty space fabricates surface.
 
+use crate::Triangle;
 use relief_core::RELIEF_UNITS_PER_PIXEL;
 
 /// Half the relief quantum, in texels. Gaps below it are treated as
@@ -154,8 +155,6 @@ pub(crate) fn segment_segment_distance(s: &CrossSegment, t: &CrossSegment) -> f6
         .min(point_segment_distance(t.b, s.a, s.b))
 }
 
-use crate::Triangle;
-
 /// The per-side inputs continuity needs, borrowed from capture state.
 pub(crate) struct SideView<'a> {
     pub origin: [f64; 3],
@@ -266,13 +265,11 @@ fn buckets(projected: &[[[f64; 3]; 3]], width: u32, height: u32) -> Vec<Vec<u32>
 /// two samples lie on one component of the join graph (segments within
 /// JOIN_GAP touch — shared mesh edges coincide exactly; sub-quantum cracks
 /// close; proper crossings touch at distance zero).
+///
+/// Precondition: callers must already have handled the `win0 == win1` case
+/// (same winning triangle implies connected without walking the join graph)
+/// before gathering segments and calling this function.
 fn pair_connected(segments: &[CrossSegment], d0: f64, win0: u32, d1: f64, win1: u32) -> bool {
-    // Same winning triangle: both samples on one plane; depth between them
-    // is affine, bounded by the two in-reach endpoints, so the whole
-    // bridge lies on real reachable surface.
-    if win0 == win1 {
-        return true;
-    }
     let find = |t: f64, d: f64, tri: u32| -> Option<usize> {
         segments
             .iter()
@@ -657,11 +654,17 @@ mod tests {
 
     /// A silhouette clipping the corner of the segment between two texels
     /// that both sample the far surface: connected, even though the
-    /// clipping surface is real and resolved elsewhere in the chart.
+    /// clipping surface is real and resolved elsewhere in the chart. The far
+    /// surface is deliberately split into two coplanar rects sharing the
+    /// x = 2 edge so the two row-0 samples provably land on different
+    /// triangles — the win0 == win1 fast path cannot fire, forcing the
+    /// verdict to walk the join graph across the shared edge under the
+    /// clipping spike.
     #[test]
     fn corner_clip_between_same_surface_samples_is_connected() {
         let mut triangles = Vec::new();
-        triangles.extend(rect(-1.0, 5.0, -1.0, 3.0, 5.0)); // far surface
+        triangles.extend(rect(-1.0, 2.0, -1.0, 3.0, 5.0)); // far, left half
+        triangles.extend(rect(2.0, 5.0, -1.0, 3.0, 5.0)); // far, right half
         // Near spike: apex (2.0, 0.2), base y = 2.6 from x = 1 to 3. It
         // crosses the row-0 pair segment (y = 0.5, x in [1.87, 2.13]) but
         // contains no row-0 center; it wins (1,1) and (2,1).
