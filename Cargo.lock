@@ -1648,6 +1648,7 @@ dependencies = [
 name = "mesh-import"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "gltf",
  "relief-core",
  "serde_json",
