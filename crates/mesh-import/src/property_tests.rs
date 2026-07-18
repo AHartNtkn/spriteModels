@@ -138,6 +138,10 @@ fn every_covered_sample_is_kept_banned_or_deferred_to_a_keeper() {
 /// rotatedTop(u', v') == originalTop(u = n-1-v', v = u'). Only alpha
 /// (relief) is compared: RGB carries box-frame lighting, which
 /// legitimately differs between the two orientations.
+/// The tab is deliberately off-center in x (range [0.125, 0.625] not [0.25, 0.75])
+/// to ensure the mapping's reflection component (n-1-v') is discriminated — a
+/// centered tab produces row-palindromic alpha coverage that would hide a
+/// reflection error.
 #[test]
 fn quarter_turn_rotation_maps_the_top_chart() {
     let tri3 = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| crate::Triangle {
@@ -160,10 +164,10 @@ fn quarter_turn_rotation_maps_the_top_chart() {
         [0.0, 0.375, 1.0],
     ));
     triangles.extend(quad4(
-        [0.25, 0.0625, 0.25],
-        [0.75, 0.0625, 0.25],
-        [0.75, 0.0625, 0.75],
-        [0.25, 0.0625, 0.75],
+        [0.125, 0.0625, 0.25],
+        [0.625, 0.0625, 0.25],
+        [0.625, 0.0625, 0.75],
+        [0.125, 0.0625, 0.75],
     ));
     triangles.push(tri3([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0001, 0.5, 0.0]));
     triangles.push(tri3([1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.9999, 0.5, 1.0]));
