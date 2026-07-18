@@ -1216,19 +1216,45 @@ mod tests {
         }
     }
 
-    /// Dilation must not cross a cut edge and must never re-add a banned
-    /// texel: 1x3 row [kept, banned-covered, covered], where the
-    /// (0)-(1) edge is continuous and (1)-(2) is cut. Neither neighbor
-    /// may be added: (1) is banned, (2) is only reachable across a cut.
+    /// Dilation must not cross a cut edge, must never re-add a banned
+    /// texel, and must cross a continuous edge into a covered unbanned
+    /// neighbor. Three 1x3 rows isolate each rule.
     #[test]
     fn dilation_respects_cut_edges_and_bans() {
+        // Cut edge blocks: [kept, covered, covered], edge (0)-(1) cut.
         let kept = vec![true, false, false];
         let covered = vec![true, true, true];
+        let banned = vec![false, false, false];
+        let continuity = SideContinuity::from_edges(3, 1, vec![false, true], vec![]);
+        let closure = dilate_keep_mask(&kept, &covered, &banned, &continuity, 3, 1);
+        assert_eq!(
+            closure.mask,
+            vec![true, false, false],
+            "cut edge blocks dilation"
+        );
+
+        // Ban blocks even across a continuous edge: (1) is banned.
         let banned = vec![false, true, false];
         let continuity = SideContinuity::from_edges(3, 1, vec![true, false], vec![]);
         let closure = dilate_keep_mask(&kept, &covered, &banned, &continuity, 3, 1);
-        assert_eq!(closure.mask, vec![true, false, false]);
+        assert_eq!(
+            closure.mask,
+            vec![true, false, false],
+            "ban blocks dilation"
+        );
         assert_eq!(closure.support, vec![false, false, false]);
+
+        // Continuous edge admits: (1) becomes support; (2) stays out
+        // (its only candidate neighbor (1) is support, not kept).
+        let banned = vec![false, false, false];
+        let continuity = SideContinuity::from_edges(3, 1, vec![true, true], vec![]);
+        let closure = dilate_keep_mask(&kept, &covered, &banned, &continuity, 3, 1);
+        assert_eq!(
+            closure.mask,
+            vec![true, true, false],
+            "continuous edge dilates one ring"
+        );
+        assert_eq!(closure.support, vec![false, true, false]);
     }
 
     /// Post-closure sweep: a support texel across a cut edge from a kept
@@ -1255,6 +1281,17 @@ mod tests {
         };
         let continuity = SideContinuity::from_edges(4, 1, vec![true, false, true], vec![]);
         let depth = vec![1.0, 1.0, 5.0, 5.0];
+        enforce_closure_invariant(&depth, &continuity, &mut closure, 4, 1);
+        assert_eq!(closure.mask, vec![true, true, false, true]);
+
+        // Support-support across a cut at exactly equal depth: the tie
+        // yields the larger index, matching the ownership pass's rule.
+        let mut closure = ClosureMask {
+            mask: vec![true, true, true, true],
+            support: vec![false, true, true, false],
+        };
+        let continuity = SideContinuity::from_edges(4, 1, vec![true, false, true], vec![]);
+        let depth = vec![1.0, 3.0, 3.0, 5.0];
         enforce_closure_invariant(&depth, &continuity, &mut closure, 4, 1);
         assert_eq!(closure.mask, vec![true, true, false, true]);
     }
