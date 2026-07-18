@@ -277,19 +277,18 @@ fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// Projected AABB of one triangle in (u, v), plus extrema of u+v and v-u
-/// (the diagonal pairs' plane/strip coordinates). Extrema of the rotated
-/// coordinates are taken per vertex, so they bound the true diagonal
-/// extent, not the looser box corners.
+/// Per-triangle projected extrema, one array per coordinate so the
+/// line-filter and strip-window tests — random-access lookups by triangle
+/// index — each touch a dense 16-byte entry instead of one wide struct:
+/// `u`, `v` (the AABB axes) and `u+v`, `v-u` (the diagonal pairs'
+/// plane/strip coordinates, taken per vertex so they bound the true
+/// diagonal extent, not the looser box corners). Every entry is
+/// `[lo, hi]`.
 struct TriBounds {
-    min_u: f64,
-    max_u: f64,
-    min_v: f64,
-    max_v: f64,
-    min_upv: f64,
-    max_upv: f64,
-    min_vmu: f64,
-    max_vmu: f64,
+    u: Vec<[f64; 2]>,
+    v: Vec<[f64; 2]>,
+    upv: Vec<[f64; 2]>,
+    vmu: Vec<[f64; 2]>,
 }
 
 /// Per-texel triangle buckets from projected AABBs, clamped to the grid. A
@@ -298,51 +297,43 @@ struct TriBounds {
 /// surface, exactly the case a real step wall depends on. Also returns the
 /// per-triangle bounds the pair loop uses to skip triangles that provably
 /// contribute no clipped cross-section segment.
-fn buckets(
-    projected: &[[[f64; 3]; 3]],
-    width: u32,
-    height: u32,
-) -> (Vec<Vec<u32>>, Vec<TriBounds>) {
+fn buckets(projected: &[[[f64; 3]; 3]], width: u32, height: u32) -> (Vec<Vec<u32>>, TriBounds) {
     let mut cells = vec![Vec::new(); (width * height) as usize];
-    let mut bounds = Vec::with_capacity(projected.len());
+    let mut bounds = TriBounds {
+        u: Vec::with_capacity(projected.len()),
+        v: Vec::with_capacity(projected.len()),
+        upv: Vec::with_capacity(projected.len()),
+        vmu: Vec::with_capacity(projected.len()),
+    };
     let clamp = |value: f64, dim: u32| (value.floor() as i64).clamp(0, i64::from(dim) - 1) as u32;
     for (tri_idx, tri) in projected.iter().enumerate() {
-        let mut b = TriBounds {
-            min_u: f64::INFINITY,
-            max_u: f64::NEG_INFINITY,
-            min_v: f64::INFINITY,
-            max_v: f64::NEG_INFINITY,
-            min_upv: f64::INFINITY,
-            max_upv: f64::NEG_INFINITY,
-            min_vmu: f64::INFINITY,
-            max_vmu: f64::NEG_INFINITY,
-        };
+        let mut u = [f64::INFINITY, f64::NEG_INFINITY];
+        let mut v = [f64::INFINITY, f64::NEG_INFINITY];
+        let mut upv = [f64::INFINITY, f64::NEG_INFINITY];
+        let mut vmu = [f64::INFINITY, f64::NEG_INFINITY];
         for vertex in tri {
-            b.min_u = b.min_u.min(vertex[0]);
-            b.max_u = b.max_u.max(vertex[0]);
-            b.min_v = b.min_v.min(vertex[1]);
-            b.max_v = b.max_v.max(vertex[1]);
-            let upv = vertex[0] + vertex[1];
-            b.min_upv = b.min_upv.min(upv);
-            b.max_upv = b.max_upv.max(upv);
-            let vmu = vertex[1] - vertex[0];
-            b.min_vmu = b.min_vmu.min(vmu);
-            b.max_vmu = b.max_vmu.max(vmu);
+            u = [u[0].min(vertex[0]), u[1].max(vertex[0])];
+            v = [v[0].min(vertex[1]), v[1].max(vertex[1])];
+            let s = vertex[0] + vertex[1];
+            upv = [upv[0].min(s), upv[1].max(s)];
+            let d = vertex[1] - vertex[0];
+            vmu = [vmu[0].min(d), vmu[1].max(d)];
         }
-        let inside = b.max_u >= 0.0
-            && b.max_v >= 0.0
-            && b.min_u < f64::from(width)
-            && b.min_v < f64::from(height);
+        let inside =
+            u[1] >= 0.0 && v[1] >= 0.0 && u[0] < f64::from(width) && v[0] < f64::from(height);
         if inside {
-            let (x0, x1) = (clamp(b.min_u, width), clamp(b.max_u, width));
-            let (y0, y1) = (clamp(b.min_v, height), clamp(b.max_v, height));
+            let (x0, x1) = (clamp(u[0], width), clamp(u[1], width));
+            let (y0, y1) = (clamp(v[0], height), clamp(v[1], height));
             for y in y0..=y1 {
                 for x in x0..=x1 {
                     cells[(y * width + x) as usize].push(tri_idx as u32);
                 }
             }
         }
-        bounds.push(b);
+        bounds.u.push(u);
+        bounds.v.push(v);
+        bounds.upv.push(upv);
+        bounds.vmu.push(vmu);
     }
     (cells, bounds)
 }
@@ -604,25 +595,28 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
             // [0, t_max] maps to width 2 exactly and PRUNE_MARGIN still
             // dwarfs the bound.
             for &tri_idx in &gathered {
-                let b = &tri_bounds[tri_idx as usize];
                 let skip = if y0 == y1 {
                     // Horizontal: strip t = u - c0u.
-                    b.max_u < c0u - PRUNE_MARGIN || b.min_u > c0u + 1.0 + PRUNE_MARGIN
+                    let b = tri_bounds.u[tri_idx as usize];
+                    b[1] < c0u - PRUNE_MARGIN || b[0] > c0u + 1.0 + PRUNE_MARGIN
                 } else if x0 == x1 {
                     // Vertical: strip t = v - c0v.
-                    b.max_v < c0v - PRUNE_MARGIN || b.min_v > c0v + 1.0 + PRUNE_MARGIN
+                    let b = tri_bounds.v[tri_idx as usize];
+                    b[1] < c0v - PRUNE_MARGIN || b[0] > c0v + 1.0 + PRUNE_MARGIN
                 } else if x1 > x0 {
                     // Down-right diagonal: strip t = ((u + v) - (c0u + c0v))
                     // / sqrt(2), in-window u + v range [c0u + c0v, c0u + c0v
                     // + 2].
                     let sum = c0u + c0v;
-                    b.max_upv < sum - PRUNE_MARGIN || b.min_upv > sum + 2.0 + PRUNE_MARGIN
+                    let b = tri_bounds.upv[tri_idx as usize];
+                    b[1] < sum - PRUNE_MARGIN || b[0] > sum + 2.0 + PRUNE_MARGIN
                 } else {
                     // Down-left diagonal: strip t = ((v - u) - (c0v - c0u))
                     // / sqrt(2), in-window v - u range [c0v - c0u, c0v - c0u
                     // + 2].
                     let diff = c0v - c0u;
-                    b.max_vmu < diff - PRUNE_MARGIN || b.min_vmu > diff + 2.0 + PRUNE_MARGIN
+                    let b = tri_bounds.vmu[tri_idx as usize];
+                    b[1] < diff - PRUNE_MARGIN || b[0] > diff + 2.0 + PRUNE_MARGIN
                 };
                 if skip {
                     continue;
@@ -700,8 +694,8 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
         line_filter.reset(width as usize);
         let c0v = f64::from(y) + 0.5;
         let keep = |t: u32| {
-            let b = &tri_bounds[t as usize];
-            !(b.min_v > c0v || b.max_v < c0v)
+            let b = tri_bounds.v[t as usize];
+            !(b[0] > c0v || b[1] < c0v)
         };
         for x in 0..width - 1 {
             let idx = (y * (width - 1) + x) as usize;
@@ -735,8 +729,8 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
         line_filter.reset(height as usize);
         let c0u = f64::from(x) + 0.5;
         let keep = |t: u32| {
-            let b = &tri_bounds[t as usize];
-            !(b.min_u > c0u || b.max_u < c0u)
+            let b = tri_bounds.u[t as usize];
+            !(b[0] > c0u || b[1] < c0u)
         };
         for y in 0..height - 1 {
             let idx = (y * width + x) as usize;
@@ -780,8 +774,8 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
             line_filter.reset(len as usize);
             let diff = f64::from(sy) - f64::from(sx);
             let keep = |t: u32| {
-                let b = &tri_bounds[t as usize];
-                !(b.min_vmu > diff + PRUNE_MARGIN || b.max_vmu < diff - PRUNE_MARGIN)
+                let b = tri_bounds.vmu[t as usize];
+                !(b[0] > diff + PRUNE_MARGIN || b[1] < diff - PRUNE_MARGIN)
             };
             for k in 0..len - 1 {
                 let (x, y) = (sx + k, sy + k);
@@ -818,8 +812,8 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
             line_filter.reset((cx_max - cx_min + 1) as usize);
             let sum = f64::from(s) + 1.0;
             let keep = |t: u32| {
-                let b = &tri_bounds[t as usize];
-                !(b.min_upv > sum + PRUNE_MARGIN || b.max_upv < sum - PRUNE_MARGIN)
+                let b = tri_bounds.upv[t as usize];
+                !(b[0] > sum + PRUNE_MARGIN || b[1] < sum - PRUNE_MARGIN)
             };
             for x in cx_min..cx_max {
                 // Anchor (x, y) with y = s - 1 - x; endpoints (x + 1, y)
