@@ -187,38 +187,13 @@ impl SideContinuity {
     pub(crate) fn connected(&self, ax: u32, ay: u32, bx: u32, by: u32) -> bool {
         let (x0, y0) = (ax.min(bx), ay.min(by));
         if ay == by {
-            debug_assert!(ax.abs_diff(bx) == 1 && x0 + 1 < self.width);
+            debug_assert!(ax.abs_diff(bx) == 1 && x0 + 1 < self.width && ay < self.height);
             self.horizontal[(y0 * (self.width - 1) + x0) as usize]
         } else {
-            debug_assert!(ay.abs_diff(by) == 1 && ax == bx);
+            debug_assert!(
+                ay.abs_diff(by) == 1 && ax == bx && ax < self.width && y0 + 1 < self.height
+            );
             self.vertical[(y0 * self.width + x0) as usize]
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn uniform(width: u32, height: u32, value: bool) -> Self {
-        Self {
-            width,
-            height,
-            horizontal: vec![value; ((width - 1) * height) as usize],
-            vertical: vec![value; (width * (height - 1)) as usize],
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_edges(
-        width: u32,
-        height: u32,
-        horizontal: Vec<bool>,
-        vertical: Vec<bool>,
-    ) -> Self {
-        assert_eq!(horizontal.len(), ((width - 1) * height) as usize);
-        assert_eq!(vertical.len(), (width * (height - 1)) as usize);
-        Self {
-            width,
-            height,
-            horizontal,
-            vertical,
         }
     }
 }
