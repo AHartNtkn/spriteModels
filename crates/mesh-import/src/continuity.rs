@@ -347,6 +347,47 @@ fn buckets(
     (cells, bounds)
 }
 
+/// Lazily-built plane-filtered bucket lists for the cells of one slicing
+/// line. Every pair of one line slices with the same plane, so the plane
+/// part of the per-triangle skip test is evaluated once per cell per line
+/// instead of once per cell per pair; cells no pair on the line needs
+/// (uncovered regions) are never filtered at all.
+struct LineFilter {
+    data: Vec<u32>,
+    /// Per line position: filtered range into `data`, or `UNBUILT`.
+    ranges: Vec<(u32, u32)>,
+}
+
+const UNBUILT: (u32, u32) = (u32::MAX, u32::MAX);
+
+impl LineFilter {
+    fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            ranges: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self, line_len: usize) {
+        self.data.clear();
+        self.ranges.clear();
+        self.ranges.resize(line_len, UNBUILT);
+    }
+
+    fn get(&mut self, pos: usize, cell: &[u32], keep: impl Fn(u32) -> bool) -> (u32, u32) {
+        if self.ranges[pos] == UNBUILT {
+            let start = self.data.len() as u32;
+            self.data.extend(cell.iter().copied().filter(|&t| keep(t)));
+            self.ranges[pos] = (start, self.data.len() as u32);
+        }
+        self.ranges[pos]
+    }
+
+    fn slice(&self, range: (u32, u32)) -> &[u32] {
+        &self.data[range.0 as usize..range.1 as usize]
+    }
+}
+
 /// Merges two sorted, duplicate-free bucket lists into `out` (sorted,
 /// deduplicated) — same result as concatenate + sort + dedup without the
 /// per-pair sort.
@@ -525,6 +566,8 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
     let mut gathered: Vec<u32> = Vec::new();
     let mut scratch = PairScratch::default();
 
+    let mut line_filter = LineFilter::new();
+
     // Labels one pair (x0,y0)-(x1,y1) whose center-to-center direction is
     // (dxf, dyf) with length `t_max`: (1,0)/1.0 and (0,1)/1.0 for the
     // orthogonal cases, (1,1)/SQRT_2 and (-1,1)/SQRT_2 for the diagonal
@@ -534,86 +577,52 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
     // application of the rotation formula) does not change the verdict:
     // `slice_triangle`'s straddle test and interpolation factor are both
     // invariant under a global sign flip of the plane coordinate.
+    //
+    // Callers have already applied the coverage and win0 == win1 early
+    // outs and the per-line PLANE half of the triangle skip (see the
+    // direction passes below); `fa`/`fb` are the two texels' plane-
+    // filtered bucket lists. The strip-window half of the skip stays
+    // here because the window moves with the pair along the line.
     let mut label =
-        |x0: u32, y0: u32, x1: u32, y1: u32, t_max: f64, out: &mut Vec<bool>, out_idx: usize| {
+        |x0: u32, y0: u32, x1: u32, y1: u32, t_max: f64, fa: &[u32], fb: &[u32]| -> bool {
             let (i, j) = (at(x0, y0), at(x1, y1));
-            if !side.depth[i].is_finite() || !side.depth[j].is_finite() {
-                return;
-            }
             let (win0, win1) = (side.winning[i], side.winning[j]);
-            if win0 == win1 {
-                out[out_idx] = true;
-                return;
-            }
-            merge_buckets(&cells[i], &cells[j], &mut gathered);
+            merge_buckets(fa, fb, &mut gathered);
             segments.clear();
             let c0u = f64::from(x0) + 0.5;
             let c0v = f64::from(y0) + 0.5;
             let dxf = (f64::from(x1) - f64::from(x0)) / t_max;
             let dyf = (f64::from(y1) - f64::from(y0)) / t_max;
-            // Bounds-based skip: a triangle is transformed and sliced only
-            // when it can contribute a segment that survives the clip. Two
-            // conditions, each conservative toward keeping:
-            //
-            // Plane: `slice_triangle` emits nothing when every vertex lies
-            // strictly on one side of the plane. For orthogonal pairs the
-            // computed plane coordinate `w` equals `v - c0v` (horizontal)
-            // or `-(u - c0u)` (vertical) exactly — `dxf`/`dyf` are exactly
-            // 1.0/0.0, the `du * ±0.0` term only perturbs the sign of a
-            // zero — and correctly-rounded subtraction preserves order and
-            // maps to zero only for exactly-equal operands, so comparing
-            // the vertex extrema against the center coordinate reproduces
-            // the sign tests exactly. For diagonal pairs `w` carries
-            // product/sum rounding of order 2^-53 times the coordinate
-            // magnitude (< 2^7 texels, so < 2^-45 texels); PRUNE_MARGIN
-            // below (2^-20 texels) exceeds that bound by a factor of 2^25
-            // while skipping every triangle farther than a millionth of a
-            // texel from the slicing line.
-            //
-            // Strip window: `clip_segment` returns None when both endpoint
-            // `t` values sit strictly outside [0, t_max] on the same side
-            // by more than rounding; endpoint `t` values are convex
-            // interpolations of vertex `t` values up to the same < 2^-45
-            // texel rounding (the clip solve's divide-and-remultiply stays
-            // within the same ulp scale), so extrema outside the window by
-            // PRUNE_MARGIN guarantee None. Diagonal windows are tested in the
-            // unscaled u+v / v-u coordinates, where the window [0, t_max]
-            // maps to width 2 exactly and PRUNE_MARGIN still dwarfs
-            // the bound.
+            // Strip-window skip: `clip_segment` returns None when both
+            // endpoint `t` values sit strictly outside [0, t_max] on the same
+            // side by more than rounding; endpoint `t` values are convex
+            // interpolations of vertex `t` values up to < 2^-45 texel rounding
+            // (coordinates are < 2^7 texels; the clip solve's divide-and-
+            // remultiply stays within the same ulp scale), so extrema outside
+            // the window by PRUNE_MARGIN guarantee None. Diagonal windows are
+            // tested in the unscaled u+v / v-u coordinates, where the window
+            // [0, t_max] maps to width 2 exactly and PRUNE_MARGIN still
+            // dwarfs the bound.
             for &tri_idx in &gathered {
                 let b = &tri_bounds[tri_idx as usize];
                 let skip = if y0 == y1 {
-                    // Horizontal: plane v = c0v, strip t = u - c0u.
-                    b.min_v > c0v
-                        || b.max_v < c0v
-                        || b.max_u < c0u - PRUNE_MARGIN
-                        || b.min_u > c0u + 1.0 + PRUNE_MARGIN
+                    // Horizontal: strip t = u - c0u.
+                    b.max_u < c0u - PRUNE_MARGIN || b.min_u > c0u + 1.0 + PRUNE_MARGIN
                 } else if x0 == x1 {
-                    // Vertical: plane u = c0u, strip t = v - c0v.
-                    b.min_u > c0u
-                        || b.max_u < c0u
-                        || b.max_v < c0v - PRUNE_MARGIN
-                        || b.min_v > c0v + 1.0 + PRUNE_MARGIN
+                    // Vertical: strip t = v - c0v.
+                    b.max_v < c0v - PRUNE_MARGIN || b.min_v > c0v + 1.0 + PRUNE_MARGIN
                 } else if x1 > x0 {
-                    // Down-right diagonal: plane v - u = c0v - c0u, strip
-                    // t = ((u + v) - (c0u + c0v)) / sqrt(2), in-window
-                    // u + v range [c0u + c0v, c0u + c0v + 2].
-                    let diff = c0v - c0u;
+                    // Down-right diagonal: strip t = ((u + v) - (c0u + c0v))
+                    // / sqrt(2), in-window u + v range [c0u + c0v, c0u + c0v
+                    // + 2].
                     let sum = c0u + c0v;
-                    b.min_vmu > diff + PRUNE_MARGIN
-                        || b.max_vmu < diff - PRUNE_MARGIN
-                        || b.max_upv < sum - PRUNE_MARGIN
-                        || b.min_upv > sum + 2.0 + PRUNE_MARGIN
+                    b.max_upv < sum - PRUNE_MARGIN || b.min_upv > sum + 2.0 + PRUNE_MARGIN
                 } else {
-                    // Down-left diagonal: plane u + v = c0u + c0v, strip
-                    // t = ((v - u) - (c0v - c0u)) / sqrt(2), in-window
-                    // v - u range [c0v - c0u, c0v - c0u + 2].
-                    let sum = c0u + c0v;
+                    // Down-left diagonal: strip t = ((v - u) - (c0v - c0u))
+                    // / sqrt(2), in-window v - u range [c0v - c0u, c0v - c0u
+                    // + 2].
                     let diff = c0v - c0u;
-                    b.min_upv > sum + PRUNE_MARGIN
-                        || b.max_upv < sum - PRUNE_MARGIN
-                        || b.max_vmu < diff - PRUNE_MARGIN
-                        || b.min_vmu > diff + 2.0 + PRUNE_MARGIN
+                    b.max_vmu < diff - PRUNE_MARGIN || b.min_vmu > diff + 2.0 + PRUNE_MARGIN
                 };
                 if skip {
                     continue;
@@ -637,7 +646,7 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
                 }
                 segments.truncate(kept);
             }
-            out[out_idx] = pair_connected(
+            pair_connected(
                 &segments,
                 side.depth[i],
                 win0,
@@ -645,38 +654,183 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
                 side.depth[j],
                 win1,
                 &mut scratch,
-            );
+            )
         };
 
+    // Coverage early-out shared by all four passes: pairs touching an
+    // uncovered texel keep their `false` label without any work.
+    let covered = |i: usize, j: usize| side.depth[i].is_finite() && side.depth[j].is_finite();
+
+    // Four direction passes, one slicing line at a time. Every pair on a
+    // line slices triangles with that line's plane, so the PLANE half of
+    // the per-triangle skip — evaluated per cell per pair in a fused
+    // sweep — is hoisted into a lazily-built per-line filtered bucket
+    // list per cell. The plane tests are the exact/margined conditions
+    // documented at `buckets`' call site: exact extrema-vs-center
+    // comparisons for orthogonal lines (correctly rounded subtraction
+    // preserves order and maps only equal operands to zero, and the
+    // orthogonal `w` equals the plain coordinate difference up to the
+    // sign of a zero), PRUNE_MARGIN-padded comparisons for diagonal
+    // lines whose `w` carries < 2^-45 texels of product rounding.
+    // Filtering commutes with the sorted merge (one predicate per line,
+    // applied per element), so `gathered` sees the same triangles in the
+    // same order as a per-pair filter would produce. Pass order does not
+    // matter: labels are written to four disjoint arrays and no verdict
+    // reads another pair's label.
+
+    // Horizontal pass: row y slices with plane v = y + 0.5.
     for y in 0..height {
-        for x in 0..width {
-            if x + 1 < width {
-                let idx = (y * (width - 1) + x) as usize;
-                label(x, y, x + 1, y, 1.0, &mut horizontal, idx);
+        if width < 2 {
+            break;
+        }
+        line_filter.reset(width as usize);
+        let c0v = f64::from(y) + 0.5;
+        let keep = |t: u32| {
+            let b = &tri_bounds[t as usize];
+            !(b.min_v > c0v || b.max_v < c0v)
+        };
+        for x in 0..width - 1 {
+            let idx = (y * (width - 1) + x) as usize;
+            let (i, j) = (at(x, y), at(x + 1, y));
+            if !covered(i, j) {
+                continue;
             }
-            if y + 1 < height {
-                let idx = (y * width + x) as usize;
-                label(x, y, x, y + 1, 1.0, &mut vertical, idx);
+            if side.winning[i] == side.winning[j] {
+                horizontal[idx] = true;
+                continue;
             }
-            if x + 1 < width && y + 1 < height {
+            let ra = line_filter.get(x as usize, &cells[i], keep);
+            let rb = line_filter.get(x as usize + 1, &cells[j], keep);
+            horizontal[idx] = label(
+                x,
+                y,
+                x + 1,
+                y,
+                1.0,
+                line_filter.slice(ra),
+                line_filter.slice(rb),
+            );
+        }
+    }
+
+    // Vertical pass: column x slices with plane u = x + 0.5.
+    for x in 0..width {
+        if height < 2 {
+            break;
+        }
+        line_filter.reset(height as usize);
+        let c0u = f64::from(x) + 0.5;
+        let keep = |t: u32| {
+            let b = &tri_bounds[t as usize];
+            !(b.min_u > c0u || b.max_u < c0u)
+        };
+        for y in 0..height - 1 {
+            let idx = (y * width + x) as usize;
+            let (i, j) = (at(x, y), at(x, y + 1));
+            if !covered(i, j) {
+                continue;
+            }
+            if side.winning[i] == side.winning[j] {
+                vertical[idx] = true;
+                continue;
+            }
+            let ra = line_filter.get(y as usize, &cells[i], keep);
+            let rb = line_filter.get(y as usize + 1, &cells[j], keep);
+            vertical[idx] = label(
+                x,
+                y,
+                x,
+                y + 1,
+                1.0,
+                line_filter.slice(ra),
+                line_filter.slice(rb),
+            );
+        }
+    }
+
+    // Down-right diagonal pass: the line through cells (sx + k, sy + k)
+    // slices with plane v - u = sy - sx (exact: both centers carry the
+    // same +0.5, which cancels exactly in f64).
+    // Down-left diagonal pass: the line through cells (cx, s - cx)
+    // slices with plane u + v = s + 1 (exact: the two +0.5 halves sum to
+    // an integer-plus-one exactly).
+    if width >= 2 && height >= 2 {
+        let starts = (0..height)
+            .map(|sy| (0u32, sy))
+            .chain((1..width).map(|sx| (sx, 0u32)));
+        for (sx, sy) in starts {
+            let len = (width - sx).min(height - sy);
+            if len < 2 {
+                continue;
+            }
+            line_filter.reset(len as usize);
+            let diff = f64::from(sy) - f64::from(sx);
+            let keep = |t: u32| {
+                let b = &tri_bounds[t as usize];
+                !(b.min_vmu > diff + PRUNE_MARGIN || b.max_vmu < diff - PRUNE_MARGIN)
+            };
+            for k in 0..len - 1 {
+                let (x, y) = (sx + k, sy + k);
                 let idx = (y * (width - 1) + x) as usize;
-                label(
+                let (i, j) = (at(x, y), at(x + 1, y + 1));
+                if !covered(i, j) {
+                    continue;
+                }
+                if side.winning[i] == side.winning[j] {
+                    diag_down_right[idx] = true;
+                    continue;
+                }
+                let ra = line_filter.get(k as usize, &cells[i], keep);
+                let rb = line_filter.get(k as usize + 1, &cells[j], keep);
+                diag_down_right[idx] = label(
                     x,
                     y,
                     x + 1,
                     y + 1,
                     std::f64::consts::SQRT_2,
-                    &mut diag_down_right,
-                    idx,
+                    line_filter.slice(ra),
+                    line_filter.slice(rb),
                 );
-                label(
+            }
+        }
+        // Anti-diagonal lines indexed by the cell-coordinate sum s of the
+        // pair's two endpoint cells; anchors (x, s - 1 - x).
+        for s in 1..width + height - 2 {
+            let cx_min = s.saturating_sub(height - 1);
+            let cx_max = (width - 1).min(s);
+            if cx_min >= cx_max {
+                continue;
+            }
+            line_filter.reset((cx_max - cx_min + 1) as usize);
+            let sum = f64::from(s) + 1.0;
+            let keep = |t: u32| {
+                let b = &tri_bounds[t as usize];
+                !(b.min_upv > sum + PRUNE_MARGIN || b.max_upv < sum - PRUNE_MARGIN)
+            };
+            for x in cx_min..cx_max {
+                // Anchor (x, y) with y = s - 1 - x; endpoints (x + 1, y)
+                // and (x, y + 1), the line's cells at cx = x + 1 and x —
+                // both in bounds for every x in [cx_min, cx_max).
+                let y = s - 1 - x;
+                let idx = (y * (width - 1) + x) as usize;
+                let (i, j) = (at(x + 1, y), at(x, y + 1));
+                if !covered(i, j) {
+                    continue;
+                }
+                if side.winning[i] == side.winning[j] {
+                    diag_down_left[idx] = true;
+                    continue;
+                }
+                let ra = line_filter.get((x + 1 - cx_min) as usize, &cells[i], keep);
+                let rb = line_filter.get((x - cx_min) as usize, &cells[j], keep);
+                diag_down_left[idx] = label(
                     x + 1,
                     y,
                     x,
                     y + 1,
                     std::f64::consts::SQRT_2,
-                    &mut diag_down_left,
-                    idx,
+                    line_filter.slice(ra),
+                    line_filter.slice(rb),
                 );
             }
         }
