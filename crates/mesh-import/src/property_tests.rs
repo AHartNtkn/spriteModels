@@ -7,9 +7,13 @@
 
 use std::path::PathBuf;
 
+use relief_core::CanonicalView;
+
 use crate::capture::run_capture;
 use crate::continuity::side_continuity;
-use crate::{ImportSettings, TriangleScene, box_space_scene, convert_box_space, load_scene};
+use crate::{
+    ImportSettings, TriangleScene, box_space_scene, convert, convert_box_space, load_scene,
+};
 
 fn fixture(name: &str) -> TriangleScene {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -123,6 +127,75 @@ fn every_covered_sample_is_kept_banned_or_deferred_to_a_keeper() {
                     );
                 }
             }
+        }
+    }
+}
+
+/// No hidden order-dependence: rotating the model a quarter turn about
+/// the vertical axis must produce the correspondingly rotated Top chart.
+/// With R = quarter turn about y, (x,y,z) -> (z, y, -x), and cube bounds
+/// n = 8, rotated box coords are X = Z0, Y = Y0, Z = n - X0, so
+/// rotatedTop(u', v') == originalTop(u = n-1-v', v = u'). Only alpha
+/// (relief) is compared: RGB carries box-frame lighting, which
+/// legitimately differs between the two orientations.
+#[test]
+fn quarter_turn_rotation_maps_the_top_chart() {
+    let tri3 = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| crate::Triangle {
+        positions: [a, b, c],
+        normals: [[0.0, -1.0, 0.0]; 3],
+        uvs: [[0.0, 0.0]; 3],
+        colors: [[1.0, 1.0, 1.0, 1.0]; 3],
+        material: 0,
+    };
+    let quad4 = |p0: [f32; 3], p1: [f32; 3], p2: [f32; 3], p3: [f32; 3]| {
+        [tri3(p0, p1, p2), tri3(p0, p2, p3)]
+    };
+    let mut triangles = Vec::new();
+    // Mesh-space tab-over-slanted-floor inside the unit cube (identical
+    // geometry to the rescue regression in tests/capture.rs).
+    triangles.extend(quad4(
+        [0.0, 0.125, 0.0],
+        [1.0, 0.125, 0.0],
+        [1.0, 0.375, 1.0],
+        [0.0, 0.375, 1.0],
+    ));
+    triangles.extend(quad4(
+        [0.25, 0.0625, 0.25],
+        [0.75, 0.0625, 0.25],
+        [0.75, 0.0625, 0.75],
+        [0.25, 0.0625, 0.75],
+    ));
+    triangles.push(tri3([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0001, 0.5, 0.0]));
+    triangles.push(tri3([1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.9999, 0.5, 1.0]));
+    let scene = TriangleScene {
+        triangles,
+        materials: vec![crate::Material {
+            base_color_factor: [1.0, 1.0, 1.0, 1.0],
+            base_color_texture: None,
+            alpha_cutoff: None,
+        }],
+    };
+    const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    const QUARTER_TURN_Y: [[f32; 3]; 3] = [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]];
+    let settings = |rotation| ImportSettings {
+        rotation,
+        longest_axis_pixels: 8,
+        ..Default::default()
+    };
+    let original = convert(&scene, &settings(IDENTITY)).expect("converts");
+    let rotated = convert(&scene, &settings(QUARTER_TURN_Y)).expect("converts");
+    let n = 8u32;
+    for model in [&original, &rotated] {
+        let b = model.bounds();
+        assert_eq!((b.width(), b.height(), b.depth()), (n, n, n), "cube bounds");
+    }
+    let top_a = original.chart(CanonicalView::Top).expect("top");
+    let top_b = rotated.chart(CanonicalView::Top).expect("top");
+    for v in 0..n {
+        for u in 0..n {
+            let b = top_b.rgba()[(v * n + u) as usize][3];
+            let a = top_a.rgba()[(u * n + (n - 1 - v)) as usize][3];
+            assert_eq!(a, b, "Top alpha mismatch at rotated ({u},{v})");
         }
     }
 }
