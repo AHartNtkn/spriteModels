@@ -30,6 +30,9 @@ pub struct Raster {
     /// side observes a hit; it is independent of the interpolated,
     /// two-sided-flipped vertex normal used for shading below.
     pub face_normal: Vec<[f32; 3]>,
+    /// Index into the scene's triangle list of the triangle that won the
+    /// depth test at each texel; `u32::MAX` where `depth` is not finite.
+    pub triangle: Vec<u32>,
 }
 
 pub fn light_direction(azimuth_degrees: f32, elevation_degrees: f32) -> [f32; 3] {
@@ -84,8 +87,9 @@ pub fn rasterize(scene: &TriangleScene, view: &View, lighting: &Lighting) -> Ras
     let mut depth = vec![f32::INFINITY; width * height];
     let mut color = vec![[0u8; 4]; width * height];
     let mut face_normal = vec![[0.0f32; 3]; width * height];
+    let mut triangle = vec![u32::MAX; width * height];
 
-    for tri in &scene.triangles {
+    for (tri_idx, tri) in scene.triangles.iter().enumerate() {
         // Project vertices to screen space.
         let mut screen = [[0.0f32; 3]; 3];
         for (vertex, out) in tri.positions.iter().zip(screen.iter_mut()) {
@@ -167,6 +171,7 @@ pub fn rasterize(scene: &TriangleScene, view: &View, lighting: &Lighting) -> Ras
                 }
                 depth[index] = z;
                 face_normal[index] = tri_normal;
+                triangle[index] = tri_idx as u32;
 
                 let mut normal = interpolate3(tri.normals);
                 let len = dot(normal, normal).sqrt();
@@ -200,6 +205,7 @@ pub fn rasterize(scene: &TriangleScene, view: &View, lighting: &Lighting) -> Ras
         depth,
         color,
         face_normal,
+        triangle,
     }
 }
 

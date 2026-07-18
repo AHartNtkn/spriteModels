@@ -259,3 +259,39 @@ fn light_direction_places_the_light_by_azimuth_and_elevation() {
     // -y is up in box space.
     assert!((overhead[1] + 1.0).abs() < 1e-6);
 }
+
+/// The raster must identify which triangle won each texel: with a far quad
+/// (triangles 0,1) fully covered by a nearer quad (triangles 2,3), every
+/// covered texel's winning index is one of the near quad's triangles, and
+/// uncovered texels hold the u32::MAX sentinel.
+#[test]
+fn raster_records_winning_triangle_indices() {
+    let far = quad(5.0, 0);
+    let near = quad(1.0, 0);
+    let scene = TriangleScene {
+        triangles: far.into_iter().chain(near).collect(),
+        materials: vec![plain_material()],
+    };
+    let raster = rasterize(
+        &scene,
+        &front_view(),
+        &Lighting {
+            direction: [0.0, 0.0, -1.0],
+            ambient: 1.0,
+        },
+    );
+    for (i, &depth) in raster.depth.iter().enumerate() {
+        if depth.is_finite() {
+            assert!(
+                raster.triangle[i] == 2 || raster.triangle[i] == 3,
+                "texel {i}: near quad (triangles 2,3) must win, got {}",
+                raster.triangle[i]
+            );
+            assert_eq!(depth, 1.0, "texel {i}: near quad depth");
+        } else {
+            assert_eq!(raster.triangle[i], u32::MAX, "uncovered texel {i}");
+        }
+    }
+    // The 4x4 view over a quad spanning [0,4]^2 is fully covered.
+    assert!(raster.depth.iter().all(|d| d.is_finite()), "full coverage");
+}
