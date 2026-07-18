@@ -924,10 +924,11 @@ fn fallback_owner_used_when_the_best_side_is_occluded() {
 /// edge-on to Front (near-zero y extent) and contributes no rasterized
 /// coverage (same technique as `geometry_past_the_midplane_is_dropped`).
 ///
-/// Plate and floor are 4-adjacent across the plate's silhouette with real
-/// empty space between them, so the pair is cut by the continuity
-/// verdict; with only Front enabled no side can rescue the ring, which
-/// stays empty.
+/// Plate and floor are orthogonally and diagonally adjacent across the
+/// plate's silhouette with real empty space between them, so every such
+/// pair — including the four corner texels that touch the plate's corner
+/// only diagonally — is cut by the continuity verdict; with only Front
+/// enabled no side can rescue the ring, which stays empty.
 #[test]
 fn occlusion_cut_drops_the_far_strip() {
     let scene = TriangleScene {
@@ -998,9 +999,17 @@ fn occlusion_cut_drops_the_far_strip() {
             let adjacent_right = x == plate_hi + 1;
             let adjacent_top = y + 1 == plate_lo;
             let adjacent_bottom = y == plate_hi + 1;
+            // The four corner texels touching the plate's corner only
+            // diagonally (e.g. (plate_lo-1, plate_lo-1) against
+            // (plate_lo, plate_lo)) are cut too: the chart invariant
+            // covers diagonal adjacency, and the same real gap between
+            // plate and floor sits at the corner as along the sides.
+            let diagonal_corner =
+                (adjacent_left || adjacent_right) && (adjacent_top || adjacent_bottom);
             let ring = !in_plate
                 && ((in_plate_x && (adjacent_top || adjacent_bottom))
-                    || (in_plate_y && (adjacent_left || adjacent_right)));
+                    || (in_plate_y && (adjacent_left || adjacent_right))
+                    || diagonal_corner);
             if in_plate {
                 assert_eq!(
                     i64::from(255 - texel[3]),
@@ -1011,8 +1020,8 @@ fn occlusion_cut_drops_the_far_strip() {
                 assert_eq!(
                     texel,
                     [0, 0, 0, 0],
-                    "({x},{y}) is 4-adjacent to the plate across the fabricated cliff and \
-                     must be cut"
+                    "({x},{y}) is orthogonally or diagonally adjacent to the plate across the \
+                     fabricated cliff and must be cut"
                 );
             } else {
                 assert_eq!(
@@ -1109,10 +1118,10 @@ fn real_step_wall_is_kept() {
 /// miniature), captured from Top and Back only. The floor slants so its
 /// upward normal has a front-facing component: Back genuinely observes
 /// it. Top must keep the tab intact and relinquish the floor strip
-/// 4-adjacent to the tab's silhouette; the strip BEHIND the tab is within
-/// Back's reach, so Back's chart must render it — the seam bug is exactly
-/// this strip being dropped by everyone. The strip IN FRONT of the tab is
-/// beyond Back's reach and stays an honest hole.
+/// orthogonally or diagonally adjacent to the tab's silhouette; the strip
+/// BEHIND the tab is within Back's reach, so Back's chart must render it —
+/// the seam bug is exactly this strip being dropped by everyone. The strip
+/// IN FRONT of the tab is beyond Back's reach and stays an honest hole.
 #[test]
 fn relinquished_silhouette_strip_is_rescued_by_back() {
     let quad =
@@ -1184,20 +1193,28 @@ fn relinquished_silhouette_strip_is_rescued_by_back() {
     // The rescue: Back's chart renders the far strip. Back texel (u, v)
     // maps to box x = 8 - (u + 0.5); the strip columns x in 2..=5 land at
     // u in 2..=5 reversed. Back's row v = 2 (y center 2.5) samples the
-    // floor at box z = 4 (y - 1) = 6, depth 8 - 6 = 2, relief 16. Kept
-    // texels u in {2..5}; closure support extends one texel to u in
-    // {1, 6}; u in {0, 7} stays empty (Top keeps those floor points).
+    // floor at box z = 4 (y - 1) = 6, depth 8 - 6 = 2, relief 16 for every
+    // x (the floor's height is a function of z alone, so this is constant
+    // across the whole row). Kept texels directly rescued by ownership are
+    // u in {2..5}. The chart invariant now covers diagonal adjacency too:
+    // Top's floor texels at (x,z) = (1,6) and (6,6) touch the tab's
+    // corners (2,5) and (5,5) only diagonally, so they are cut and banned
+    // in Top exactly like the orthogonal strip, and rescued directly by
+    // Back at u = 6 and u = 1 respectively. Back's own one-texel closure
+    // ring then dilates from those newly-kept u = 1 and u = 6 texels
+    // outward across the continuous (same flat floor) edge to u = 0 and
+    // u = 7, so the entire row v = 2 ends up covered at relief 16 — there
+    // is no honest hole left on this row; Top's own (0,6) and (7,6) stay
+    // kept too, so the two charts legitimately overlap by one texel there,
+    // exactly as closure's one-texel-ring design intends.
     let back = model.chart(CanonicalView::Back).expect("back chart");
     let back_rgba = |u: u32, v: u32| back.rgba()[(v * 8 + u) as usize];
-    for u in 1..=6u32 {
+    for u in 0..8u32 {
         assert_eq!(
             i64::from(255 - back_rgba(u, 2)[3]),
             16,
             "Back ({u},2) must render the rescued strip"
         );
-    }
-    for u in [0u32, 7] {
-        assert_eq!(back_rgba(u, 2), [0, 0, 0, 0], "Back ({u},2) defers to Top");
     }
     // Everything else in Back is unreachable or missed: rows other than
     // v = 2 are empty.

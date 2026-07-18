@@ -566,6 +566,19 @@ pub(crate) fn better_candidates(
     (own_score, better)
 }
 
+/// The forward 8-neighbor pairs anchored at `(x, y)`: right, down,
+/// down-right diagonal, and (guarded `x > 0`) down-left diagonal. Sweeping
+/// every `(x, y)` in the grid and yielding these four candidates visits
+/// every orthogonal-or-diagonal adjacency edge exactly once — down-left
+/// edges cannot be reached as a "right/down/down-right" successor of any
+/// other cell, since that cell would have to sit in a previous row at a
+/// higher column, which no forward-only sweep reaches.
+pub(crate) fn forward_neighbor_pairs(x: u32, y: u32) -> impl Iterator<Item = (u32, u32)> {
+    [(x + 1, y), (x, y + 1), (x + 1, y + 1)]
+        .into_iter()
+        .chain((x > 0).then(|| (x - 1, y + 1)))
+}
+
 pub(crate) struct OwnershipState {
     pub kept: Vec<Vec<bool>>,
     pub banned: Vec<Vec<bool>>,
@@ -645,7 +658,7 @@ pub(crate) fn ownership_masks(
         for (s_idx, side) in sides.iter().enumerate() {
             for y in 0..side.height {
                 for x in 0..side.width {
-                    for (nx, ny) in [(x + 1, y), (x, y + 1)] {
+                    for (nx, ny) in forward_neighbor_pairs(x, y) {
                         if nx >= side.width || ny >= side.height {
                             continue;
                         }
@@ -746,15 +759,26 @@ pub(crate) fn dilate_keep_mask(
 }
 
 /// Post-closure invariant sweep: dilation can still place support across a
-/// cut edge from another surface's texels (staircase silhouettes). Drops
-/// are collected first and applied after the scan, so verdicts are
-/// independent of scan order. Support always yields: a covered, unbanned,
-/// unkept texel exists only because a strictly better side keeps its point
-/// (the fixpoint condition), so support is redundant geometry and dropping
-/// it never loses surface. A kept-kept cut pair cannot occur here — the
-/// fixpoint terminated without violations and closure adds no kept texels
-/// — but release builds restore the invariant anyway rather than emit a
-/// fabricated wall.
+/// cut edge from another surface's texels (staircase silhouettes),
+/// including diagonal ones. Drops are collected first and applied after
+/// each pass, so a pass's verdicts are independent of scan order. Support
+/// always yields: a covered, unbanned, unkept texel exists only because a
+/// strictly better side keeps its point (the fixpoint condition), so
+/// support is redundant geometry and dropping it never loses surface. A
+/// kept-kept cut pair cannot occur here — the fixpoint terminated without
+/// violations and closure adds no kept texels — but release builds
+/// restore the invariant anyway rather than emit a fabricated wall.
+///
+/// One pass suffices for a purely orthogonal 4-neighborhood (dropping a
+/// texel only shrinks the mask, so it cannot expose a violation the same
+/// pass didn't already see). With the 8-neighborhood's diagonal cliques
+/// (up to four mutually-adjacent texels in a 2x2 block), a single pass's
+/// drop choices are made against the pre-pass mask, so a small cycle of
+/// pairwise verdicts can leave two texels both dropped-against but not
+/// dropped, or leave a violation the next pass's fresh mask would catch.
+/// The scan therefore repeats until a pass collects zero drops; removals
+/// are monotone (the kept-texel count strictly decreases whenever a pass
+/// drops anything), so the loop terminates.
 pub(crate) fn enforce_closure_invariant(
     depth: &[f64],
     continuity: &SideContinuity,
@@ -763,40 +787,48 @@ pub(crate) fn enforce_closure_invariant(
     height: u32,
 ) {
     let index = |x: u32, y: u32| (y * width + x) as usize;
-    let mut drop = vec![false; closure.mask.len()];
-    for y in 0..height {
-        for x in 0..width {
-            for (nx, ny) in [(x + 1, y), (x, y + 1)] {
-                if nx >= width || ny >= height {
-                    continue;
-                }
-                let (i, j) = (index(x, y), index(nx, ny));
-                if !closure.mask[i] || !closure.mask[j] || continuity.connected(x, y, nx, ny) {
-                    continue;
-                }
-                let far = if depth[i] > depth[j] {
-                    i
-                } else if depth[j] > depth[i] {
-                    j
-                } else {
-                    i.max(j)
-                };
-                match (closure.support[i], closure.support[j]) {
-                    (true, false) => drop[i] = true,
-                    (false, true) => drop[j] = true,
-                    (true, true) => drop[far] = true,
-                    (false, false) => {
-                        debug_assert!(false, "kept-kept cut pair survived the ownership fixpoint");
-                        drop[far] = true;
+    loop {
+        let mut drop = vec![false; closure.mask.len()];
+        for y in 0..height {
+            for x in 0..width {
+                for (nx, ny) in forward_neighbor_pairs(x, y) {
+                    if nx >= width || ny >= height {
+                        continue;
+                    }
+                    let (i, j) = (index(x, y), index(nx, ny));
+                    if !closure.mask[i] || !closure.mask[j] || continuity.connected(x, y, nx, ny) {
+                        continue;
+                    }
+                    let far = if depth[i] > depth[j] {
+                        i
+                    } else if depth[j] > depth[i] {
+                        j
+                    } else {
+                        i.max(j)
+                    };
+                    match (closure.support[i], closure.support[j]) {
+                        (true, false) => drop[i] = true,
+                        (false, true) => drop[j] = true,
+                        (true, true) => drop[far] = true,
+                        (false, false) => {
+                            debug_assert!(
+                                false,
+                                "kept-kept cut pair survived the ownership fixpoint"
+                            );
+                            drop[far] = true;
+                        }
                     }
                 }
             }
         }
-    }
-    for (idx, &dropped) in drop.iter().enumerate() {
-        if dropped {
-            closure.mask[idx] = false;
-            closure.support[idx] = false;
+        if !drop.iter().any(|&dropped| dropped) {
+            break;
+        }
+        for (idx, &dropped) in drop.iter().enumerate() {
+            if dropped {
+                closure.mask[idx] = false;
+                closure.support[idx] = false;
+            }
         }
     }
 }
@@ -884,7 +916,7 @@ fn debug_assert_chart_invariant(
     let index = |x: u32, y: u32| (y * width + x) as usize;
     for y in 0..height {
         for x in 0..width {
-            for (nx, ny) in [(x + 1, y), (x, y + 1)] {
+            for (nx, ny) in forward_neighbor_pairs(x, y) {
                 if nx >= width || ny >= height {
                     continue;
                 }
@@ -1178,7 +1210,8 @@ mod tests {
         let kept = vec![true, false, false];
         let covered = vec![true, true, true];
         let banned = vec![false, false, false];
-        let continuity = SideContinuity::from_edges(3, 1, vec![false, true], vec![]);
+        let continuity =
+            SideContinuity::from_edges(3, 1, vec![false, true], vec![], vec![], vec![]);
         let closure = dilate_keep_mask(&kept, &covered, &banned, &continuity, 3, 1);
         assert_eq!(
             closure.mask,
@@ -1188,7 +1221,8 @@ mod tests {
 
         // Ban blocks even across a continuous edge: (1) is banned.
         let banned = vec![false, true, false];
-        let continuity = SideContinuity::from_edges(3, 1, vec![true, false], vec![]);
+        let continuity =
+            SideContinuity::from_edges(3, 1, vec![true, false], vec![], vec![], vec![]);
         let closure = dilate_keep_mask(&kept, &covered, &banned, &continuity, 3, 1);
         assert_eq!(
             closure.mask,
@@ -1200,7 +1234,7 @@ mod tests {
         // Continuous edge admits: (1) becomes support; (2) stays out
         // (its only candidate neighbor (1) is support, not kept).
         let banned = vec![false, false, false];
-        let continuity = SideContinuity::from_edges(3, 1, vec![true, true], vec![]);
+        let continuity = SideContinuity::from_edges(3, 1, vec![true, true], vec![], vec![], vec![]);
         let closure = dilate_keep_mask(&kept, &covered, &banned, &continuity, 3, 1);
         assert_eq!(
             closure.mask,
@@ -1221,7 +1255,8 @@ mod tests {
             mask: vec![true, true, true, true],
             support: vec![false, true, true, false],
         };
-        let continuity = SideContinuity::from_edges(4, 1, vec![true, true, false], vec![]);
+        let continuity =
+            SideContinuity::from_edges(4, 1, vec![true, true, false], vec![], vec![], vec![]);
         let depth = vec![1.0, 1.0, 1.0, 5.0];
         enforce_closure_invariant(&depth, &continuity, &mut closure, 4, 1);
         // (2) is support across the cut from kept (3): dropped. (3) kept.
@@ -1232,7 +1267,8 @@ mod tests {
             mask: vec![true, true, true, true],
             support: vec![false, true, true, false],
         };
-        let continuity = SideContinuity::from_edges(4, 1, vec![true, false, true], vec![]);
+        let continuity =
+            SideContinuity::from_edges(4, 1, vec![true, false, true], vec![], vec![], vec![]);
         let depth = vec![1.0, 1.0, 5.0, 5.0];
         enforce_closure_invariant(&depth, &continuity, &mut closure, 4, 1);
         assert_eq!(closure.mask, vec![true, true, false, true]);
@@ -1243,7 +1279,8 @@ mod tests {
             mask: vec![true, true, true, true],
             support: vec![false, true, true, false],
         };
-        let continuity = SideContinuity::from_edges(4, 1, vec![true, false, true], vec![]);
+        let continuity =
+            SideContinuity::from_edges(4, 1, vec![true, false, true], vec![], vec![], vec![]);
         let depth = vec![1.0, 3.0, 3.0, 5.0];
         enforce_closure_invariant(&depth, &continuity, &mut closure, 4, 1);
         assert_eq!(closure.mask, vec![true, true, false, true]);

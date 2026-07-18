@@ -1,13 +1,18 @@
 //! Exact per-pair surface-continuity labels for capture (spec:
 //! docs/superpowers/specs/2026-07-18-silhouette-continuity-ownership-design.md).
 //!
-//! For two 4-adjacent covered texels of one side, the verdict answers: is
-//! the tent bridge between their two samples backed by continuous,
-//! reachable surface? It is decided on the mesh cross-section in the
-//! vertical plane through the two texel centers, restricted to the strip
-//! between them. Occlusion of the in-between surface is deliberately
-//! irrelevant: a bridge behind nearer geometry composites correctly via
-//! transient depth; only a bridge through empty space fabricates surface.
+//! For two 8-adjacent (orthogonally or diagonally touching) covered texels
+//! of one side, the verdict answers: is the tent bridge between their two
+//! samples backed by continuous, reachable surface? Diagonal pairs need a
+//! label too because the renderer's tent kernel blends every texel of a
+//! 4-connected component within its support, which reaches diagonal
+//! centers — a diagonal contact across a silhouette fabricates surface
+//! exactly like an orthogonal one. The verdict is decided on the mesh
+//! cross-section in the vertical plane through the two texel centers,
+//! restricted to the strip between them. Occlusion of the in-between
+//! surface is deliberately irrelevant: a bridge behind nearer geometry
+//! composites correctly via transient depth; only a bridge through empty
+//! space fabricates surface.
 
 use crate::Triangle;
 use relief_core::RELIEF_UNITS_PER_PIXEL;
@@ -81,16 +86,19 @@ pub(crate) fn slice_triangle(v: [[f64; 3]; 3], triangle: u32, out: &mut Vec<Cros
     }
 }
 
-/// Liang-Barsky clip of a cross segment to the strip `t in [0, 1]` and the
-/// reachable half-space `d <= reach`. Returns None when nothing remains.
-pub(crate) fn clip_segment(seg: CrossSegment, reach: f64) -> Option<CrossSegment> {
+/// Liang-Barsky clip of a cross segment to the strip `t in [0, t_max]` and
+/// the reachable half-space `d <= reach`. Orthogonal edges pass `t_max =
+/// 1.0`; a diagonal strip passes `t_max = SQRT_2`. `t` and `d` stay in
+/// texel units (never rescaled), so `JOIN_GAP` distances remain meaningful
+/// on both kinds of edge. Returns None when nothing remains.
+pub(crate) fn clip_segment(seg: CrossSegment, t_max: f64, reach: f64) -> Option<CrossSegment> {
     let dt = seg.b[0] - seg.a[0];
     let dd = seg.b[1] - seg.a[1];
     let (mut s0, mut s1) = (0.0f64, 1.0f64);
     // Each constraint keeps points with num + s * den >= 0.
     for (num, den) in [
         (seg.a[0], dt),          // t >= 0
-        (1.0 - seg.a[0], -dt),   // t <= 1
+        (t_max - seg.a[0], -dt), // t <= t_max
         (reach - seg.a[1], -dd), // d <= reach
     ] {
         if den == 0.0 {
@@ -172,6 +180,12 @@ pub(crate) struct SideView<'a> {
 
 /// Edge labels for one side: `true` = surface-continuous. Edges touching
 /// an uncovered texel are stored `false` and are never consulted.
+///
+/// Diagonal labels exist because the renderer's tent kernel blends every
+/// texel of a 4-connected component within its support, which reaches
+/// diagonal centers: two diagonally-touching kept texels straddling a
+/// silhouette blend across free space at their shared corner exactly as an
+/// orthogonal pair would.
 pub(crate) struct SideContinuity {
     width: u32,
     height: u32,
@@ -181,6 +195,12 @@ pub(crate) struct SideContinuity {
     /// width * (height-1) entries; index y * width + x labels the edge
     /// (x, y)-(x, y+1).
     vertical: Vec<bool>,
+    /// (width-1) * (height-1) entries; index y * (width-1) + x labels the
+    /// edge (x, y)-(x+1, y+1).
+    diag_down_right: Vec<bool>,
+    /// (width-1) * (height-1) entries; index y * (width-1) + x labels the
+    /// edge (x+1, y)-(x, y+1).
+    diag_down_left: Vec<bool>,
 }
 
 impl SideContinuity {
@@ -189,11 +209,26 @@ impl SideContinuity {
         if ay == by {
             debug_assert!(ax.abs_diff(bx) == 1 && x0 + 1 < self.width && ay < self.height);
             self.horizontal[(y0 * (self.width - 1) + x0) as usize]
+        } else if ax == bx {
+            debug_assert!(ay.abs_diff(by) == 1 && ax < self.width && y0 + 1 < self.height);
+            self.vertical[(y0 * self.width + x0) as usize]
         } else {
             debug_assert!(
-                ay.abs_diff(by) == 1 && ax == bx && ax < self.width && y0 + 1 < self.height
+                ax.abs_diff(bx) == 1
+                    && ay.abs_diff(by) == 1
+                    && x0 + 1 < self.width
+                    && y0 + 1 < self.height
             );
-            self.vertical[(y0 * self.width + x0) as usize]
+            let idx = (y0 * (self.width - 1) + x0) as usize;
+            // The endpoint at x = x0 sits at y = y0 for a down-right edge
+            // ((x0,y0)-(x0+1,y0+1)) and at y = y0+1 for a down-left edge
+            // ((x0+1,y0)-(x0,y0+1)); order-insensitive in (ax,ay)/(bx,by).
+            let y_at_x0 = if ax == x0 { ay } else { by };
+            if y_at_x0 == y0 {
+                self.diag_down_right[idx]
+            } else {
+                self.diag_down_left[idx]
+            }
         }
     }
 
@@ -204,6 +239,8 @@ impl SideContinuity {
             height,
             horizontal: vec![value; ((width - 1) * height) as usize],
             vertical: vec![value; (width * (height - 1)) as usize],
+            diag_down_right: vec![value; ((width - 1) * (height - 1)) as usize],
+            diag_down_left: vec![value; ((width - 1) * (height - 1)) as usize],
         }
     }
 
@@ -213,14 +250,21 @@ impl SideContinuity {
         height: u32,
         horizontal: Vec<bool>,
         vertical: Vec<bool>,
+        diag_down_right: Vec<bool>,
+        diag_down_left: Vec<bool>,
     ) -> Self {
         assert_eq!(horizontal.len(), ((width - 1) * height) as usize);
         assert_eq!(vertical.len(), (width * (height - 1)) as usize);
+        let diag_len = ((width - 1) * (height - 1)) as usize;
+        assert_eq!(diag_down_right.len(), diag_len);
+        assert_eq!(diag_down_left.len(), diag_len);
         Self {
             width,
             height,
             horizontal,
             vertical,
+            diag_down_right,
+            diag_down_left,
         }
     }
 }
@@ -270,8 +314,17 @@ fn buckets(projected: &[[[f64; 3]; 3]], width: u32, height: u32) -> Vec<Vec<u32>
 ///
 /// Precondition: callers must already have handled the `win0 == win1` case
 /// (same winning triangle implies connected without walking the join graph)
-/// before gathering segments and calling this function.
-fn pair_connected(segments: &[CrossSegment], d0: f64, win0: u32, d1: f64, win1: u32) -> bool {
+/// before gathering segments and calling this function. `t1` is the second
+/// sample's strip coordinate (1.0 for an orthogonal pair, `SQRT_2` for a
+/// diagonal pair); the first sample is always at `t = 0`.
+fn pair_connected(
+    segments: &[CrossSegment],
+    d0: f64,
+    win0: u32,
+    t1: f64,
+    d1: f64,
+    win1: u32,
+) -> bool {
     let find = |t: f64, d: f64, tri: u32| -> Option<usize> {
         segments
             .iter()
@@ -284,7 +337,7 @@ fn pair_connected(segments: &[CrossSegment], d0: f64, win0: u32, d1: f64, win1: 
                     .position(|s| point_segment_distance([t, d], s.a, s.b) <= JOIN_GAP)
             })
     };
-    let (Some(start), Some(end)) = (find(0.0, d0, win0), find(1.0, d1, win1)) else {
+    let (Some(start), Some(end)) = (find(0.0, d0, win0), find(t1, d1, win1)) else {
         debug_assert!(false, "sample point lies on no cross-section segment");
         return false;
     };
@@ -331,66 +384,97 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
 
     let mut horizontal = vec![false; ((width.saturating_sub(1)) * height) as usize];
     let mut vertical = vec![false; (width * height.saturating_sub(1)) as usize];
+    let mut diag_down_right =
+        vec![false; ((width.saturating_sub(1)) * height.saturating_sub(1)) as usize];
+    let mut diag_down_left =
+        vec![false; ((width.saturating_sub(1)) * height.saturating_sub(1)) as usize];
     let mut segments: Vec<CrossSegment> = Vec::new();
     let mut gathered: Vec<u32> = Vec::new();
 
-    let mut label = |x: u32, y: u32, nx: u32, ny: u32, out: &mut Vec<bool>, out_idx: usize| {
-        let (i, j) = (at(x, y), at(nx, ny));
-        if !side.depth[i].is_finite() || !side.depth[j].is_finite() {
-            return;
-        }
-        let (win0, win1) = (side.winning[i], side.winning[j]);
-        if win0 == win1 {
-            out[out_idx] = true;
-            return;
-        }
-        gathered.clear();
-        gathered.extend_from_slice(&cells[i]);
-        gathered.extend_from_slice(&cells[j]);
-        gathered.sort_unstable();
-        gathered.dedup();
-        segments.clear();
-        // Slicing coordinates: w is the fixed screen coordinate minus its
-        // plane value; t is the moving screen coordinate minus the first
-        // center; d passes through.
-        let horizontal_pair = ny == y;
-        let (t0, w0) = if horizontal_pair {
-            (f64::from(x) + 0.5, f64::from(y) + 0.5)
-        } else {
-            (f64::from(y) + 0.5, f64::from(x) + 0.5)
-        };
-        for &tri_idx in &gathered {
-            let v = projected[tri_idx as usize].map(|p| {
-                if horizontal_pair {
-                    [p[1] - w0, p[0] - t0, p[2]]
-                } else {
-                    [p[0] - w0, p[1] - t0, p[2]]
-                }
-            });
-            let before = segments.len();
-            slice_triangle(v, tri_idx, &mut segments);
-            // Clip in place; drop what the strip/reach excludes.
-            let mut kept = before;
-            for s in before..segments.len() {
-                if let Some(clipped) = clip_segment(segments[s], reach) {
-                    segments[kept] = clipped;
-                    kept += 1;
-                }
+    // Labels one pair (x0,y0)-(x1,y1) whose center-to-center direction is
+    // (dxf, dyf) with length `t_max`: (1,0)/1.0 and (0,1)/1.0 for the
+    // orthogonal cases, (1,1)/SQRT_2 and (-1,1)/SQRT_2 for the diagonal
+    // ones. `t` runs from 0 at the first center to `t_max` at the second;
+    // `w` is the perpendicular offset, sliced at w = 0. Negating `w` (as
+    // happens for the vertical case below relative to a literal
+    // application of the rotation formula) does not change the verdict:
+    // `slice_triangle`'s straddle test and interpolation factor are both
+    // invariant under a global sign flip of the plane coordinate.
+    let mut label =
+        |x0: u32, y0: u32, x1: u32, y1: u32, t_max: f64, out: &mut Vec<bool>, out_idx: usize| {
+            let (i, j) = (at(x0, y0), at(x1, y1));
+            if !side.depth[i].is_finite() || !side.depth[j].is_finite() {
+                return;
             }
-            segments.truncate(kept);
-        }
-        out[out_idx] = pair_connected(&segments, side.depth[i], win0, side.depth[j], win1);
-    };
+            let (win0, win1) = (side.winning[i], side.winning[j]);
+            if win0 == win1 {
+                out[out_idx] = true;
+                return;
+            }
+            gathered.clear();
+            gathered.extend_from_slice(&cells[i]);
+            gathered.extend_from_slice(&cells[j]);
+            gathered.sort_unstable();
+            gathered.dedup();
+            segments.clear();
+            let c0u = f64::from(x0) + 0.5;
+            let c0v = f64::from(y0) + 0.5;
+            let dxf = (f64::from(x1) - f64::from(x0)) / t_max;
+            let dyf = (f64::from(y1) - f64::from(y0)) / t_max;
+            for &tri_idx in &gathered {
+                let v = projected[tri_idx as usize].map(|p| {
+                    let du = p[0] - c0u;
+                    let dv = p[1] - c0v;
+                    let t = du * dxf + dv * dyf;
+                    let w = du * -dyf + dv * dxf;
+                    [w, t, p[2]]
+                });
+                let before = segments.len();
+                slice_triangle(v, tri_idx, &mut segments);
+                // Clip in place; drop what the strip/reach excludes.
+                let mut kept = before;
+                for s in before..segments.len() {
+                    if let Some(clipped) = clip_segment(segments[s], t_max, reach) {
+                        segments[kept] = clipped;
+                        kept += 1;
+                    }
+                }
+                segments.truncate(kept);
+            }
+            out[out_idx] =
+                pair_connected(&segments, side.depth[i], win0, t_max, side.depth[j], win1);
+        };
 
     for y in 0..height {
         for x in 0..width {
             if x + 1 < width {
                 let idx = (y * (width - 1) + x) as usize;
-                label(x, y, x + 1, y, &mut horizontal, idx);
+                label(x, y, x + 1, y, 1.0, &mut horizontal, idx);
             }
             if y + 1 < height {
                 let idx = (y * width + x) as usize;
-                label(x, y, x, y + 1, &mut vertical, idx);
+                label(x, y, x, y + 1, 1.0, &mut vertical, idx);
+            }
+            if x + 1 < width && y + 1 < height {
+                let idx = (y * (width - 1) + x) as usize;
+                label(
+                    x,
+                    y,
+                    x + 1,
+                    y + 1,
+                    std::f64::consts::SQRT_2,
+                    &mut diag_down_right,
+                    idx,
+                );
+                label(
+                    x + 1,
+                    y,
+                    x,
+                    y + 1,
+                    std::f64::consts::SQRT_2,
+                    &mut diag_down_left,
+                    idx,
+                );
             }
         }
     }
@@ -399,6 +483,8 @@ pub(crate) fn side_continuity(triangles: &[Triangle], side: &SideView) -> SideCo
         height,
         horizontal,
         vertical,
+        diag_down_right,
+        diag_down_left,
     }
 }
 
@@ -477,10 +563,31 @@ mod tests {
     /// boundaries is trimmed to t in [0, 1] with depth preserved.
     #[test]
     fn clip_trims_to_strip() {
-        let clipped = clip_segment(seg([-1.0, 1.0], [2.0, 1.0]), 5.0).expect("survives");
+        let clipped = clip_segment(seg([-1.0, 1.0], [2.0, 1.0]), 1.0, 5.0).expect("survives");
         let mut endpoints = [clipped.a, clipped.b];
         endpoints.sort_by(|p, q| p[0].total_cmp(&q[0]));
         assert_eq!(endpoints, [[0.0, 1.0], [1.0, 1.0]]);
+    }
+
+    /// Clip to a diagonal strip: `t_max = SQRT_2` keeps the segment's
+    /// interior instead of truncating it to [0, 1]. The Liang-Barsky
+    /// solve divides then re-multiplies by `dt`, so the recovered
+    /// endpoint at an irrational `t_max` carries a last-bit rounding
+    /// error; compare with a tolerance far below `JOIN_GAP` rather than
+    /// bit-exact equality.
+    #[test]
+    fn clip_trims_to_diagonal_strip() {
+        let t_max = std::f64::consts::SQRT_2;
+        let clipped = clip_segment(seg([-1.0, 1.0], [2.0, 1.0]), t_max, 5.0).expect("survives");
+        let mut endpoints = [clipped.a, clipped.b];
+        endpoints.sort_by(|p, q| p[0].total_cmp(&q[0]));
+        let expected = [[0.0, 1.0], [t_max, 1.0]];
+        for (got, want) in endpoints.iter().zip(expected.iter()) {
+            assert!(
+                (got[0] - want[0]).abs() < 1e-12 && (got[1] - want[1]).abs() < 1e-12,
+                "endpoint {got:?} not within tolerance of {want:?}"
+            );
+        }
     }
 
     /// Clip against reach: a segment whose in-strip part lies wholly past
@@ -489,7 +596,7 @@ mod tests {
     fn clip_removes_unreachable_remainder() {
         // t: -0.5 -> 0.5, d: 0 -> 10; in-strip requires s >= 0.5 where
         // d = 5..10, but reach 4 requires s <= 0.4.
-        assert_eq!(clip_segment(seg([-0.5, 0.0], [0.5, 10.0]), 4.0), None);
+        assert_eq!(clip_segment(seg([-0.5, 0.0], [0.5, 10.0]), 1.0, 4.0), None);
     }
 
     /// Distances: proper crossing is zero; parallel segments report their
@@ -741,5 +848,57 @@ mod tests {
             side_labels(triangles, 4, 1, 400)
         };
         assert!(!wide.connected(1, 0, 2, 0), "a real gap cuts");
+    }
+
+    /// A diagonal near/far pair: on a 2x2 grid, a near quad (depth 1)
+    /// covers only texel (0,0)'s center — it spans x,y in [-1, 1.3], so
+    /// its far edge stops short of (1,0)'s and (0,1)'s centers at x = 1.5
+    /// and y = 1.5 respectively, let alone (1,1)'s at (1.5, 1.5). A far
+    /// quad (depth 5) spans the whole grid, so (1,0), (0,1) and (1,1) are
+    /// far-only while (0,0) is near (nearer wins). The two quads are flat,
+    /// parallel, and share no edge, so their cross-sections never touch:
+    /// the diagonal (0,0)-(1,1) pair — near sample at t=0, d=1; far sample
+    /// at t=SQRT_2, d=5 — must be cut, exactly like the orthogonal case in
+    /// `silhouette_pair_is_cut`.
+    #[test]
+    fn diagonal_silhouette_pair_is_cut() {
+        let mut triangles = Vec::new();
+        triangles.extend(rect(-1.0, 1.3, -1.0, 1.3, 1.0)); // near, covers only (0,0)
+        triangles.extend(rect(-1.0, 5.0, -1.0, 5.0, 5.0)); // far, covers the whole grid
+        let labels = side_labels(triangles, 2, 2, 400);
+        assert!(
+            !labels.connected(0, 0, 1, 1),
+            "diagonal near/far pair must cut: the near quad terminates \
+             mid-strip with no wall, and the far plane never meets it"
+        );
+    }
+
+    /// A plane tilted 45 degrees along the diagonal direction, z =
+    /// 0.5*(x+y), split into two triangles along the anti-diagonal x+y =
+    /// 2.1 (not through any texel center) so the (0,0) and (1,1) samples
+    /// provably land on different triangles — the win0 == win1 fast path
+    /// cannot fire, forcing the verdict to walk the join graph across the
+    /// shared triangle edge. The plane is continuous, so the diagonal pair
+    /// must connect.
+    ///
+    /// Corners: P0=(-1,-1), P1=(3,-0.9), P2=(3,3), P3=(-0.9,3), each with
+    /// z = 0.5*(x+y) (P0: -1, P1: 1.05, P2: 3, P3: 1.05). Triangle A =
+    /// (P0,P1,P3) covers x+y <= 2.1 within the outer square — (0,0)'s
+    /// center (0.5,0.5) (sum 1.0) as well as (1,0)'s (1.5,0.5) and (0,1)'s
+    /// (0.5,1.5) (sum 2.0 each). Triangle B = (P1,P2,P3) covers the rest —
+    /// (1,1)'s center (1.5,1.5) (sum 3.0).
+    #[test]
+    fn diagonal_tilted_plane_is_connected() {
+        let z = |x: f32, y: f32| 0.5 * (x + y);
+        let p0 = [-1.0, -1.0, z(-1.0, -1.0)];
+        let p1 = [3.0, -0.9, z(3.0, -0.9)];
+        let p2 = [3.0, 3.0, z(3.0, 3.0)];
+        let p3 = [-0.9, 3.0, z(-0.9, 3.0)];
+        let triangles = vec![tri3(p0, p1, p3), tri3(p1, p2, p3)];
+        let labels = side_labels(triangles, 2, 2, 400);
+        assert!(
+            labels.connected(0, 0, 1, 1),
+            "tilted diagonal plane must connect across the shared triangle edge"
+        );
     }
 }

@@ -13,9 +13,12 @@ ear, and a seam ring in the back around the ear silhouette. Mechanism,
 confirmed by texel-level diagnostics of the captured Top chart:
 
 1. Per-texel best-facing ownership keeps two disjoint surface sheets (ear
-   top, back top) 4-adjacent in the Top chart. The format defines 4-adjacent
-   covered texels as one continuous surface, so the renderer fabricates a
-   wall between them.
+   top, back top) adjacent in the Top chart. The renderer's tent kernel
+   blends every texel of a 4-connected component within its support, which
+   reaches diagonal neighbors as well as orthogonal ones, so the format
+   effectively treats any two touching (orthogonally or diagonally) covered
+   texels as one continuous surface, and the renderer fabricates a wall
+   between them.
 2. The fabricated-wall cut pass repairs this after the fact with two proxy
    tests, and each proxy's failure mode is one of the symptoms:
    - Candidate pairs are found by a relief-jump threshold
@@ -38,11 +41,15 @@ instead of handing it to another chart.
 
 Three changes, all inside `mesh-import`:
 
-1. **An exact per-pair continuity primitive** labels every 4-adjacency edge
-   between covered texels of a side as *continuous* or *cut*, from the mesh
-   itself. There is no global sheet segmentation — silhouette curves can
-   terminate mid-surface (the ear merges smoothly into the head), so only
-   the local edge labels are meaningful.
+1. **An exact per-pair continuity primitive** labels every 8-adjacency edge
+   (orthogonal or diagonal) between covered texels of a side as *continuous*
+   or *cut*, from the mesh itself. There is no global sheet segmentation —
+   silhouette curves can terminate mid-surface (the ear merges smoothly into
+   the head), so only the local edge labels are meaningful. Diagonal edges
+   need labels for the same reason orthogonal ones do: the renderer's tent
+   kernel blends every texel of a 4-connected component within its support,
+   and that support reaches diagonal centers, so a diagonal contact across a
+   silhouette fabricates surface exactly like an orthogonal one.
 2. **Ownership enforces the chart invariant** — no chart keeps both
    endpoints of a cut edge — inside the ownership fixpoint, and a texel a
    chart may not keep is re-owned by the next-best observing side rather
@@ -50,19 +57,21 @@ Three changes, all inside `mesh-import`:
 3. **Closure respects edge labels**, and a final sweep restores the
    invariant where dilation created new cut-edge adjacencies.
 
-The emitted charts satisfy a checkable invariant: no two 4-adjacent covered
-texels in any chart are joined by a cut edge.
+The emitted charts satisfy a checkable invariant: no two texels that touch —
+orthogonally or diagonally — in any chart are joined by a cut edge.
 
 ## The continuity primitive
 
-For side `S` and two 4-adjacent covered texels, consider the vertical plane
-through the segment joining their centers (the plane containing the segment
-direction and `S`'s view axis). The mesh's intersection with that plane is a
-set of polylines in `(t, d)` coordinates — `t` the segment parameter
-restricted to the strip `t in [0, 1]`, `d` depth along `S`'s axis. Both
-sample points lie on these polylines by construction (each texel's winning
-triangle covers its center, so its cross-section segment passes through the
-sample).
+For side `S` and two texels of the side that touch — orthogonally or
+diagonally — and are both covered, consider the vertical plane through the
+segment joining their centers (the plane containing the segment direction
+and `S`'s view axis). The mesh's intersection with that plane is a set of
+polylines in `(t, d)` coordinates — `t` the segment parameter restricted to
+the strip `t in [0, t_max]` (`t_max = 1` for an orthogonal pair, `t_max =
+sqrt(2)` for a diagonal pair, both in texel units), `d` depth along `S`'s
+axis. Both sample points lie on these polylines by construction (each
+texel's winning triangle covers its center, so its cross-section segment
+passes through the sample).
 
 The pair is **connected** iff both samples lie on the same polyline
 component within the strip, where:
@@ -201,10 +210,11 @@ implementation where the current implementation is wrong.
    emitted chart, banned where it stands, or deferred to a kept better
    candidate. The coverage property is the seam bug's test and fails today.
 3. **Invariant property test on real fixtures** (bunny, dragon, teapot,
-   earth; several bounds and rotations): no emitted chart contains a
-   4-adjacent covered pair labeled cut, plus the existing format
-   invariants. This is the spike bug's test and fails today on the bunny's
-   Top chart at the ear staircase.
+   earth; several bounds and rotations): no emitted chart contains an
+   orthogonally or diagonally adjacent covered pair labeled cut, plus the
+   existing format invariants. This is the spike bug's test and fails today
+   on the bunny's Top chart at the ear staircase, including at diagonal-only
+   contacts the orthogonal-only check misses.
 4. **Fixpoint behavior**: a staircase silhouette configuration exercising
    ban, rescue, and cascading bans; assert termination and iteration-order
    independence.

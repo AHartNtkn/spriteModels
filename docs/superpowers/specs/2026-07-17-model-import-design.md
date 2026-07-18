@@ -87,14 +87,19 @@ best side that can legally hold it:
   filtered depth buffer; the capturing side is always a candidate for its
   own hit. Preference is by observation score `σ · (−n̂ · axis_T)` (most
   head-on wins; exact ties resolve by canonical rank).
-- Every 4-adjacency between covered texels of a side carries an exact
-  continuity label, computed from the mesh cross-section in the vertical
-  plane through the two texel centers restricted to the strip between them:
-  the pair is connected iff both samples lie on one polyline component,
-  with sub-half-quantum gaps closed and every path point within the side's
-  reach. Occlusion of the in-between surface is irrelevant — a bridge
-  behind nearer geometry composites correctly via transient depth; a
-  bridge through empty space is a fabricated wall.
+- Every orthogonal or diagonal adjacency between covered texels of a side
+  carries an exact continuity label, computed from the mesh cross-section
+  in the vertical plane through the two texel centers restricted to the
+  strip between them: the pair is connected iff both samples lie on one
+  polyline component, with sub-half-quantum gaps closed and every path
+  point within the side's reach. Occlusion of the in-between surface is
+  irrelevant — a bridge behind nearer geometry composites correctly via
+  transient depth; a bridge through empty space is a fabricated wall.
+  Diagonal adjacencies are labeled too, not just orthogonal ones: the
+  renderer's tent kernel blends every texel of a 4-connected component
+  within its support, and that support reaches diagonal centers, so a
+  diagonal contact across a silhouette fabricates surface exactly like an
+  orthogonal one.
 - Ownership is a fixpoint honoring the chart invariant that no chart keeps
   both endpoints of a cut edge: keeps resolve in descending score order
   (a side keeps its covered, unbanned texel iff no strictly better
@@ -104,11 +109,13 @@ best side that can legally hold it:
   legally hold it (every observer is silhouette-banned there or fails
   candidacy). Bans only accumulate, so the fixpoint terminates.
 - After ownership, each side dilates its kept texels by one texel into
-  covered, unbanned neighbors across continuous edges only — the support
-  tent interpolation needs to meet the neighboring chart. A final sweep
-  drops any support texel that lands across a cut edge (support is
-  redundant by construction), so emitted charts satisfy the invariant:
-  no two 4-adjacent covered texels are joined by a cut edge.
+  covered, unbanned neighbors across continuous orthogonal edges only — the
+  support tent interpolation needs to meet the neighboring chart. A final
+  sweep, repeated until it collects no more drops, drops any support texel
+  that lands across a cut edge — orthogonal or diagonal — (support is
+  redundant by construction), so emitted charts satisfy the invariant: no
+  two texels that touch — orthogonally or diagonally — are joined by a cut
+  edge.
 
 **Color.** At the winning hit, interpolate UV and vertex color and compute base
 color per the glTF definition: `baseColorFactor × baseColorTexture(uv) ×
@@ -251,10 +258,10 @@ and any one-time conversion from OBJ/PLY. Assertions:
   circular within a texel;
 - captured Earth color varies across the surface (texture sampling is live,
   not constant);
-- no emitted chart contains a 4-adjacent covered pair that an independently
-  recomputed continuity oracle labels cut — the fabricated-adjacency
-  property, checked on the bunny (two bounds settings), teapot, dragon, and
-  Earth fixtures;
+- no emitted chart contains an orthogonally or diagonally adjacent covered
+  pair that an independently recomputed continuity oracle labels cut — the
+  fabricated-adjacency property, checked on the bunny (two bounds
+  settings), teapot, dragon, and Earth fixtures;
 - every covered sample is kept, banned, or defers to a strictly-better
   candidate that is itself kept — the ownership fixpoint's coverage/rescue
   property, checked on the bunny and teapot fixtures.

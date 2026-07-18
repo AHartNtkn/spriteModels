@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use relief_core::CanonicalView;
 
-use crate::capture::run_capture;
+use crate::capture::{forward_neighbor_pairs, run_capture};
 use crate::continuity::side_continuity;
 use crate::{
     ImportSettings, TriangleScene, box_space_scene, convert, convert_box_space, load_scene,
@@ -28,10 +28,14 @@ fn fixture(name: &str) -> TriangleScene {
 }
 
 /// The chart invariant, checked from the outside: no emitted chart may
-/// contain a 4-adjacent covered pair whose edge the continuity oracle
-/// labels cut — that adjacency renders as a fabricated wall (the bunny
-/// ear spikes). The oracle recomputes capture-side state independently of
-/// the pipeline under test.
+/// contain an 8-adjacent (orthogonally or diagonally touching) covered
+/// pair whose edge the continuity oracle labels cut — that adjacency
+/// renders as a fabricated wall (the bunny ear spikes). Diagonal pairs are
+/// checked because the renderer's tent kernel blends every texel of a
+/// 4-connected component within its support, which reaches diagonal
+/// centers, so a diagonal contact across a silhouette fabricates surface
+/// exactly like an orthogonal one. The oracle recomputes capture-side
+/// state independently of the pipeline under test.
 fn assert_no_fabricated_adjacency(name: &str, settings: &ImportSettings) {
     let scene = fixture(name);
     let (box_scene, bounds) =
@@ -45,7 +49,7 @@ fn assert_no_fabricated_adjacency(name: &str, settings: &ImportSettings) {
         let covered = |x: u32, y: u32| chart.rgba()[(y * side.width + x) as usize][3] != 0;
         for y in 0..side.height {
             for x in 0..side.width {
-                for (nx, ny) in [(x + 1, y), (x, y + 1)] {
+                for (nx, ny) in forward_neighbor_pairs(x, y) {
                     if nx >= side.width || ny >= side.height {
                         continue;
                     }
